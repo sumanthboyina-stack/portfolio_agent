@@ -1,0 +1,44 @@
+# Compliance restricted list.
+# Tickers here are blocked from new recommendations.
+# reason: human-readable explanation for the restriction.
+restricted:
+  - ticker: XYZ
+    reason: "Material non-public information (MNPI) — pending M&A announcement"
+
+  - ticker: ACME
+    reason: "Regulatory investigation — pending SEC enforcement action"
+
+# To add a restriction:
+#   - ticker: TICKER
+#     reason: "Your reason here"
+
+
+# ── Pipeline phase skip list ───────────────────────────────────────────────────
+# Tickers here are silently skipped in the specified pipeline phases.
+#
+# phases: list any subset of [news, research, fundamentals], or use [all]
+#   [research]              → skip only in research phase
+#   [research, fundamentals]→ skip in both research and fundamentals
+#   [all]                   → skip in every phase; treated as "complete" for the day
+#
+# These tickers continue to participate in phases NOT listed.
+# Examples: ETFs have no broker data (skip research); delisted tickers skip all.
+pipeline_skip:
+  IVV:
+    phases: [research, fundamentals]
+    reason: "ETF — quoteSummary 404 (no fundamentals or broker data)"
+  VOO:
+    phases: [research, fundamentals]
+    reason: "ETF — quoteSummary 404 (no fundamentals or broker data)"
+  GRFXY:
+    phases: [research]
+    reason: "Foreign ADR — quoteSummary 404 (no broker data available)"
+  SQ:
+    phases: [research]
+    reason: "quoteSummary 404 (Symbol not found / renamed)"
+  AXT:
+    phases: [research]
+    reason: "quoteSummary 404 (no fundamentals data found)"
+  AAR:
+    phases: [research]
+    reason: "quoteSummary 404 (no fundamentals data found)"

@@ -1,0 +1,87 @@
+holdings:
+- ticker: AAPL
+  shares: 50.139
+  account: Vanguard
+  broker: vanguard
+- ticker: AAPL
+  shares: 10.0
+  avg_cost: 132.33
+  account: Individual - TOD
+  broker: fidelity
+- ticker: AJG
+  shares: 229.5324
+  avg_cost: 242.31
+  account: Individual - TOD
+  broker: fidelity
+- ticker: AMZN
+  shares: 6.0
+  avg_cost: 106.03
+  account: Individual - TOD
+  broker: fidelity
+- ticker: COST
+  shares: 5.25
+  account: Vanguard
+  broker: vanguard
+- ticker: GOOG
+  shares: 28.227
+  account: Vanguard
+  broker: vanguard
+- ticker: GOOGL
+  shares: 50.406
+  account: Vanguard
+  broker: vanguard
+- ticker: GRFXY
+  shares: 25.0
+  account: Vanguard
+  broker: vanguard
+- ticker: IVV
+  shares: 18.532
+  account: Vanguard
+  broker: vanguard
+- ticker: KO
+  shares: 1.126
+  account: Vanguard
+  broker: vanguard
+- ticker: LLY
+  shares: 3.0
+  avg_cost: 347.25
+  account: Individual - TOD
+  broker: fidelity
+- ticker: LULU
+  shares: 99.0
+  account: Vanguard
+  broker: vanguard
+- ticker: META
+  shares: 5.0
+  avg_cost: 99.16
+  account: Individual - TOD
+  broker: fidelity
+- ticker: MSFT
+  shares: 39.476
+  account: Vanguard
+  broker: vanguard
+- ticker: NVDA
+  shares: 74.0
+  avg_cost: 97.26
+  account: Individual - TOD
+  broker: fidelity
+- ticker: RIVN
+  shares: 200.0
+  account: Vanguard
+  broker: vanguard
+- ticker: TSLA
+  shares: 55.0
+  account: Vanguard
+  broker: vanguard
+- ticker: VOO
+  shares: 5.503
+  account: Vanguard
+  broker: vanguard
+- ticker: WMT
+  shares: 120.0
+  account: Vanguard
+  broker: vanguard
+- ticker: XOM
+  shares: 24.833
+  account: Vanguard
+  broker: vanguard
