@@ -257,15 +257,47 @@ with st.sidebar:
     )
 
     st.divider()
-    _all_model_names = _get_model_names()
-    model_filter: list[str] = st.multiselect(
-        "Model filter",
-        options=_all_model_names,
-        default=[],
-        placeholder="All models",
-        help="Filter all metrics and predictions to only those produced by selected model(s). Leave empty to show all.",
+
+    # ── Model filter ─────────────────────────────────────────────────────────
+    st.markdown(
+        '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 8px">'
+        'Model filter</p>',
+        unsafe_allow_html=True,
     )
-    _model_filter: list[str] | None = model_filter if model_filter else None
+    _HIGHER_MODELS = frozenset({'Claude-Sonnet', 'GPT-4o', 'Claude-Sonnet + GPT-4o'})
+
+    _all_model_names = _get_model_names()
+    _higher_names = [m for m in _all_model_names if m in _HIGHER_MODELS]
+    _lower_names  = [m for m in _all_model_names if m not in _HIGHER_MODELS]
+
+    # Options: "All models" + each higher model individually + "Lower reasoning" (grouped)
+    _radio_options = ["All models"] + _higher_names + (["Lower reasoning"] if _lower_names else [])
+
+    _model_sel = st.radio(
+        "model_filter",
+        _radio_options,
+        label_visibility="collapsed",
+        key="val_model_radio",
+    )
+
+    if _model_sel == "All models":
+        _model_filter: list[str] | None = None
+        st.caption("All predictions — no model filter applied")
+    elif _model_sel == "Lower reasoning":
+        _model_filter = _lower_names
+        # Show individual names so user knows what's included in the group
+        st.markdown(
+            '<div style="margin-top:4px">' +
+            "".join(
+                f'<div style="font-size:0.68rem;color:#6B7280;padding:1px 0">⚡ {m}</div>'
+                for m in _lower_names
+            ) + '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # Individual higher-reasoning model selected
+        _model_filter = [_model_sel]
+        st.caption(f"🧠 Higher reasoning model")
 
 # ── Page header ───────────────────────────────────────────────────────────────
 
@@ -1344,9 +1376,13 @@ with tabs[4]:
             o_opts = sorted({p["outcome"] for p in preds if p.get("outcome")})
             o_filter = st.multiselect("Outcome", o_opts, default=o_opts, key="pred_tab_o")
 
-        filtered = [p for p in preds
-                    if (not h_filter or p.get("horizon_days") in h_filter)
-                    and (not o_filter or p.get("outcome") in o_filter)]
+        filtered = sorted(
+            [p for p in preds
+             if (not h_filter or p.get("horizon_days") in h_filter)
+             and (not o_filter or p.get("outcome") in o_filter)],
+            key=lambda p: p.get("prediction_date") or "",
+            reverse=True,
+        )
 
         outcome_icon = {
             "strong_correct":       "✅",

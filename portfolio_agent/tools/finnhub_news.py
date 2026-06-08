@@ -15,9 +15,12 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
+import logging
+
 import requests
 
 _API_KEY = os.getenv("FINNHUB_API_KEY", "")
+_log = logging.getLogger(__name__)
 # FINNHUB_SECRET is only for verifying incoming webhook calls FROM Finnhub to your server.
 # It is NOT sent in outbound requests — the API key token param is sufficient for those.
 _BASE    = "https://finnhub.io/api/v1"
@@ -57,7 +60,8 @@ def fetch_company_news(ticker: str, max_age_hours: int = 24) -> list[dict]:
         )
         resp.raise_for_status()
         items = resp.json() or []
-    except Exception:
+    except Exception as exc:
+        _log.warning("finnhub company-news failed for %s: %s", ticker, exc)
         return []
 
     articles: list[dict] = []

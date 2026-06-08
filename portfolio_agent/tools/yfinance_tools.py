@@ -6,8 +6,12 @@ import json
 from datetime import date, timedelta
 from typing import Optional
 
+import logging
+
 import pandas as pd
 import yfinance as yf
+
+_log = logging.getLogger(__name__)
 
 
 def _safe_float(v) -> float | None:
@@ -33,7 +37,8 @@ def get_close(ticker: str, date_str: str) -> Optional[float]:
         if hist.empty:
             return None
         return float(hist["Close"].iloc[0])
-    except Exception:
+    except Exception as exc:
+        _log.warning("yfinance get_close failed for %s on %s: %s", ticker, date_str, exc)
         return None
 
 

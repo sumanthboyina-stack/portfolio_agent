@@ -167,7 +167,7 @@ with right:
         key="remove_tickers",
     )
     if to_remove:
-        if st.button(f"Remove {len(to_remove)} ticker(s)", use_container_width=True):
+        if st.button(f"Remove {len(to_remove)} ticker(s)", use_container_width=True, type="primary"):
             remove_set = set(to_remove)
             new_list = [t for t in wl_data.get("tickers", []) if str(t).upper() not in remove_set]
             wl_data["tickers"] = new_list

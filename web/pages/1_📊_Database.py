@@ -1,4 +1,4 @@
-"""Database viewer — today's pipeline output only."""
+"""Database viewer — browse pipeline output by date."""
 
 from __future__ import annotations
 
@@ -23,6 +23,36 @@ from web.styles import (
 _DB    = _ROOT / "data" / "portfolio.db"
 _TODAY = date.today().isoformat()
 
+
+def _available_dates() -> list[str]:
+    """Return all distinct dates that have data across the main tables, newest first."""
+    if not _DB.exists():
+        return [_TODAY]
+    queries = [
+        "SELECT DISTINCT DATE(as_of_date)   FROM fundamentals",
+        "SELECT DISTINCT DATE(date)          FROM news_daily_update",
+        "SELECT DISTINCT DATE(raw_fetched_at) FROM research",
+        "SELECT DISTINCT DATE(created_at)    FROM predictions",
+        "SELECT DISTINCT DATE(as_of_date)    FROM holdings",
+        "SELECT DISTINCT DATE(metric_date)   FROM metrics_rolling",
+    ]
+    dates: set[str] = set()
+    try:
+        c = sqlite3.connect(str(_DB))
+        for q in queries:
+            try:
+                for row in c.execute(q).fetchall():
+                    if row[0]:
+                        dates.add(row[0])
+            except Exception:
+                pass
+        c.close()
+    except Exception:
+        pass
+    if not dates:
+        return [_TODAY]
+    return sorted(dates, reverse=True)
+
 st.set_page_config(
     page_title="Today's Data — Portfolio Intelligence",
     page_icon="📊",
@@ -32,13 +62,92 @@ st.set_page_config(
 inject_global_css()
 top_nav("database")
 
-with st.sidebar:
-    st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Database</p>', unsafe_allow_html=True)
-
 if not _DB.exists():
-    page_header("Today's Data", icon="📊")
+    page_header("Database", icon="📊")
     st.warning("Database not found. Run `python main.py --daily` to initialise it.", icon="⚠️")
     st.stop()
+
+_avail_dates = _available_dates()
+_min_date = date.fromisoformat(_avail_dates[-1]) if _avail_dates else date.today()
+_max_date = date.today()
+
+# ── Session-state defaults for date range ─────────────────────────────────────
+if "db_date_from" not in st.session_state:
+    st.session_state.db_date_from = date.today()
+if "db_date_to" not in st.session_state:
+    st.session_state.db_date_to = date.today()
+
+with st.sidebar:
+    st.markdown(
+        '<p style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:0.1em;color:#4B5563;margin:0 0 12px">Database</p>',
+        unsafe_allow_html=True,
+    )
+
+    # Quick-select preset buttons
+    st.markdown(
+        '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 6px">'
+        'Quick select</p>',
+        unsafe_allow_html=True,
+    )
+    _qc1, _qc2 = st.columns(2)
+    with _qc1:
+        if st.button("Today",   use_container_width=True, key="qsel_today", type="primary"):
+            st.session_state.db_date_from = date.today()
+            st.session_state.db_date_to   = date.today()
+            st.rerun()
+        if st.button("30 days", use_container_width=True, key="qsel_30", type="primary"):
+            st.session_state.db_date_from = date.today() - timedelta(days=29)
+            st.session_state.db_date_to   = date.today()
+            st.rerun()
+    with _qc2:
+        if st.button("7 days",  use_container_width=True, key="qsel_7", type="primary"):
+            st.session_state.db_date_from = date.today() - timedelta(days=6)
+            st.session_state.db_date_to   = date.today()
+            st.rerun()
+        if st.button("All time",use_container_width=True, key="qsel_all", type="primary"):
+            st.session_state.db_date_from = _min_date
+            st.session_state.db_date_to   = date.today()
+            st.rerun()
+
+    st.markdown(
+        '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:10px 0 4px">'
+        'Custom range</p>',
+        unsafe_allow_html=True,
+    )
+    _range_val = st.date_input(
+        "date_range",
+        value=(st.session_state.db_date_from, st.session_state.db_date_to),
+        min_value=_min_date,
+        max_value=_max_date,
+        label_visibility="collapsed",
+        key="db_date_range",
+    )
+    # date_input returns a tuple when range is complete, single date while selecting
+    if isinstance(_range_val, (list, tuple)) and len(_range_val) == 2:
+        _DATE_FROM = _range_val[0].isoformat()
+        _DATE_TO   = _range_val[1].isoformat()
+        st.session_state.db_date_from = _range_val[0]
+        st.session_state.db_date_to   = _range_val[1]
+    else:
+        # Mid-selection — keep previous range
+        _DATE_FROM = st.session_state.db_date_from.isoformat()
+        _DATE_TO   = st.session_state.db_date_to.isoformat()
+
+    _is_single_day = _DATE_FROM == _DATE_TO
+    _is_today_only = _DATE_FROM == _TODAY and _DATE_TO == _TODAY
+
+    st.divider()
+    _span_label = "today" if _is_today_only else (
+        _DATE_FROM if _is_single_day else f"{_DATE_FROM}  →  {_DATE_TO}"
+    )
+    st.markdown(
+        f'<p style="font-size:0.7rem;color:#6B7280;line-height:1.5">'
+        f'{len(_avail_dates)} date{"s" if len(_avail_dates) != 1 else ""} with data<br>'
+        f'<span style="color:#9CA3AF">{_span_label}</span></p>',
+        unsafe_allow_html=True,
+    )
+
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -56,16 +165,38 @@ def _conn():
     return c
 
 
-def _count_today(table: str, date_col: str, extra_where: str = "") -> int:
-    """Count rows for today in a table. extra_where is ANDed in if provided."""
+def _count_for(table: str, date_col: str, date_from: str, date_to: str,
+               extra_where: str = "") -> int:
+    """Count rows between date_from and date_to (inclusive) in a table."""
     try:
-        where = f"DATE({date_col}) = ?"
+        where = f"DATE({date_col}) BETWEEN ? AND ?"
         if extra_where:
             where = f"{where} AND {extra_where}"
         with _conn() as c:
-            return c.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", [_TODAY]).fetchone()[0]
+            return c.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {where}", [date_from, date_to]
+            ).fetchone()[0]
     except Exception:
         return 0
+
+
+_HIGHER_MODELS    = ('Claude-Sonnet', 'GPT-4o', 'Claude-Sonnet + GPT-4o')
+_HIGHER_PROVIDERS = ('anthropic', 'openai')
+
+
+def _model_tier_sql(tier: str,
+                    name_col: str = "model_name",
+                    prov_col: str = "model_provider") -> tuple[str, list]:
+    """Returns (WHERE fragment, params) for model tier filtering on predictions table."""
+    if tier == "Higher reasoning":
+        ph = ','.join('?' * len(_HIGHER_MODELS))
+        return (f"({name_col} IN ({ph}) OR {prov_col} IN (?,?))",
+                list(_HIGHER_MODELS) + list(_HIGHER_PROVIDERS))
+    if tier == "Lower reasoning":
+        ph = ','.join('?' * len(_HIGHER_MODELS))
+        return (f"NOT ({name_col} IN ({ph}) OR {prov_col} IN (?,?))",
+                list(_HIGHER_MODELS) + list(_HIGHER_PROVIDERS))
+    return "1=1", []
 
 
 def _pj(v, default=None):
@@ -140,18 +271,27 @@ def _aggrid(df: pd.DataFrame, col_defs: list[dict], height: int = 420,
     return list(sel) if sel else []
 
 
-# ── Today's counts ────────────────────────────────────────────────────────────
-cnt_fund = _count_today("fundamentals",      "as_of_date")
-cnt_news = _count_today("news_daily_update", "date", extra_where="row_type = 'ticker'")
-cnt_res  = _count_today("research",          "raw_fetched_at")
-cnt_pred = _count_today("predictions",       "created_at")
-cnt_hold = _count_today("holdings",          "as_of_date")
-cnt_metr = _count_today("metrics_rolling",   "metric_date")
+# ── Counts for selected range ─────────────────────────────────────────────────
+cnt_fund = _count_for("fundamentals",      "as_of_date",     _DATE_FROM, _DATE_TO)
+cnt_news = _count_for("news_daily_update", "date",           _DATE_FROM, _DATE_TO, extra_where="row_type = 'ticker'")
+cnt_res  = _count_for("research",          "raw_fetched_at", _DATE_FROM, _DATE_TO)
+cnt_pred = _count_for("predictions",       "created_at",     _DATE_FROM, _DATE_TO)
+cnt_hold = _count_for("holdings",          "as_of_date",     _DATE_FROM, _DATE_TO)
+cnt_metr = _count_for("metrics_rolling",   "metric_date",    _DATE_FROM, _DATE_TO)
+
+if _is_single_day:
+    _date_display = datetime.strptime(_DATE_FROM, "%Y-%m-%d").strftime("%B %d, %Y")
+    if _is_today_only:
+        _date_display += "  · today"
+else:
+    _df = datetime.strptime(_DATE_FROM, "%Y-%m-%d").strftime("%b %d")
+    _dt = datetime.strptime(_DATE_TO,   "%Y-%m-%d").strftime("%b %d, %Y")
+    _date_display = f"{_df} – {_dt}"
 
 page_header(
-    "Today's Data",
+    "Database",
     subtitle=(
-        f"{datetime.now().strftime('%B %d, %Y')}  ·  "
+        f"{_date_display}  ·  "
         f"{cnt_fund} fundamentals · {cnt_news} news · "
         f"{cnt_res} research · {cnt_pred} predictions"
     ),
@@ -180,9 +320,9 @@ with tab1:
                            fundamental_score, summary, key_strengths, key_risks,
                            model_name, model_provider
                    FROM fundamentals
-                   WHERE DATE(as_of_date) = ?
+                   WHERE DATE(as_of_date) BETWEEN ? AND ?
                    ORDER BY ticker""",
-                [_TODAY],
+                [_DATE_FROM, _DATE_TO],
             ).fetchall()
     except Exception as exc:
         st.error(f"Query error: {exc}"); rows = []
@@ -190,7 +330,7 @@ with tab1:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No fundamentals data for {_TODAY} yet.", icon="💡")
+        st.info(f"No fundamentals data between {_DATE_FROM} and {_DATE_TO}.", icon="💡")
     else:
         df = raw_df.copy()
         df["revenue_growth_yoy_pct"] = pd.to_numeric(df["revenue_growth_yoy_pct"], errors="coerce").round(1)
@@ -294,9 +434,9 @@ with tab2:
                            source, impacted_tickers
                            {_model_sel}
                    FROM news_daily_update
-                   WHERE row_type = 'ticker' AND date = ?
+                   WHERE row_type = 'ticker' AND DATE(date) BETWEEN ? AND ?
                    ORDER BY ticker""",
-                [_TODAY],
+                [_DATE_FROM, _DATE_TO],
             ).fetchall()
     except Exception as exc:
         st.error(f"Query error: {exc}"); rows = []
@@ -304,7 +444,7 @@ with tab2:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No news records for {_TODAY} yet.", icon="📰")
+        st.info(f"No news records between {_DATE_FROM} and {_DATE_TO}.", icon="📰")
     else:
         df = raw_df.copy()
         df["sentiment_score"] = pd.to_numeric(df["sentiment_score"], errors="coerce").round(3)
@@ -400,9 +540,9 @@ with tab3:
                            highlights, summary, last_llm_run_date,
                            model_name, model_provider
                    FROM research
-                   WHERE DATE(raw_fetched_at) = ?
+                   WHERE DATE(raw_fetched_at) BETWEEN ? AND ?
                    ORDER BY research_score DESC NULLS LAST, ticker""",
-                [_TODAY],
+                [_DATE_FROM, _DATE_TO],
             ).fetchall()
     except Exception as exc:
         st.error(f"Query error: {exc}"); rows = []
@@ -410,7 +550,7 @@ with tab3:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No research data for {_TODAY} yet.", icon="🔬")
+        st.info(f"No research data between {_DATE_FROM} and {_DATE_TO}.", icon="🔬")
     else:
         df = raw_df.copy()
         for col in ["consensus_mean","num_analysts","price_target_avg","price_target_high",
@@ -514,9 +654,9 @@ with tab4:
                            {regime_col}, reasoning, panel_summary,
                            changed_from_previous, previous_prediction, model_name
                    FROM predictions
-                   WHERE DATE(created_at) = ?
+                   WHERE DATE(created_at) BETWEEN ? AND ?
                    ORDER BY composite_score DESC NULLS LAST, ticker""",
-                [_TODAY],
+                [_DATE_FROM, _DATE_TO],
             ).fetchall()
     except Exception as exc:
         st.error(f"Query error: {exc}"); rows = []
@@ -524,7 +664,7 @@ with tab4:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No predictions for {_TODAY} yet. Open **APEX Chat** to generate your first recommendation.", icon="🤖")
+        st.info(f"No predictions between {_DATE_FROM} and {_DATE_TO}. Open **APEX Chat** to generate your first recommendation.", icon="🤖")
         if st.button("🤖 Go to APEX Chat", type="primary"):
             st.switch_page("pages/4_🤖_Chat.py")
     else:
@@ -650,9 +790,9 @@ with tab5:
                           current_price, current_value, account_name, account_type,
                           broker, sector, as_of_date, synced_at
                    FROM holdings
-                   WHERE DATE(as_of_date) = ?
+                   WHERE DATE(as_of_date) BETWEEN ? AND ?
                    ORDER BY current_value DESC NULLS LAST""",
-                [_TODAY],
+                [_DATE_FROM, _DATE_TO],
             ).fetchall()
     except Exception as exc:
         st.error(f"Query error: {exc}"); rows = []
@@ -660,7 +800,7 @@ with tab5:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No holdings data for {_TODAY} yet.", icon="💼")
+        st.info(f"No holdings data between {_DATE_FROM} and {_DATE_TO}.", icon="💼")
     else:
         df = raw_df.copy()
         for col in ["shares", "avg_cost", "cost_basis_total", "current_price", "current_value"]:
@@ -757,89 +897,399 @@ with tab5:
 # TAB 6 — VALIDATION METRICS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab6:
+    import plotly.graph_objects as _go
+
+    # ── Controls row: model tier filter + date scope ──────────────────────────
+    _vc1, _vc2 = st.columns([3, 2])
+    with _vc1:
+        st.markdown(
+            '<p style="font-size:0.75rem;font-weight:700;color:#374151;margin:0 0 6px">'
+            'Model tier</p>',
+            unsafe_allow_html=True,
+        )
+        _MODEL_TIER = st.radio(
+            "val_model_tier",
+            ["All models", "Higher reasoning", "Lower reasoning"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="val_model_tier_radio",
+        )
+        _tier_hint = {
+            "Higher reasoning": "Claude-Sonnet · GPT-4o · GPT-4",
+            "Lower reasoning":  "Groq · Cerebras · OpenRouter models",
+        }.get(_MODEL_TIER, "All predictions — no model filter applied")
+        st.caption(_tier_hint)
+
+    with _vc2:
+        st.markdown(
+            '<p style="font-size:0.75rem;font-weight:700;color:#374151;margin:0 0 6px">'
+            'Date scope</p>',
+            unsafe_allow_html=True,
+        )
+        _VAL_SCOPE = st.radio(
+            "val_date_scope",
+            ["All time", "Use sidebar range"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="val_date_scope_radio",
+        )
+
+    # Validation uses all-time by default (predictions mature over weeks)
+    if _VAL_SCOPE == "Use sidebar range":
+        _VAL_FROM, _VAL_TO = _VAL_FROM, _VAL_TO
+    else:
+        _VAL_FROM = "2000-01-01"
+        _VAL_TO   = _TODAY
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    _TIER_SQL, _TIER_PARAMS = _model_tier_sql(_MODEL_TIER)
+
+    # ── Per-model metrics from predictions (respects date + tier filter) ──────
     try:
         with _conn() as c:
-            rows = c.execute(
-                """SELECT metric_date, horizon_days, segment, lookback_days,
+            # All evaluated predictions in date range, filtered by model tier
+            model_rows = c.execute(
+                f"""SELECT model_name, model_provider,
+                          COUNT(*) as total,
+                          SUM(CASE WHEN actual_direction = predicted_direction THEN 1 ELSE 0 END) as correct,
+                          CAST(SUM(CASE WHEN actual_direction = predicted_direction THEN 1 ELSE 0 END) AS FLOAT)
+                              / NULLIF(COUNT(*), 0) as dir_acc,
+                          AVG(excess_return) as avg_excess,
+                          AVG(brier_score) as avg_brier,
+                          AVG(CASE WHEN in_predicted_range = 1 THEN 1.0 ELSE 0.0 END) as in_range_pct,
+                          AVG(conviction_score) as avg_conviction,
+                          SUM(CASE WHEN conviction_score >= 7 AND actual_direction = predicted_direction THEN 1 ELSE 0 END) as hi_conv_correct,
+                          SUM(CASE WHEN conviction_score >= 7 THEN 1 ELSE 0 END) as hi_conv_total
+                   FROM predictions
+                   WHERE evaluation_status = 'evaluated'
+                   AND DATE(created_at) BETWEEN ? AND ?
+                   AND {_TIER_SQL}
+                   GROUP BY model_name, model_provider
+                   ORDER BY dir_acc DESC NULLS LAST""",
+                [_VAL_FROM, _VAL_TO] + _TIER_PARAMS,
+            ).fetchall()
+
+            # Rolling metrics from metrics_rolling (date-filtered only, no model column)
+            rolling_rows = c.execute(
+                """SELECT metric_date, horizon_days, lookback_days,
                           directional_accuracy, in_range_pct, mean_excess_return,
                           mean_error_magnitude, high_conviction_accuracy,
                           low_conviction_accuracy, brier_score, mean_log_loss,
-                          num_predictions, computed_at, system_version
+                          num_predictions, computed_at, system_version, segment
                    FROM metrics_rolling
-                   WHERE metric_date = ?
-                   ORDER BY horizon_days""",
-                [_TODAY],
+                   WHERE metric_date BETWEEN ? AND ?
+                   ORDER BY lookback_days""",
+                [_VAL_FROM, _VAL_TO],
             ).fetchall()
+
+            # Trend: dir accuracy per date (from predictions, tier-filtered)
+            trend_rows = c.execute(
+                f"""SELECT DATE(created_at) as pred_date,
+                          CAST(SUM(CASE WHEN actual_direction = predicted_direction THEN 1 ELSE 0 END) AS FLOAT)
+                              / NULLIF(COUNT(*), 0) as dir_acc,
+                          AVG(excess_return) as avg_excess,
+                          COUNT(*) as n
+                   FROM predictions
+                   WHERE evaluation_status = 'evaluated'
+                   AND DATE(created_at) BETWEEN ? AND ?
+                   AND {_TIER_SQL}
+                   GROUP BY DATE(created_at)
+                   ORDER BY pred_date""",
+                [_VAL_FROM, _VAL_TO] + _TIER_PARAMS,
+            ).fetchall()
+
     except Exception as exc:
-        st.error(f"Query error: {exc}"); rows = []
+        st.error(f"Query error: {exc}")
+        model_rows = []
+        rolling_rows = []
+        trend_rows = []
 
-    raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    model_df   = pd.DataFrame([dict(r) for r in model_rows])   if model_rows   else pd.DataFrame()
+    rolling_df = pd.DataFrame([dict(r) for r in rolling_rows]) if rolling_rows else pd.DataFrame()
+    trend_df   = pd.DataFrame([dict(r) for r in trend_rows])   if trend_rows   else pd.DataFrame()
 
-    if raw_df.empty:
-        st.info(f"No validation metrics for {_TODAY} yet. Metrics are computed after predictions mature.", icon="📈")
+    # ── helpers ───────────────────────────────────────────────────────────────
+    def _pct(v):
+        return f"{v*100:.1f}%" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—"
+    def _flt(v, d=4):
+        return f"{v:.{d}f}" if v is not None and not (isinstance(v, float) and pd.isna(v)) else "—"
+    def _acc_color(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)): return NEUTRAL
+        return SUCCESS if v >= 0.55 else (WARNING if v >= 0.45 else DANGER)
+    def _rtn_color(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)): return NEUTRAL
+        return SUCCESS if v > 0 else DANGER
+    def _brier_color(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)): return NEUTRAL
+        return SUCCESS if v < 0.2 else (WARNING if v < 0.3 else DANGER)
+
+    def _is_higher(model_name, provider):
+        return (model_name in _HIGHER_MODELS or provider in _HIGHER_PROVIDERS)
+
+    if model_df.empty and rolling_df.empty:
+        st.info(f"No validation metrics between {_VAL_FROM} and {_VAL_TO}. "
+                f"Metrics are computed after predictions mature.", icon="📈")
     else:
-        df = raw_df.copy()
-        pct_cols = ["directional_accuracy", "in_range_pct", "high_conviction_accuracy",
-                    "low_conviction_accuracy"]
-        for col in pct_cols + ["mean_excess_return", "mean_error_magnitude",
-                               "brier_score", "mean_log_loss"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").round(4)
+        tier_badge = {"Higher reasoning": "🧠 Higher reasoning models",
+                      "Lower reasoning": "⚡ Lower reasoning models"}.get(_MODEL_TIER, "📊 All models")
 
-        sm_cols = st.columns(max(len(df), 1))
-        for i, (_, mrow) in enumerate(df.iterrows()):
-            h  = mrow.get("horizon_days", "?")
-            da = mrow.get("directional_accuracy")
-            with sm_cols[i]:
-                st.metric(
-                    f"{h}d horizon",
-                    f"{da*100:.0f}% dir. acc" if da is not None else "—",
-                    delta=f"{mrow.get('mean_excess_return',0)*100:+.1f}% excess rtn" if mrow.get("mean_excess_return") is not None else None,
+        # ── Overall KPI cards (from model_df aggregate, tier-filtered) ────────
+        if not model_df.empty:
+            for col in ["dir_acc","avg_excess","avg_brier","in_range_pct"]:
+                model_df[col] = pd.to_numeric(model_df[col], errors="coerce")
+
+            total_preds = int(model_df["total"].sum())
+            total_correct = int(model_df["correct"].sum())
+            overall_da  = total_correct / total_preds if total_preds else None
+            overall_er  = model_df["avg_excess"].mean() if not model_df["avg_excess"].isna().all() else None
+            overall_ir  = model_df["in_range_pct"].mean() if not model_df["in_range_pct"].isna().all() else None
+            overall_bs  = model_df["avg_brier"].mean() if not model_df["avg_brier"].isna().all() else None
+
+            st.markdown(
+                f'<div style="background:#F9FAFB;border:1px solid #F3F4F6;border-radius:12px;'
+                f'padding:14px 20px;margin-bottom:18px;display:flex;align-items:center;gap:14px">'
+                f'<div style="font-size:1.4rem">📊</div>'
+                f'<div>'
+                f'<div style="font-size:0.88rem;font-weight:700;color:#111827">'
+                f'{tier_badge}  ·  {total_preds} evaluated predictions</div>'
+                f'<div style="font-size:0.76rem;color:#6B7280;margin-top:3px">'
+                f'{_VAL_FROM}  →  {_VAL_TO}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+
+            k1, k2, k3, k4 = st.columns(4)
+            def _kpi(col, label, value_str, sub, color, note):
+                col.markdown(
+                    f'<div style="background:#FFFFFF;border:1px solid #F3F4F6;border-radius:12px;'
+                    f'padding:16px 18px;border-top:3px solid {color}">'
+                    f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:0.08em;color:#9CA3AF">{label}</div>'
+                    f'<div style="font-size:1.6rem;font-weight:800;color:#111827;'
+                    f'letter-spacing:-0.03em;margin:6px 0 2px">{value_str}</div>'
+                    f'<div style="font-size:0.76rem;color:{color};font-weight:600">{sub}</div>'
+                    f'<div style="font-size:0.7rem;color:#9CA3AF;margin-top:4px">{note}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
                 )
-        st.divider()
+            _kpi(k1, "Directional Accuracy", _pct(overall_da),
+                 "Good ≥55%  ·  Random=50%", _acc_color(overall_da),
+                 "Price moved in predicted direction")
+            _kpi(k2, "Mean Excess Return", _pct(overall_er),
+                 "Positive = outperforms benchmark", _rtn_color(overall_er),
+                 "Avg return above market over window")
+            _kpi(k3, "In-Range %", _pct(overall_ir),
+                 "Higher = better calibration", SUCCESS if overall_ir and overall_ir >= 0.5 else DANGER,
+                 "Actual move inside predicted range")
+            _kpi(k4, "Brier Score", _flt(overall_bs, 4),
+                 "Lower=better  ·  Random=0.25", _brier_color(overall_bs),
+                 "Probability calibration (0=perfect)")
 
-        grid_df = df[[
-            "metric_date", "horizon_days", "lookback_days", "num_predictions",
-            "directional_accuracy", "in_range_pct", "mean_excess_return",
-            "mean_error_magnitude", "high_conviction_accuracy",
-            "low_conviction_accuracy", "brier_score", "mean_log_loss",
-            "segment", "system_version", "computed_at",
-        ]].rename(columns={
-            "metric_date":              "Date",
-            "horizon_days":             "Horizon",
-            "lookback_days":            "Lookback",
-            "num_predictions":          "# Preds",
-            "directional_accuracy":     "Dir Acc",
-            "in_range_pct":             "In Range",
-            "mean_excess_return":       "Excess Rtn",
-            "mean_error_magnitude":     "Err Mag",
-            "high_conviction_accuracy": "Hi Conv Acc",
-            "low_conviction_accuracy":  "Lo Conv Acc",
-            "brier_score":              "Brier",
-            "mean_log_loss":            "Log Loss",
-            "segment":                  "Segment",
-            "system_version":           "Version",
-            "computed_at":              "Computed",
-        })
+            st.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
 
-        section_title("Rolling Metrics", badge_text=f"{len(df)} rows", badge_color=PRIMARY)
-        st.caption("Directional accuracy and return metrics from matured predictions")
+        # ── Model Performance Comparison ──────────────────────────────────────
+        if not model_df.empty:
+            section_title("Model Performance", badge_text=tier_badge)
 
-        pct_fmt = "value != null ? (value * 100).toFixed(1) + '%' : '—'"
-        col_defs = [
-            {"field": "Date",        "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Horizon",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value + 'd'"},
-            {"field": "Lookback",    "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value + 'd'"},
-            {"field": "# Preds",     "width": 80,  "filter": "agNumberColumnFilter"},
-            {"field": "Dir Acc",     "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": pct_fmt},
-            {"field": "In Range",    "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": pct_fmt},
-            {"field": "Excess Rtn",  "width": 95,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value * 100).toFixed(2) + '%' : '—'"},
-            {"field": "Err Mag",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(4) : '—'"},
-            {"field": "Hi Conv Acc", "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": pct_fmt},
-            {"field": "Lo Conv Acc", "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": pct_fmt},
-            {"field": "Brier",       "width": 80,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(4) : '—'"},
-            {"field": "Log Loss",    "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(4) : '—'"},
-            {"field": "Segment",     "width": 100, "filter": "agTextColumnFilter"},
-            {"field": "Version",     "width": 90,  "filter": "agTextColumnFilter"},
-            {"field": "Computed",    "width": 155, "filter": "agTextColumnFilter"},
-        ]
-        _aggrid(grid_df, col_defs, height=420, key="metr_grid")
+            # Classify each row as higher or lower
+            model_df["tier"] = model_df.apply(
+                lambda r: "Higher" if _is_higher(r["model_name"], r["model_provider"]) else "Lower",
+                axis=1,
+            )
+
+            for _, mrow in model_df.iterrows():
+                mn        = mrow.get("model_name") or "Unknown"
+                mp        = mrow.get("model_provider") or ""
+                tier_tag  = mrow["tier"]
+                da        = mrow.get("dir_acc")
+                er        = mrow.get("avg_excess")
+                bs        = mrow.get("avg_brier")
+                ir        = mrow.get("in_range_pct")
+                total     = int(mrow.get("total", 0))
+                correct   = int(mrow.get("correct", 0))
+
+                tier_color = PRIMARY if tier_tag == "Higher" else "#6B7280"
+                tier_label = "🧠 Higher" if tier_tag == "Higher" else "⚡ Lower"
+
+                st.markdown(
+                    f'<div style="background:#FFFFFF;border:1px solid #F3F4F6;border-radius:12px;'
+                    f'padding:14px 18px;margin-bottom:10px;'
+                    f'border-left:4px solid {tier_color}">'
+                    # header row
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
+                    f'<div>'
+                    f'<span style="font-size:0.95rem;font-weight:700;color:#111827">{mn}</span>'
+                    f'<span style="font-size:0.72rem;color:#9CA3AF;margin-left:8px">{mp}</span>'
+                    f'</div>'
+                    f'<span style="background:{"#EFF6FF" if tier_tag=="Higher" else "#F9FAFB"};'
+                    f'color:{tier_color};font-size:0.72rem;font-weight:600;'
+                    f'padding:3px 10px;border-radius:999px;border:1px solid {"#BFDBFE" if tier_tag=="Higher" else "#E5E7EB"}">'
+                    f'{tier_label}</span>'
+                    f'</div>'
+                    # metrics row
+                    f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">'
+                    f'<div style="text-align:center">'
+                    f'<div style="font-size:1.2rem;font-weight:800;color:{_acc_color(da)}">{_pct(da)}</div>'
+                    f'<div style="font-size:0.68rem;color:#9CA3AF;font-weight:600;text-transform:uppercase;letter-spacing:0.06em">Dir Acc</div>'
+                    f'<div style="font-size:0.7rem;color:#6B7280">{correct}/{total} correct</div>'
+                    f'</div>'
+                    f'<div style="text-align:center">'
+                    f'<div style="font-size:1.2rem;font-weight:800;color:{_rtn_color(er)}">{_pct(er)}</div>'
+                    f'<div style="font-size:0.68rem;color:#9CA3AF;font-weight:600;text-transform:uppercase;letter-spacing:0.06em">Excess Rtn</div>'
+                    f'</div>'
+                    f'<div style="text-align:center">'
+                    f'<div style="font-size:1.2rem;font-weight:800;color:{_brier_color(bs)}">{_flt(bs, 3)}</div>'
+                    f'<div style="font-size:0.68rem;color:#9CA3AF;font-weight:600;text-transform:uppercase;letter-spacing:0.06em">Brier Score</div>'
+                    f'<div style="font-size:0.7rem;color:#6B7280">↓ better</div>'
+                    f'</div>'
+                    f'<div style="text-align:center">'
+                    f'<div style="font-size:1.2rem;font-weight:800;color:#374151">{_pct(ir)}</div>'
+                    f'<div style="font-size:0.68rem;color:#9CA3AF;font-weight:600;text-transform:uppercase;letter-spacing:0.06em">In Range</div>'
+                    f'</div>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+        # ── Tier summary (only for "All models" view) ─────────────────────────
+        if _MODEL_TIER == "All models" and not model_df.empty:
+            higher_rows = model_df[model_df["tier"] == "Higher"]
+            lower_rows  = model_df[model_df["tier"] == "Lower"]
+
+            if not higher_rows.empty and not lower_rows.empty:
+                section_title("Higher vs Lower Reasoning")
+                tc1, tc2 = st.columns(2)
+                for tcol, trows, tlabel, tcolor in [
+                    (tc1, higher_rows, "🧠 Higher Reasoning", PRIMARY),
+                    (tc2, lower_rows,  "⚡ Lower Reasoning", "#6B7280"),
+                ]:
+                    ht = int(trows["total"].sum())
+                    hc = int(trows["correct"].sum())
+                    hda = hc / ht if ht else None
+                    her = trows["avg_excess"].mean() if not trows["avg_excess"].isna().all() else None
+                    hbs = trows["avg_brier"].mean()  if not trows["avg_brier"].isna().all()  else None
+                    models_list = ", ".join(str(n) for n in trows["model_name"].dropna().tolist())
+                    tcol.markdown(
+                        f'<div style="background:#FFFFFF;border:1px solid #F3F4F6;border-radius:12px;'
+                        f'padding:16px 18px;border-top:3px solid {tcolor}">'
+                        f'<div style="font-size:0.85rem;font-weight:700;color:{tcolor};margin-bottom:10px">{tlabel}</div>'
+                        f'<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #F9FAFB">'
+                        f'<span style="font-size:0.8rem;color:#6B7280">Dir Accuracy</span>'
+                        f'<span style="font-size:0.8rem;font-weight:700;color:{_acc_color(hda)}">{_pct(hda)}</span></div>'
+                        f'<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #F9FAFB">'
+                        f'<span style="font-size:0.8rem;color:#6B7280">Mean Excess Return</span>'
+                        f'<span style="font-size:0.8rem;font-weight:700;color:{_rtn_color(her)}">{_pct(her)}</span></div>'
+                        f'<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #F9FAFB">'
+                        f'<span style="font-size:0.8rem;color:#6B7280">Brier Score</span>'
+                        f'<span style="font-size:0.8rem;font-weight:700;color:{_brier_color(hbs)}">{_flt(hbs,3)}</span></div>'
+                        f'<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #F9FAFB">'
+                        f'<span style="font-size:0.8rem;color:#6B7280">Predictions</span>'
+                        f'<span style="font-size:0.8rem;font-weight:700;color:#374151">{ht}</span></div>'
+                        f'<div style="margin-top:10px;font-size:0.7rem;color:#9CA3AF;line-height:1.6">'
+                        f'Models: {models_list}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+        # ── Directional accuracy trend (tier-filtered) ────────────────────────
+        if not trend_df.empty and len(trend_df) >= 2:
+            trend_df["dir_acc_pct"] = (pd.to_numeric(trend_df["dir_acc"], errors="coerce") * 100).round(1)
+            trend_df = trend_df.dropna(subset=["dir_acc_pct"])
+            if len(trend_df) >= 2:
+                section_title("Directional Accuracy Trend", badge_text=f"Last {len(trend_df)} dates · {tier_badge}")
+                fig = _go.Figure()
+                fig.add_hline(y=50, line_dash="dot", line_color="#E5E7EB",
+                              annotation_text="50% (random)", annotation_position="right")
+                fig.add_hline(y=55, line_dash="dash", line_color="#D1FAE5",
+                              annotation_text="55% (target)", annotation_position="right")
+                fig.add_trace(_go.Scatter(
+                    x=trend_df["pred_date"],
+                    y=trend_df["dir_acc_pct"],
+                    mode="lines+markers",
+                    name="Dir. Accuracy",
+                    line=dict(color=PRIMARY if _MODEL_TIER == "Higher reasoning" else
+                              ("#6B7280" if _MODEL_TIER == "Lower reasoning" else "#2563EB"), width=2.5),
+                    marker=dict(size=6),
+                    hovertemplate="%{x}<br>Dir Acc: %{y:.1f}%<br>n=%{customdata}<extra></extra>",
+                    customdata=trend_df["n"],
+                ))
+                fig.update_layout(
+                    height=260, margin=dict(l=0, r=40, t=10, b=0),
+                    paper_bgcolor="white", plot_bgcolor="white",
+                    yaxis=dict(title="Directional Accuracy %", ticksuffix="%",
+                               gridcolor="#F9FAFB", range=[0, 100],
+                               title_font=dict(size=11), tickfont=dict(size=10)),
+                    xaxis=dict(gridcolor="#F9FAFB", tickfont=dict(size=10)),
+                    legend=dict(font=dict(size=10)),
+                    font=dict(family="Inter, sans-serif"),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        # ── Lookback window breakdown (from metrics_rolling, date only) ───────
+        if not rolling_df.empty:
+            rolling_df_num = rolling_df.copy()
+            for col in ["directional_accuracy","mean_excess_return","num_predictions","lookback_days","brier_score"]:
+                rolling_df_num[col] = pd.to_numeric(rolling_df_num[col], errors="coerce")
+
+            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+            note = " (not model-filtered — metrics_rolling has no model column)" if _MODEL_TIER != "All models" else ""
+            section_title("Rolling Window Breakdown", badge_text=f"metrics_rolling{note}")
+
+            for lb in sorted(rolling_df_num["lookback_days"].dropna().unique()):
+                lb_rows = rolling_df_num[rolling_df_num["lookback_days"] == lb]
+                if lb_rows.empty: continue
+                lb_row = lb_rows.iloc[0]
+                lb_da = lb_row.get("directional_accuracy")
+                lb_er = lb_row.get("mean_excess_return")
+                lb_n  = int(lb_row.get("num_predictions", 0))
+                st.markdown(
+                    f'<div style="background:#FFFFFF;border:1px solid #F3F4F6;border-radius:10px;'
+                    f'padding:12px 16px;margin-bottom:8px;display:flex;'
+                    f'justify-content:space-between;align-items:center">'
+                    f'<div>'
+                    f'<div style="font-size:0.85rem;font-weight:700;color:#111827">'
+                    f'{int(lb)}-day lookback window</div>'
+                    f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:2px">'
+                    f'{lb_n} predictions evaluated</div>'
+                    f'</div>'
+                    f'<div style="text-align:right">'
+                    f'<div style="font-size:0.9rem;font-weight:800;color:{_acc_color(lb_da)}">'
+                    f'{_pct(lb_da)}</div>'
+                    f'<div style="font-size:0.72rem;color:{_rtn_color(lb_er)};font-weight:600">'
+                    f'excess rtn {_pct(lb_er)}</div>'
+                    f'</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ── Raw data expander ──────────────────────────────────────────────────
+        with st.expander("Raw model data", expanded=False):
+            if not model_df.empty:
+                disp = model_df[["model_name","model_provider","tier","total","correct",
+                                  "dir_acc","avg_excess","avg_brier","in_range_pct"]].copy()
+                for c in ["dir_acc","avg_excess","avg_brier","in_range_pct"]:
+                    disp[c] = disp[c].round(4)
+                disp = disp.rename(columns={
+                    "model_name":"Model","model_provider":"Provider","tier":"Tier",
+                    "total":"Total","correct":"Correct",
+                    "dir_acc":"Dir Acc","avg_excess":"Excess Rtn",
+                    "avg_brier":"Brier","in_range_pct":"In Range",
+                })
+                col_defs2 = [
+                    {"field":"Model",      "width":180, "filter":"agTextColumnFilter",   "pinned":"left"},
+                    {"field":"Provider",   "width":110, "filter":"agTextColumnFilter"},
+                    {"field":"Tier",       "width":90,  "filter":"agTextColumnFilter"},
+                    {"field":"Total",      "width":80,  "filter":"agNumberColumnFilter"},
+                    {"field":"Correct",    "width":80,  "filter":"agNumberColumnFilter"},
+                    {"field":"Dir Acc",    "width":90,  "filter":"agNumberColumnFilter",
+                     "valueFormatter":"value != null ? (value*100).toFixed(1)+'%' : '—'"},
+                    {"field":"Excess Rtn", "width":100, "filter":"agNumberColumnFilter",
+                     "valueFormatter":"value != null ? (value*100).toFixed(2)+'%' : '—'"},
+                    {"field":"Brier",      "width":80,  "filter":"agNumberColumnFilter",
+                     "valueFormatter":"value != null ? value.toFixed(4) : '—'"},
+                    {"field":"In Range",   "width":90,  "filter":"agNumberColumnFilter",
+                     "valueFormatter":"value != null ? (value*100).toFixed(1)+'%' : '—'"},
+                ]
+                _aggrid(disp, col_defs2, height=220, key="model_grid")

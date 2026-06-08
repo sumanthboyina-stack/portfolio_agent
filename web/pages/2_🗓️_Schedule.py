@@ -624,6 +624,82 @@ if st.session_state.active_pid:
 
 job_is_alive = bool(st.session_state.active_pid)
 
+# ── Sidebar — Run Controls ────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown(
+        '<p style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:0.1em;color:#4B5563;margin:0 0 14px">Run Controls</p>',
+        unsafe_allow_html=True,
+    )
+
+    def _stop_job() -> None:
+        try:
+            os.kill(st.session_state.active_pid, signal.SIGTERM)
+        except Exception:
+            pass
+        st.session_state.active_pid = None
+
+    _JOB_DEFS = [
+        ("--daily",              "▶  Full Daily",   "daily",        "News + Research + Fundamentals + APEX"),
+        ("--daily-news",         "📰  News Only",    "news",         "News triage + news agent only"),
+        ("--daily-research",     "🔬  Research Only","research",     "Broker data fetch + LLM research summary"),
+        ("--daily-fundamentals", "📄  Fundamentals", "fundamentals", "EDGAR check + batch fundamentals LLM"),
+    ]
+
+    for flag, run_label, job_key, help_text in _JOB_DEFS:
+        is_this_running  = job_is_alive and st.session_state.active_job == job_key
+        is_other_running = job_is_alive and not is_this_running
+
+        if is_this_running:
+            if st.button(
+                f"⏹  Stop {run_label.split()[-1]}",
+                type="primary",
+                use_container_width=True,
+                key=f"sb_btn_{job_key}",
+                help="Click to stop this job",
+            ):
+                _stop_job()
+                st.rerun()
+        else:
+            if st.button(
+                run_label,
+                type="primary",
+                use_container_width=True,
+                key=f"sb_btn_{job_key}",
+                disabled=is_other_running,
+                help=help_text,
+            ):
+                pid, log_path, run_id = _start_job(flag)
+                st.session_state.active_pid    = pid
+                st.session_state.active_log    = str(log_path)
+                st.session_state.active_job    = job_key
+                st.session_state.active_run_id = run_id
+                st.rerun()
+
+    st.divider()
+
+    if st.button("🔄  Refresh", use_container_width=True, key="sb_refresh", type="primary"):
+        st.rerun()
+
+    if job_is_alive:
+        st.markdown(
+            f'<div style="margin-top:10px;background:rgba(37,99,235,0.15);'
+            f'border:1px solid rgba(37,99,235,0.3);border-radius:8px;padding:10px 12px">'
+            f'<div style="font-size:0.75rem;font-weight:600;color:#93C5FD">🔄 Running</div>'
+            f'<div style="font-size:0.7rem;color:#6B7280;margin-top:3px">'
+            f'PID {st.session_state.active_pid}</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<p style="font-size:0.7rem;color:#4B5563;margin-top:8px;line-height:1.5">'
+            'Running job turns into <strong style="color:#9CA3AF">⏹ Stop</strong>. '
+            'Other buttons disable while a job is active.</p>',
+            unsafe_allow_html=True,
+        )
+
+
 # ── Page header ───────────────────────────────────────────────────────────────
 
 page_header(
@@ -699,78 +775,6 @@ else:
             )
         else:
             st.info("No pipeline runs found yet.", icon="ℹ️")
-
-# ── Run controls ──────────────────────────────────────────────────────────────
-
-# Inject red style for the active stop button
-st.markdown(
-    '<style>'
-    'div[data-testid="stButton"] button[kind="primary"].stop-btn {'
-    '  background:#DC2626!important;border-color:#DC2626!important;'
-    '  color:white!important;}'
-    '</style>',
-    unsafe_allow_html=True,
-)
-
-_JOB_DEFS = [
-    ("--daily",              "▶ Full Daily",   "daily",        "News + Research + Fundamentals + APEX"),
-    ("--daily-news",         "📰 News",         "news",         "News triage + news agent only"),
-    ("--daily-research",     "🔬 Research",     "research",     "Broker data fetch + LLM research summary"),
-    ("--daily-fundamentals", "📄 Fundamentals", "fundamentals", "EDGAR check + batch fundamentals LLM"),
-]
-
-section_title("⚡ Run Controls")
-rc1, rc2, rc3, rc4, rc5 = st.columns(5)
-
-def _stop_job() -> None:
-    try:
-        os.kill(st.session_state.active_pid, signal.SIGTERM)
-    except Exception:
-        pass
-    st.session_state.active_pid = None
-
-for col, (flag, run_label, job_key, help_text) in zip([rc1, rc2, rc3, rc4], _JOB_DEFS):
-    with col:
-        is_this_running  = job_is_alive and st.session_state.active_job == job_key
-        is_other_running = job_is_alive and not is_this_running
-
-        if is_this_running:
-            # Same button position, stop label + red styling hint
-            if st.button(
-                f"⏹ Stop {run_label.split()[-1]}",
-                type="primary",
-                use_container_width=True,
-                key=f"btn_{job_key}",
-                help="Click to stop this job",
-            ):
-                _stop_job()
-                st.rerun()
-        else:
-            if st.button(
-                run_label,
-                type="primary" if job_key == "daily" else "secondary",
-                use_container_width=True,
-                key=f"btn_{job_key}",
-                disabled=is_other_running,
-                help=help_text,
-            ):
-                pid, log_path, run_id = _start_job(flag)
-                st.session_state.active_pid    = pid
-                st.session_state.active_log    = str(log_path)
-                st.session_state.active_job    = job_key
-                st.session_state.active_run_id = run_id
-                st.rerun()
-
-with rc5:
-    if st.button("🔄 Refresh", use_container_width=True):
-        st.rerun()
-
-st.caption(
-    "Running job button turns into **⏹ Stop** — click it to terminate. "
-    "Other buttons are disabled while a job is active."
-)
-
-st.divider()
 
 # ── Live log viewer ───────────────────────────────────────────────────────────
 

@@ -1,12 +1,16 @@
 """
-APEX Chat — AI-powered stock reasoning with persistent conversation history.
+APEX Chat -- AI-powered financial assistant with persistent conversation history.
+
+Capabilities:
+  • Full stock analysis -- 4-analyst weighted panel (Fundamentals · Research · Macro · News)
+  • General financial Q&A -- economy, Fed, rates, inflation, sectors, IPOs, market news
+  • Conversational tool-calling -- fetches live data before answering every question
+  • Every stock prediction auto-saved to the predictions DB
 
 UX pattern:
-  • Left sidebar: all chat sessions grouped by date (like Claude web)
+  • Left sidebar: all chat sessions grouped by date
   • New Chat button creates a fresh session
-  • Click any session to restore the full conversation
   • Messages streamed live with plan card + execution steps
-  • Every prediction auto-saved to predictions DB
   • Session titles auto-generated from first user message
 """
 
@@ -35,7 +39,7 @@ from web.styles import (
 )
 
 st.set_page_config(
-    page_title="APEX Chat",
+    page_title="APEX Chat · Financial AI",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -43,67 +47,41 @@ st.set_page_config(
 inject_global_css()
 top_nav("chat")
 
-# ── extra chat-specific CSS ───────────────────────────────────────────────────
+# ── Chat-specific CSS (supplements global styles.py) ──────────────────────────
 st.markdown("""
 <style>
-/* Sidebar session items */
-.session-item {
-    padding: 9px 12px;
-    border-radius: 8px;
-    cursor: pointer;
-    border: 1px solid transparent;
-    margin-bottom: 3px;
-    transition: all 0.12s;
-}
-.session-item:hover { background: #1E293B; border-color: #334155; }
-.session-item.active { background: #1E3A5F; border-color: #2563EB; }
-.session-title { font-size: 0.83rem; font-weight: 600; color: #E2E8F0;
-                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session-meta  { font-size: 0.72rem; color: #64748B; margin-top: 2px; }
-
-/* Chat message user bubble */
+/* User message bubble */
 .user-bubble {
     background: #2563EB;
     color: white;
-    border-radius: 16px 16px 4px 16px;
-    padding: 12px 16px;
+    border-radius: 18px 18px 4px 18px;
+    padding: 11px 16px;
     margin: 4px 0;
     max-width: 80%;
     margin-left: auto;
-    font-size: 0.9rem;
-    line-height: 1.5;
+    font-size: 0.88rem;
+    line-height: 1.55;
+    box-shadow: 0 2px 8px rgba(37,99,235,0.2);
 }
+
 /* Prediction card */
 .pred-card {
-    background: white;
-    border: 1px solid #E2E8F0;
+    background: #FFFFFF;
+    border: 1px solid #F3F4F6;
     border-radius: 14px;
     overflow: hidden;
     margin: 8px 0;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
 }
 .pred-header {
     padding: 16px 20px 12px;
-    border-bottom: 1px solid #F1F5F9;
+    border-bottom: 1px solid #F9FAFB;
 }
 .pred-body { padding: 16px 20px; }
 .pred-scores { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .pred-score-item label {
-    font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.04em; color: #64748B; display: block; margin-bottom: 4px;
-}
-/* History session group header */
-.date-group {
-    font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.06em; color: #475569; padding: 8px 4px 4px;
-}
-
-/* Delete button in session row */
-[data-testid="stHorizontalBlock"] [data-testid="stButton"] button[kind="secondary"] {
-    padding: 4px 8px !important;
-    min-height: 0 !important;
-    font-size: 0.75rem !important;
-    border-radius: 6px !important;
+    font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #9CA3AF; display: block; margin-bottom: 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -225,7 +203,7 @@ def _build_plan(ticker: str) -> dict:
     else:
         plan["gaps"].append("fundamentals")
         plan["sources"].append({"icon": "⚡", "label": "Fundamentals",
-                                "detail": "Not in DB — live agent will run", "live": True})
+                                "detail": "Not in DB -- live agent will run", "live": True})
 
     res = get_stored_research(ticker)
     if res:
@@ -235,7 +213,7 @@ def _build_plan(ticker: str) -> dict:
             "icon": "⚠️" if stale_7d else "✅",
             "label": "Broker Research",
             "detail": (
-                f"Last fetched {fetched} (>7d old — using cached) · {res.get('consensus','?')}"
+                f"Last fetched {fetched} (>7d old -- using cached) · {res.get('consensus','?')}"
                 if stale_7d else
                 f"Fetched {fetched} · {res.get('consensus','?')}"
             ),
@@ -244,7 +222,7 @@ def _build_plan(ticker: str) -> dict:
     else:
         plan["gaps"].append("research")
         plan["sources"].append({"icon": "⚡", "label": "Broker Research",
-                                "detail": "Not in DB — live agent will run", "live": True})
+                                "detail": "Not in DB -- live agent will run", "live": True})
 
     news_data = []
     try:
@@ -266,11 +244,11 @@ def _build_plan(ticker: str) -> dict:
         else:
             plan["gaps"].append("news")
             plan["sources"].append({"icon": "⚡", "label": "News (7d)",
-                                    "detail": "No recent records — live agent will run", "live": True})
+                                    "detail": "No recent records -- live agent will run", "live": True})
     except Exception:
         plan["gaps"].append("news")
         plan["sources"].append({"icon": "⚡", "label": "News (7d)",
-                                "detail": "DB unavailable — live agent will run", "live": True})
+                                "detail": "DB unavailable -- live agent will run", "live": True})
 
     plan["sources"].append({"icon": "📡", "label": "Macro Snapshot",
                             "detail": "VIX · 10Y yield · S&P trend (yfinance)", "live": True})
@@ -288,7 +266,7 @@ def _build_plan(ticker: str) -> dict:
         plan["sources"].append({"icon": "🆕", "label": "Prior Prediction",
                                 "detail": "First analysis for this ticker", "live": False})
 
-    # Compute dynamic weights (best-effort — use defaults if macro fetch fails)
+    # Compute dynamic weights (best-effort -- use defaults if macro fetch fails)
     try:
         from portfolio_agent.tools.reasoning_tools import get_macro_snapshot
         from portfolio_agent.tools.weight_engine import compute_dynamic_weights
@@ -338,7 +316,7 @@ def _render_plan_card(plan: dict) -> None:
             f'{", ".join(gaps)}. Results stored for future use.</div>'
         )
 
-    # Dynamic weight badge — show regime + per-source weights
+    # Dynamic weight badge -- show regime + per-source weights
     BASE = {"fundamentals": 0.40, "research": 0.30, "macro": 0.20, "news": 0.10}
     if wd and wd.get("weights"):
         w = wd["weights"]
@@ -398,7 +376,7 @@ def _render_plan_card(plan: dict) -> None:
             f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;'
             f'padding:6px 12px;margin-bottom:12px;font-size:0.78rem;color:#64748B">'
             f'📋 Fundamentals 40% · 🔬 Research 30% · 🌐 Macro 20% · 📰 News 10% '
-            f'<em>(default weights — macro fetch pending)</em></div>'
+            f'<em>(default weights -- macro fetch pending)</em></div>'
         )
 
     steps_html = "".join(
@@ -418,7 +396,7 @@ def _render_plan_card(plan: dict) -> None:
         f'<div style="background:white;border:1px solid #E2E8F0;border-radius:12px;'
         f'padding:16px 20px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">'
         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
-        f'<h4 style="margin:0;color:#0F172A;font-size:1rem">🗺️ Execution Plan — <code>{ticker}</code></h4>'
+        f'<h4 style="margin:0;color:#0F172A;font-size:1rem">🗺️ Execution Plan -- <code>{ticker}</code></h4>'
         f'</div>'
         f'{weight_badge}'
         f'{live_banner}{rows}'
@@ -468,7 +446,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         panel_html = '<div style="margin-top:14px;border-top:1px solid #F1F5F9;padding-top:12px">'
         panel_html += '<div style="margin:0 0 8px;font-size:0.8rem;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:0.05em">Panel Verdicts</div>'
         for name, key, role in names:
-            verdict = _html.escape(str(panel.get(key, "—")))
+            verdict = _html.escape(str(panel.get(key, "--")))
             panel_html += (
                 f'<div style="display:flex;gap:8px;margin-bottom:6px;font-size:0.83rem">'
                 f'<span style="font-weight:600;color:#475569;min-width:130px">{name}</span>'
@@ -494,7 +472,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
     if any(v is not None for v in [_pt_mean, _pt_median, _pt_high, _pt_low]):
         def _pt_fmt(v, cur=None):
             if v is None:
-                return '<span style="color:#94A3B8">—</span>'
+                return '<span style="color:#94A3B8">--</span>'
             s = f"${v:,.2f}"
             if cur:
                 pct = (v - cur) / cur * 100
@@ -559,11 +537,11 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
                 f'{_dico} {_rlo:+.1f}% to {_rhi:+.1f}%</span>'
                 if _rlo is not None and _rhi is not None
                 else f'<span style="color:{_dcol};font-weight:700">{_dico} {_dir}</span>'
-                if _dir else '<span style="color:#94A3B8">—</span>'
+                if _dir else '<span style="color:#94A3B8">--</span>'
             )
             _conv_str = (
                 f'<span style="font-size:0.8rem;color:#475569">{_conv}/10</span>'
-                if _conv is not None else '<span style="color:#94A3B8">—</span>'
+                if _conv is not None else '<span style="color:#94A3B8">--</span>'
             )
             _lbl = _hz_label.get(_hd, f"{_hd}d")
             rows_html += (
@@ -628,7 +606,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         if data.get("reasoning") else ""
     )
 
-    # Build as one compact string — CommonMark terminates an HTML block on a blank line,
+    # Build as one compact string -- CommonMark terminates an HTML block on a blank line,
     # so any blank line inside st.markdown HTML causes the rest to render as raw text.
     card_html = (
         f'<div class="pred-card">'
@@ -642,9 +620,9 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         f'</div>'
         f'<div style="text-align:right">'
         f'<div style="font-size:0.78rem;color:#64748B;font-weight:600;text-transform:uppercase;letter-spacing:0.04em">Composite</div>'
-        f'<div style="font-size:1.8rem;font-weight:800;color:#0F172A;line-height:1.1">{comp or "—"}'
+        f'<div style="font-size:1.8rem;font-weight:800;color:#0F172A;line-height:1.1">{comp or "--"}'
         f'<span style="font-size:1rem;color:#94A3B8">/10</span></div>'
-        f'<div style="font-size:0.78rem;color:#64748B">Confidence: {conf or "—"}/10</div>'
+        f'<div style="font-size:0.78rem;color:#64748B">Confidence: {conf or "--"}/10</div>'
         f'</div></div></div>'
         f'<div class="pred-body">'
         f'<div class="pred-scores">{scores_html}</div>'
@@ -666,18 +644,18 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
             with st.expander("📜 Prediction history for this ticker"):
                 rows = [
                     {"Date": h.get("created_at","")[:10],
-                     "Horizon": f"{h['horizon_days']}d" if h.get("horizon_days") else h.get("horizon","—"),
+                     "Horizon": f"{h['horizon_days']}d" if h.get("horizon_days") else h.get("horizon","--"),
                      "Recommendation": h.get("recommendation",""),
-                     "Direction": h.get("predicted_direction","—"),
+                     "Direction": h.get("predicted_direction","--"),
                      "Return Range": (
                          f"{h['predicted_return_low']:+.1f}% to {h['predicted_return_high']:+.1f}%"
                          if h.get("predicted_return_low") is not None and h.get("predicted_return_high") is not None
-                         else "—"
+                         else "--"
                      ),
-                     "Conviction": h.get("conviction_score","—"),
+                     "Conviction": h.get("conviction_score","--"),
                      "Confidence": h.get("confidence",""),
                      "Composite": h.get("composite_score",""),
-                     "Changed": "↑↓" if h.get("changed_from_previous") else "—"}
+                     "Changed": "↑↓" if h.get("changed_from_previous") else "--"}
                     for h in hist
                 ]
                 st.dataframe(rows, hide_index=True, use_container_width=True)
@@ -689,8 +667,54 @@ _CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web for current financial news, events, data, or facts. "
+                "Use this as a FALLBACK when internal tools (get_market_news, get_ticker_news, "
+                "get_macro_snapshot, etc.) return no relevant information, or when the question "
+                "requires real-time data that may not be in the local database -- "
+                "e.g. breaking news, recent earnings, new IPO filings, policy changes, "
+                "live price moves, or any event from the last few days."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query. Be specific -- include company name, ticker, date, or event type.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 5, max 10).",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_ticker",
+            "description": "Look up the stock ticker symbol for a company by name. Use this when the user mentions a company name and you need to find its ticker before calling other tools.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company_name": {
+                        "type": "string",
+                        "description": "Company name or search query, e.g. 'Duolingo', 'Palantir Technologies'",
+                    }
+                },
+                "required": ["company_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_ticker_news",
-            "description": "Get recent news headlines, sentiment, and themes for a stock ticker (7-day lookback).",
+            "description": "Get recent news headlines, sentiment, and themes for a specific stock ticker (7-day lookback from DB + live fallback).",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string", "description": "Stock ticker symbol"}},
@@ -701,8 +725,49 @@ _CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_market_news",
+            "description": "Get the latest general financial/market news headlines from Reuters, Yahoo Finance, CNBC, MarketWatch. Use for questions about market trends, economy, macro events, IPOs, M&A, or any broad financial news.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of headlines to return (default 20, max 30)",
+                        "default": 20,
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ipo_info",
+            "description": "Get information about recent or upcoming IPOs, or company listing details for a given ticker. Use for IPO-related questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Optional ticker of a recently IPO'd company. Leave empty for a general recent IPO list.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sector_performance",
+            "description": "Get performance data for major market sectors (Technology, Healthcare, Finance, Energy, etc.) and broad indices (S&P 500, Nasdaq, Dow Jones). Use for sector rotation questions or broad market performance.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_fundamentals",
-            "description": "Get financial fundamentals: revenue growth, net margin, FCF, debt/equity, fundamental score, key strengths and risks.",
+            "description": "Get financial fundamentals for a specific stock: revenue growth, net margin, FCF, debt/equity, fundamental score, key strengths and risks.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -714,7 +779,7 @@ _CHAT_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_research",
-            "description": "Get broker/analyst research: consensus rating, price targets (mean/median/high/low), recent upgrades and downgrades.",
+            "description": "Get broker/analyst research for a specific stock: consensus rating, price targets (mean/median/high/low), recent upgrades and downgrades.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -726,7 +791,7 @@ _CHAT_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_macro_snapshot",
-            "description": "Get current macro environment: VIX, 10-year treasury yield, S&P 500 trend, yield curve spread, regime.",
+            "description": "Get current macro environment: VIX, 10-year treasury yield, S&P 500 1-month trend, yield curve spread, macro regime.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -746,7 +811,7 @@ _CHAT_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_price_history",
-            "description": "Get price performance: latest close, period change %, 52-week high/low, average volume.",
+            "description": "Get price performance for a specific stock: latest close, period change %, 52-week high/low, average volume.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -837,10 +902,148 @@ def _chat_tool_get_price_history(ticker: str, period: str = "3mo") -> dict:
         return {"ticker": ticker.upper(), "note": f"Price data unavailable: {exc}"}
 
 
+def _chat_tool_get_market_news(limit: int = 20) -> dict:
+    """Fetch general market news from RSS feeds (Reuters, Yahoo Finance, CNBC, MarketWatch)."""
+    # Try DB-stored market news first (today's items)
+    try:
+        from portfolio_agent.tools.news_db import get_todays_market_news
+        db_result = json.loads(get_todays_market_news())
+        if db_result.get("count", 0) >= 5:
+            return {"source": "db", **db_result}
+    except Exception:
+        pass
+    # Fall back to live RSS
+    try:
+        from portfolio_agent.tools.news_sources import get_market_news
+        return {"source": "live", **json.loads(get_market_news(limit=min(limit, 30)))}
+    except Exception as exc:
+        return {"note": f"Market news temporarily unavailable: {exc}"}
+
+
+def _chat_tool_get_ipo_info(ticker: str = "") -> dict:
+    """Fetch IPO details for a specific ticker, or recent IPO activity from yfinance."""
+    try:
+        import yfinance as yf
+        if ticker:
+            t = yf.Ticker(ticker.upper())
+            info = t.info or {}
+            return {
+                "ticker": ticker.upper(),
+                "company_name": info.get("longName"),
+                "sector": info.get("sector"),
+                "industry": info.get("industry"),
+                "ipo_date": None,  # yfinance doesn't directly expose this
+                "market_cap": info.get("marketCap"),
+                "shares_outstanding": info.get("sharesOutstanding"),
+                "float_shares": info.get("floatShares"),
+                "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+                "52w_high": info.get("fiftyTwoWeekHigh"),
+                "52w_low": info.get("fiftyTwoWeekLow"),
+                "exchange": info.get("exchange"),
+                "description": (info.get("longBusinessSummary") or "")[:400],
+            }
+        # No ticker -- pull recent IPO news from RSS
+        from portfolio_agent.tools.news_sources import get_market_news
+        raw = json.loads(get_market_news(limit=30))
+        ipo_articles = [
+            a for a in raw.get("articles", [])
+            if any(kw in (a.get("title", "") + a.get("summary", "")).lower()
+                   for kw in ("ipo", "initial public offering", "goes public", "listing", "debut"))
+        ]
+        return {"source": "rss", "ipo_news": ipo_articles[:10],
+                "note": "Filtered IPO-related headlines from financial RSS feeds."}
+    except Exception as exc:
+        return {"note": f"IPO data unavailable: {exc}"}
+
+
+def _chat_tool_get_sector_performance() -> dict:
+    """Fetch performance for major sector ETFs and broad indices."""
+    try:
+        import yfinance as yf
+        symbols = {
+            "S&P 500": "^GSPC",
+            "Nasdaq": "^IXIC",
+            "Dow Jones": "^DJI",
+            "Russell 2000": "^RUT",
+            "Technology (XLK)": "XLK",
+            "Healthcare (XLV)": "XLV",
+            "Financials (XLF)": "XLF",
+            "Energy (XLE)": "XLE",
+            "Consumer Disc (XLY)": "XLY",
+            "Consumer Staples (XLP)": "XLP",
+            "Industrials (XLI)": "XLI",
+            "Materials (XLB)": "XLB",
+            "Real Estate (XLRE)": "XLRE",
+            "Utilities (XLU)": "XLU",
+            "Communication (XLC)": "XLC",
+        }
+        results = {}
+        tickers_str = " ".join(symbols.values())
+        data = yf.download(tickers_str, period="1mo", auto_adjust=True, progress=False)
+        closes = data["Close"] if "Close" in data.columns else data
+        for name, sym in symbols.items():
+            try:
+                col = closes[sym] if sym in closes.columns else None
+                if col is not None and len(col.dropna()) >= 2:
+                    start = float(col.dropna().iloc[0])
+                    end = float(col.dropna().iloc[-1])
+                    results[name] = {
+                        "symbol": sym,
+                        "latest": round(end, 2),
+                        "1mo_change_pct": round((end / start - 1) * 100, 2),
+                    }
+            except Exception:
+                continue
+        return {"period": "1 month", "sectors": results}
+    except Exception as exc:
+        return {"note": f"Sector data unavailable: {exc}"}
+
+
+def _chat_tool_web_search(query: str, max_results: int = 5) -> dict:
+    """Search the web via DuckDuckGo -- no API key required."""
+    try:
+        from ddgs import DDGS
+        results = DDGS().text(query, max_results=min(max_results, 10))
+        if not results:
+            return {"query": query, "results": [], "note": "No results found."}
+        return {
+            "query": query,
+            "results": [
+                {
+                    "title": r.get("title", ""),
+                    "url":   r.get("href", ""),
+                    "snippet": r.get("body", "")[:400],
+                }
+                for r in results
+            ],
+        }
+    except Exception as exc:
+        return {"query": query, "error": str(exc), "note": "Web search unavailable."}
+
+
+def _chat_tool_search_ticker(company_name: str) -> dict:
+    ticker, display = _search_ticker_by_name(company_name)
+    if ticker:
+        return {"company": company_name, "ticker": ticker, "name": display,
+                "note": f"Use '{ticker}' as the ticker symbol for subsequent tool calls."}
+    return {"company": company_name, "ticker": None,
+            "note": "Could not find a ticker for this company. Ask the user to provide the ticker symbol."}
+
+
 def _execute_chat_tool(name: str, args: dict) -> str:
     try:
-        if name == "get_ticker_news":
+        if name == "web_search":
+            result = _chat_tool_web_search(args.get("query", ""), args.get("max_results", 5))
+        elif name == "search_ticker":
+            result = _chat_tool_search_ticker(args.get("company_name", ""))
+        elif name == "get_ticker_news":
             result = _chat_tool_get_news(args.get("ticker", ""))
+        elif name == "get_market_news":
+            result = _chat_tool_get_market_news(args.get("limit", 20))
+        elif name == "get_ipo_info":
+            result = _chat_tool_get_ipo_info(args.get("ticker", ""))
+        elif name == "get_sector_performance":
+            result = _chat_tool_get_sector_performance()
         elif name == "get_fundamentals":
             result = _chat_tool_get_fundamentals(args.get("ticker", ""))
         elif name == "get_research":
@@ -883,19 +1086,40 @@ def _build_chat_history(messages: list[dict], limit: int = 12) -> list[dict]:
 
 
 _CHAT_SYSTEM = """\
-You are APEX Chat, a financial research assistant integrated with live market data tools.
+You are APEX Chat, an AI financial assistant with access to live market data, news, \
+fundamental research tools, and web search.
 
-You have access to tools that fetch news, fundamentals, broker research, macro data, \
-price history, and prediction history for any stock ticker.
+You can answer questions about:
+- **Individual stocks** -- fundamentals, broker research, price history, news, APEX predictions
+- **Market news** -- latest financial headlines from Reuters, CNBC, Yahoo Finance, MarketWatch
+- **Economy & macro** -- VIX, interest rates, yield curve, Fed policy, inflation, GDP trends
+- **IPOs & listings** -- recent IPOs, company debut details, upcoming listings
+- **Sectors & indices** -- sector ETF performance, S&P 500, Nasdaq, Dow Jones, Russell 2000
+- **General finance** -- bonds, currencies, commodities, crypto market trends, regulatory issues
+- **Current events** -- breaking news, recent earnings, policy changes, live market moves
 
-Behavior:
-- Always call the relevant tool(s) before answering data questions.
-- For multi-ticker comparisons, call tools for each ticker.
-- Be concise and data-driven. Use numbers from the tool results.
-- If data is missing or unavailable, say so clearly — never fabricate data.
-- Format responses with markdown: use **bold** for key metrics, bullet lists for summaries.
-- For prediction/analysis requests, tell the user to rephrase as \
-  "Analyze [TICKER]" to trigger the full APEX 4-analyst panel.
+## Tool Priority (IMPORTANT -- follow this order)
+
+1. **Internal tools first**: Always try the most relevant internal tool before web search.
+   - Stock data → get_ticker_news, get_fundamentals, get_research, get_price_history
+   - Market/macro → get_market_news, get_macro_snapshot, get_sector_performance
+   - IPOs → get_ipo_info
+   - Unknown company name → search_ticker
+
+2. **Web search as fallback**: Use `web_search` ONLY when:
+   - Internal tools returned empty, "unavailable", or clearly stale data
+   - The question is about a very recent event (last 1-3 days) likely not yet in the DB
+   - The question asks for something no internal tool covers (e.g. regulatory filing details, \
+     specific earnings call quotes, analyst price target changes from today)
+
+3. **Never fabricate**: If both internal tools and web search return nothing useful, say so \
+   clearly rather than inventing data.
+
+## Format rules
+- Use **bold** for key figures, bullet lists for multi-point summaries.
+- Cite your source when using web search results (tool name or URL).
+- For full stock investment analysis, suggest: "Type **Analyze [TICKER]** for the full \
+  4-analyst APEX panel."
 """
 
 
@@ -994,7 +1218,7 @@ def _run_chat_agent_thread(
                         })
                         messages.extend(tool_results)
                     else:
-                        # Final answer — stream it
+                        # Final answer -- stream it
                         text = msg.content or "_No response generated._"
                         q.put(("text", text))
                         q.put(("model_used", (label, provider)))
@@ -1008,7 +1232,7 @@ def _run_chat_agent_thread(
 
             except Exception as exc:
                 if _is_failover_error(exc) and (model_id, provider, label) != chat_chain[-1]:
-                    q.put(("warn", f"⚠ {label} failed — trying next model…"))
+                    q.put(("warn", f"⚠ {label} failed -- trying next model…"))
                     continue
                 q.put(("error", str(exc)))
                 q.put(("done", ""))
@@ -1090,7 +1314,7 @@ async def _apex_direct_run(ticker: str, query: str, model_id: str, label: str,
     from portfolio_agent.tools.reasoning_tools import get_full_analysis_context
 
     q.put(("info", f"🤖 Reasoning with {label} ({provider}) [no-tools]  [{chain_pos}]"))
-    q.put(("tool", "get_full_analysis_context — pre-fetching context…"))
+    q.put(("tool", "get_full_analysis_context -- pre-fetching context…"))
 
     ctx_json = get_full_analysis_context(ticker.upper())
     q.put(("result", f"get_full_analysis_context → {str(ctx_json)[:200]}…"))
@@ -1106,9 +1330,9 @@ async def _apex_direct_run(ticker: str, query: str, model_id: str, label: str,
     _cap_lines = []
     for _domain, _cap in _caps.items():
         if _cap < 10:
-            _cap_lines.append(f"  • {_domain} score ≤ {_cap} — no data in DB")
+            _cap_lines.append(f"  • {_domain} score ≤ {_cap} -- no data in DB")
     _cap_block = (
-        "\nSCORE CAPS (mandatory — exceeding these is an error):\n" + "\n".join(_cap_lines) + "\n"
+        "\nSCORE CAPS (mandatory -- exceeding these is an error):\n" + "\n".join(_cap_lines) + "\n"
         if _cap_lines else ""
     )
 
@@ -1116,9 +1340,9 @@ async def _apex_direct_run(ticker: str, query: str, model_id: str, label: str,
     _today_date = date.today()
     _sched_horizons = _get_horizons(_today_date) or [5]
     _hz_guidance = {
-        5:  "5d  (~1 week)  — focus on news flow, momentum, short-term catalysts",
-        21: "21d (~1 month) — focus on earnings drift, monthly themes, near catalysts",
-        63: "63d (~1 quarter) — focus on fundamentals, valuation, full earnings cycle",
+        5:  "5d  (~1 week)  -- focus on news flow, momentum, short-term catalysts",
+        21: "21d (~1 month) -- focus on earnings drift, monthly themes, near catalysts",
+        63: "63d (~1 quarter) -- focus on fundamentals, valuation, full earnings cycle",
     }
     _hz_lines = "\n".join(f"  • {_hz_guidance.get(h, f'{h}d')}" for h in sorted(_sched_horizons))
 
@@ -1149,7 +1373,7 @@ Question: {query}
 Using the context above (fundamentals, research, news, macro, dynamic_weights, prediction_history):
 
 1. State the weight regime and dynamic weights (from dynamic_weights in context).
-2. Have each analyst score their domain — respect any SCORE CAPS above: if the domain has no data the analyst must state "No <domain> data available" and assign a score ≤ that cap.
+2. Have each analyst score their domain -- respect any SCORE CAPS above: if the domain has no data the analyst must state "No <domain> data available" and assign a score ≤ that cap.
    DR. CHEN (fundamentals), MARCUS WEBB (research), ELENA VARGA (macro), JAMES PARK (news).
 3. Cross-examine if scores diverge > 3 pts.
 4. Compare to prior prediction if one exists.
@@ -1176,10 +1400,10 @@ End your response with EXACTLY this JSON block (no text after):
   "weight_regime": "QUIET_DAY",
   "weights_used": {{"fundamentals": 0.35, "research": 0.30, "macro": 0.20, "news": 0.15}},
   "panel_summary": {{
-    "chen_verdict": "BULLISH (7/10) — one sentence",
-    "webb_verdict": "BULLISH (7/10) — one sentence",
-    "varga_verdict": "NEUTRAL (6/10) — one sentence",
-    "park_verdict":  "NEUTRAL (6/10) — one sentence",
+    "chen_verdict": "BULLISH (7/10) -- one sentence",
+    "webb_verdict": "BULLISH (7/10) -- one sentence",
+    "varga_verdict": "NEUTRAL (6/10) -- one sentence",
+    "park_verdict":  "NEUTRAL (6/10) -- one sentence",
     "key_debate": "Panel consensus or main disagreement"
   }},
   "weight_rationale": {{
@@ -1218,7 +1442,7 @@ def _run_apex_thread(ticker: str, query: str, q: Queue) -> None:
 
         for i, (model_id, provider, label) in enumerate(reasoning_chain):
             chain_pos = f"{i+1}/{len(reasoning_chain)}"
-            # Groq models don't support ADK tool calling — use direct LiteLLM path
+            # Groq models don't support ADK tool calling -- use direct LiteLLM path
             use_direct = (provider == "groq")
             try:
                 if use_direct:
@@ -1232,7 +1456,7 @@ def _run_apex_thread(ticker: str, query: str, q: Queue) -> None:
             except Exception as exc:
                 if _is_apex_transient(exc) and i < len(reasoning_chain) - 1:
                     next_label = reasoning_chain[i + 1][2]
-                    q.put(("warn", f"⚠ {label} failed — falling back to {next_label}…"))
+                    q.put(("warn", f"⚠ {label} failed -- falling back to {next_label}…"))
                     continue
                 q.put(("error", str(exc)))
                 q.put(("done", ""))
@@ -1263,16 +1487,34 @@ def _extract_json(text: str) -> dict:
 
 # ── Session state defaults ────────────────────────────────────────────────────
 
+def _search_ticker_by_name(text: str) -> tuple[str, str] | tuple[None, None]:
+    """
+    Try to resolve a free-text company name to a ticker via yfinance Search.
+    Returns (ticker, display_name) or (None, None) if nothing found.
+    Only matches EQUITY quotes on major exchanges.
+    """
+    try:
+        import yfinance as yf
+        results = yf.Search(text, max_results=5).quotes
+        for r in results:
+            if r.get("quoteType") == "EQUITY" and r.get("symbol"):
+                return r["symbol"], r.get("longname") or r.get("shortname") or r["symbol"]
+    except Exception:
+        pass
+    return None, None
+
+
 def _init_state():
     defaults = {
-        "session_id":         None,
-        "messages":           [],     # list of {role, content, type, metadata}
-        "current_tickers":    [],
-        "awaiting_ticker":    False,
-        "pending_query":      "",
-        "session_tickers":    [],
-        "last_rec":           "",
-        "chat_no_ticker":     False,  # True when query needs no ticker (macro/general)
+        "session_id":            None,
+        "messages":              [],
+        "current_tickers":       [],
+        "awaiting_ticker":       False,
+        "pending_query":         "",
+        "session_tickers":       [],
+        "last_rec":              "",
+        "chat_no_ticker":        False,
+        "ticker_confirm":        None,  # {"ticker": str, "name": str, "query": str, "intent": str}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1310,12 +1552,15 @@ def _load_chat(session_id: str):
 # ── Sidebar: chat history ─────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("""
-    <div style="padding:8px 0 16px">
-        <h2 style="margin:0;font-size:1.05rem;font-weight:700;color:#F1F5F9">🤖 APEX Chat</h2>
-        <p style="margin:3px 0 0;font-size:0.75rem;color:#64748B">4-analyst portfolio AI</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        '<div style="padding:10px 0 16px">'
+        '<h2 style="margin:0;font-size:1rem;font-weight:700;color:#F9FAFB;'
+        'letter-spacing:-0.02em">🤖 APEX Chat</h2>'
+        '<p style="margin:4px 0 0;font-size:0.72rem;color:#4B5563;font-weight:500">'
+        'Financial AI · stocks · markets · news</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     if st.button("✏️  New conversation", type="primary", use_container_width=True):
         _new_chat()
@@ -1373,72 +1618,100 @@ with st.sidebar:
 
 # Hero (shown only when no session)
 if not st.session_state.session_id and not st.session_state.messages:
-    st.markdown("""
-    <div style="text-align:center;padding:60px 20px 30px">
-        <div style="font-size:3.5rem;margin-bottom:16px">🤖</div>
-        <h1 style="font-size:2rem;font-weight:800;color:#0F172A;margin:0">APEX</h1>
-        <p style="font-size:1.1rem;color:#64748B;margin:8px 0 0">
-            Adaptive Portfolio EXpert · 4-analyst weighted synthesis
-        </p>
-        <div style="display:flex;justify-content:center;gap:20px;margin-top:24px;flex-wrap:wrap">
-            <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;
-                        padding:10px 18px;font-size:0.85rem;color:#1E40AF;font-weight:600">
-                📋 Fundamentals <span style="color:#64748B;font-weight:400">base 40%</span>
-            </div>
-            <div style="background:#D1FAE5;border:1px solid #6EE7B7;border-radius:10px;
-                        padding:10px 18px;font-size:0.85rem;color:#065F46;font-weight:600">
-                🔬 Research <span style="color:#64748B;font-weight:400">base 30%</span>
-            </div>
-            <div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:10px;
-                        padding:10px 18px;font-size:0.85rem;color:#92400E;font-weight:600">
-                🌐 Macro <span style="color:#64748B;font-weight:400">base 20%</span>
-            </div>
-            <div style="background:#EDE9FE;border:1px solid #C4B5FD;border-radius:10px;
-                        padding:10px 18px;font-size:0.85rem;color:#4C1D95;font-weight:600">
-                📰 News <span style="color:#64748B;font-weight:400">base 10%</span>
-            </div>
-        </div>
-        <p style="color:#94A3B8;font-size:0.82rem;margin-top:10px">
-            Weights shift dynamically based on today's market regime (earnings, Fed day, macro vol…)
-        </p>
-    </div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;max-width:700px;
-                margin:0 auto 40px">
-        <div style="background:white;border:1px solid #E2E8F0;border-radius:10px;
-                    padding:14px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
-            <div style="font-size:1.4rem">📊</div>
-            <div style="font-size:0.8rem;color:#64748B;margin-top:4px">Ask about any ticker</div>
-        </div>
-        <div style="background:white;border:1px solid #E2E8F0;border-radius:10px;
-                    padding:14px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
-            <div style="font-size:1.4rem">💾</div>
-            <div style="font-size:0.8rem;color:#64748B;margin-top:4px">DB-first, live fallback</div>
-        </div>
-        <div style="background:white;border:1px solid #E2E8F0;border-radius:10px;
-                    padding:14px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
-            <div style="font-size:1.4rem">📈</div>
-            <div style="font-size:0.8rem;color:#64748B;margin-top:4px">Every pred. stored</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    _hero_html = (
+        '<div style="text-align:center;padding:52px 20px 16px">'
+        '<div style="display:inline-flex;align-items:center;justify-content:center;'
+        'width:64px;height:64px;background:#EFF6FF;border-radius:18px;'
+        'font-size:2rem;margin-bottom:16px">🤖</div>'
+        '<h1 style="font-size:2rem;font-weight:800;color:#111827;margin:0;'
+        'letter-spacing:-0.04em">APEX Chat</h1>'
+        '<p style="font-size:0.95rem;color:#6B7280;margin:8px 0 0;font-weight:400;'
+        'line-height:1.5">Your AI financial assistant -- stocks, markets, economy &amp; more'
+        '</p></div>'
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;'
+        'max-width:760px;margin:28px auto 20px">'
+        '<div style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:14px;'
+        'padding:20px 22px;border-top:3px solid #2563EB;'
+        'box-shadow:0 1px 3px rgba(0,0,0,0.04)">'
+        '<div style="font-size:1.15rem;margin-bottom:8px">📊</div>'
+        '<div style="font-size:0.88rem;font-weight:700;color:#111827;margin-bottom:6px">'
+        'Stock Analysis</div>'
+        '<div style="font-size:0.79rem;color:#6B7280;line-height:1.65">'
+        'Full 4-analyst APEX panel -- Fundamentals 40% · Research 30% · Macro 20% · News 10%. '
+        'Dynamic weights on earnings days &amp; Fed meetings.'
+        '</div>'
+        '<div style="margin-top:10px;font-size:0.74rem;color:#2563EB;font-weight:500">'
+        '"Analyze NVDA" · "Should I buy AAPL?" · "Full report on MSFT"'
+        '</div></div>'
+        '<div style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:14px;'
+        'padding:20px 22px;border-top:3px solid #059669;'
+        'box-shadow:0 1px 3px rgba(0,0,0,0.04)">'
+        '<div style="font-size:1.15rem;margin-bottom:8px">💬</div>'
+        '<div style="font-size:0.88rem;font-weight:700;color:#111827;margin-bottom:6px">'
+        'Financial Chat</div>'
+        '<div style="font-size:0.79rem;color:#6B7280;line-height:1.65">'
+        'Live-data Q&amp;A. Calls market news, macro snapshot, sector performance, '
+        'IPO data &amp; broker research before answering.'
+        '</div>'
+        '<div style="margin-top:10px;font-size:0.74rem;color:#059669;font-weight:500">'
+        '"What\'s happening in markets?" · "Latest IPOs" · "Fed rate outlook"'
+        '</div></div>'
+        '</div>'
+        '<div style="max-width:760px;margin:0 auto 24px;'
+        'display:flex;flex-wrap:wrap;gap:7px;justify-content:center">'
+        '<span style="display:inline-flex;align-items:center;gap:5px;'
+        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        '📰 Market News</span>'
+        '<span style="display:inline-flex;align-items:center;gap:5px;'
+        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        '🌐 Economy &amp; Macro</span>'
+        '<span style="display:inline-flex;align-items:center;gap:5px;'
+        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        '🚀 IPOs &amp; Listings</span>'
+        '<span style="display:inline-flex;align-items:center;gap:5px;'
+        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        '📈 Sectors &amp; Indices</span>'
+        '<span style="display:inline-flex;align-items:center;gap:5px;'
+        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        '🔍 Web Search</span>'
+        '</div>'
+    )
+    st.markdown(_hero_html, unsafe_allow_html=True)
 
     # Suggested prompts
-    st.markdown("**Try asking:**")
-    col1, col2, col3 = st.columns(3)
-    prompts = [
-        ("Analyze NVDA", "📊"),
-        ("Should I buy AAPL?", "🤔"),
-        ("Compare MSFT vs GOOGL", "⚖️"),
+    st.markdown(
+        '<p style="text-align:center;font-size:0.72rem;font-weight:700;'
+        'text-transform:uppercase;letter-spacing:0.08em;color:#9CA3AF;margin:4px 0 12px">'
+        'Try asking</p>',
+        unsafe_allow_html=True,
+    )
+    _hero_prompts = [
+        ("Analyze NVDA",                    "📊", True),
+        ("What's happening in markets?",    "📰", False),
+        ("Latest IPOs this week",           "🚀", False),
+        ("Compare MSFT vs GOOGL",           "⚖️", True),
+        ("Fed rate outlook",                "🌐", False),
+        ("How is tech sector performing?",  "📈", False),
     ]
-    for (col, (prompt, icon)) in zip([col1, col2, col3], prompts):
-        with col:
-            if st.button(f"{icon} {prompt}", use_container_width=True):
+    _hp_cols = st.columns(3)
+    for _hi, (_hp_prompt, _hp_icon, _hp_has_ticker) in enumerate(_hero_prompts):
+        with _hp_cols[_hi % 3]:
+            if st.button(f"{_hp_icon}  {_hp_prompt}", use_container_width=True, key=f"hero_p_{_hi}"):
                 if not st.session_state.session_id:
                     _new_chat()
-                st.session_state.messages.append({"role": "user", "content": prompt,
+                st.session_state.messages.append({"role": "user", "content": _hp_prompt,
                                                    "type": "text", "metadata": {}})
-                st.session_state.current_tickers = _extract_tickers(prompt)
+                if _hp_has_ticker:
+                    st.session_state.current_tickers = _extract_tickers(_hp_prompt)
+                    st.session_state.chat_no_ticker  = False
+                else:
+                    st.session_state.current_tickers = []
+                    st.session_state.chat_no_ticker  = True
                 st.rerun()
 
 # Replay messages
@@ -1454,13 +1727,34 @@ for msg in st.session_state.messages:
             else:
                 st.markdown(msg.get("content", ""))
 
-# ── Ticker selection prompt ───────────────────────────────────────────────────
+# ── Ticker confirmation prompt ("Did you mean X?") ───────────────────────────
 
-if st.session_state.awaiting_ticker:
+if st.session_state.get("ticker_confirm"):
+    _tc = st.session_state.ticker_confirm
     with st.chat_message("assistant"):
         st.markdown(
-            "**I need a ticker symbol to analyze.** "
-            "Select from your watchlist or type them:"
+            f"I found **{_tc['name']}** (`{_tc['ticker']}`) -- is that the company you meant?"
+        )
+        _c1, _c2, _c3 = st.columns([1, 1, 2])
+        with _c1:
+            if st.button(f"✅ Yes, analyze {_tc['ticker']}", type="primary", key="tc_yes"):
+                st.session_state.current_tickers = [_tc["ticker"]]
+                st.session_state.ticker_confirm  = None
+                st.session_state.awaiting_ticker = False
+                st.rerun()
+        with _c2:
+            if st.button("🔍 Different company", key="tc_no"):
+                st.session_state.ticker_confirm  = None
+                st.session_state.awaiting_ticker = True
+                st.rerun()
+
+# ── Ticker selection prompt (fallback when auto-resolve fails) ────────────────
+
+elif st.session_state.awaiting_ticker:
+    with st.chat_message("assistant"):
+        st.markdown(
+            "**Which stock would you like me to analyze?** "
+            "You can type a ticker (e.g. NVDA) or a company name (e.g. Nvidia):"
         )
         wl = _load_watchlist()
         col_sel, col_text = st.columns([2, 1])
@@ -1468,23 +1762,36 @@ if st.session_state.awaiting_ticker:
             selected = st.multiselect("Watchlist tickers", wl,
                                       label_visibility="collapsed", key="ticker_select")
         with col_text:
-            manual = st.text_input("Or type (e.g. NVDA, AMD)",
-                                   label_visibility="collapsed", key="ticker_text")
+            manual = st.text_input("Ticker or company name",
+                                   label_visibility="collapsed", key="ticker_text",
+                                   placeholder="e.g. NVDA or Nvidia")
 
         if st.button("▶ Analyze", type="primary", key="confirm_tickers"):
-            manual_list = [t.strip().upper() for t in manual.split(",") if t.strip()]
-            chosen = list(dict.fromkeys(selected + manual_list))
+            manual_list = [t.strip() for t in manual.split(",") if t.strip()]
+            # Try to resolve any company names in the manual input
+            resolved = []
+            for item in manual_list:
+                found = _extract_tickers(item)
+                if found:
+                    resolved.extend(found)
+                else:
+                    tk, _ = _search_ticker_by_name(item)
+                    if tk:
+                        resolved.append(tk)
+                    else:
+                        resolved.append(item.upper())
+            chosen = list(dict.fromkeys(selected + resolved))
             if chosen:
                 st.session_state.current_tickers = chosen
                 st.session_state.awaiting_ticker  = False
                 st.rerun()
             else:
-                st.warning("Please select or enter at least one ticker.")
+                st.warning("Please select or enter at least one ticker or company name.")
 
 # ── Chat input ────────────────────────────────────────────────────────────────
 
 user_input = st.chat_input(
-    "Ask about a stock: 'Analyze NVDA', 'Should I buy AAPL?', 'What's the outlook for MSFT?'"
+    "Ask anything financial -- 'Analyze NVDA', 'What's happening in markets?', 'Latest IPOs', 'Fed rate outlook'…"
 )
 
 if user_input:
@@ -1508,14 +1815,34 @@ if user_input:
     if tickers:
         st.session_state.current_tickers = tickers
         st.session_state.chat_no_ticker  = False
+        st.session_state.ticker_confirm  = None
     elif not st.session_state.current_tickers:
-        # Queries with no ticker: macro/general/comparison go to chat agent directly
-        _macro_kw = {"macro", "market", "fed", "vix", "rates", "inflation", "economy",
-                     "recession", "yield curve", "s&p", "interest", "dollar"}
-        if any(kw in user_input.lower() for kw in _macro_kw):
-            st.session_state.chat_no_ticker = True
+        _q_lower = user_input.lower()
+        _predict_kw = {
+            "analyze", "full analysis", "should i buy", "should i sell",
+            "buy or sell", "worth buying", "investment thesis",
+            "full report", "deep dive", "apex analysis", "run apex",
+        }
+        _wants_prediction = any(kw in _q_lower for kw in _predict_kw)
+
+        if _wants_prediction:
+            # Try to resolve a company name in the query before asking the user
+            _candidate_tk, _candidate_name = _search_ticker_by_name(user_input)
+            if _candidate_tk:
+                # Found a match -- confirm with user instead of silently assuming
+                st.session_state.ticker_confirm = {
+                    "ticker": _candidate_tk,
+                    "name":   _candidate_name,
+                    "query":  user_input,
+                    "intent": "predict",
+                }
+            else:
+                st.session_state.awaiting_ticker = True
         else:
-            st.session_state.awaiting_ticker = True
+            # General financial question -- route to chat agent; it can call
+            # search_ticker itself if it needs to resolve a company name.
+            st.session_state.chat_no_ticker = True
+            st.session_state.ticker_confirm = None
 
     st.rerun()
 
@@ -1527,6 +1854,7 @@ _has_message = (
     st.session_state.messages
     and st.session_state.messages[-1]["role"] == "user"
     and not st.session_state.awaiting_ticker
+    and not st.session_state.get("ticker_confirm")
 )
 
 if _has_message and (_has_ticker or _no_ticker):
@@ -1583,7 +1911,7 @@ if _has_message and (_has_ticker or _no_ticker):
                         label_txt = f" ({used_label_chat})" if used_label_chat else ""
                         chat_st.update(
                             label=f"✅ Tools done{label_txt}", state="complete",
-                            expanded=False,   # collapse after done — answer shows below
+                            expanded=False,   # collapse after done -- answer shows below
                         )
                         break
 
@@ -1629,7 +1957,7 @@ if _has_message and (_has_ticker or _no_ticker):
                     expanded=True,
                 ) as gap_st:
                     from portfolio_agent.tools.reasoning_tools import fill_data_gaps
-                    from main import CreditExhaustedError
+                    from portfolio_agent.pipeline.failover import CreditExhaustedError
                     try:
                         _, agents_run = fill_data_gaps(ticker, {"data_gaps": plan["gaps"]})
                         for a in agents_run:
@@ -1638,7 +1966,7 @@ if _has_message and (_has_ticker or _no_ticker):
                     except CreditExhaustedError as exc:
                         gap_st.update(label="⚠️ Could not fill all data gaps", state="error")
                         st.warning(
-                            f"**All models exhausted** — could not fetch live data for "
+                            f"**All models exhausted** -- could not fetch live data for "
                             f"`{', '.join(plan['gaps'])}`. "
                             f"APEX will reason with whatever is already in the database.\n\n"
                             f"_{str(exc).split('Last error:')[0].strip()}_",
@@ -1648,7 +1976,7 @@ if _has_message and (_has_ticker or _no_ticker):
                         gap_st.update(label="⚠️ Data gap fill failed", state="error")
                         st.warning(f"Live agent error (continuing with cached data): {exc}", icon="⚠️")
 
-            st.markdown(f"#### 🧠 Panel Deliberation — `{ticker}`")
+            st.markdown(f"#### 🧠 Panel Deliberation -- `{ticker}`")
 
             # ── Stream execution ──────────────────────────────────────────────
             q: Queue = Queue()
@@ -1747,7 +2075,7 @@ if _has_message and (_has_ticker or _no_ticker):
                 st.divider()
                 _render_prediction_card(pred_data, elapsed, show_history=True)
 
-                # Save prediction to predictions DB — one row per horizon
+                # Save prediction to predictions DB -- one row per horizon
                 from portfolio_agent.tools.prediction_db import (
                     insert_prediction, get_scheduled_horizons as _gs_h,
                     get_today_horizons as _gth,

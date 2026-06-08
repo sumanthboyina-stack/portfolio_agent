@@ -91,38 +91,32 @@ def _format_news_block(ticker: str, articles: list) -> str:
     return "\n".join(lines)
 
 
-async def _run_news_phase(
+def _triage_news_tickers(
     all_tickers: list[str],
-    watchlist: list[str],
-    portfolio_tickers: list[str],
-    trending_from_news: list[str],
-    extra_tickers: list[str] | None,
-    watchlist_path,
-    tracker=None,
-) -> bool:
+    always_run: set[str],
+    log,
+) -> tuple[list[str], dict[str, str], dict[str, dict], dict, dict[str, list], dict[str, str], int]:
     """
-    Three-stage news pipeline — shared by --daily-news and --daily.
+    Stage 1+2 (no LLM): parallel yfinance fetch + keyword/volume triage.
+    Stage 3   (1 Haiku): batch materiality scoring of survivors.
+    Hash-based dedup + resume from checkpoint.
 
-    Stage 1+2 (no LLM): parallel yfinance fetch + keyword/volume triage
-    Stage 3   (1 Haiku): batch materiality scoring of survivors
-    Full agent (Sonnet): only tickers with materiality score > 0
+    Returns:
+        tickers_with_news  — tickers that pass all filters and should go to the LLM batch
+        _skipped           — {ticker: skip_reason} for every dropped ticker
+        scores             — Stage-3 materiality scores keyed by ticker
+        triage             — raw triage dict (for caller logging/filter-log)
+        articles_map       — {ticker: [articles]} for all tickers
+        _source_by_ticker  — {ticker: source_name}
+        s3_skipped         — count of tickers dropped at Stage 3
     """
-    log = _get_logger("news")
     from portfolio_agent.tools.news_filter import batch_fetch_and_triage, batch_score_materiality
-    from portfolio_agent.tools.pipeline_skip import get_skip_tickers as _skip_tickers, log_skip as _log_skip
-    import litellm as _litellm
-
-    _ns = _skip_tickers("news")
-    _skipped_restricted = [t for t in all_tickers if t in _ns]
-    if _skipped_restricted:
-        _log_skip("news", _skipped_restricted)
-        all_tickers = [t for t in all_tickers if t not in _ns]
-
-    always_run = set((extra_tickers or []) + portfolio_tickers)
-
-    new_for_watchlist = [t for t in trending_from_news if t not in set(watchlist)]
-    if new_for_watchlist:
-        update_watchlist(watchlist_path, new_for_watchlist)
+    from portfolio_agent.tools.checkpoint import pending_from_yesterday as _news_pending
+    from portfolio_agent.tools.news_db import (
+        load_seen_hashes as _load_hashes,
+        log_filter_decisions as _log_fd,
+    )
+    import hashlib as _hashlib
 
     log.info(
         f"\n  Stage 1+2: fetching + triaging {len(all_tickers)} tickers (no LLM)…",
@@ -148,9 +142,6 @@ async def _run_news_phase(
     )
     scorer_input = [item for item in triage_interesting if item["ticker"] not in always_run]
 
-    wl_count  = len(watchlist)
-    port_new  = len([t for t in portfolio_tickers if t not in set(watchlist)])
-    trend_new = len(new_for_watchlist)
     s2_skipped = triage["skipped_count"]
     s2_no_news = sum(
         1 for t in always_run
@@ -177,23 +168,6 @@ async def _run_news_phase(
             f"{len(scorer_input) - _s3_pass} filtered out",
             event_type="summary",
         )
-
-    from portfolio_agent.tools.checkpoint import (
-        pending_from_yesterday as _news_pending,
-        save_checkpoint as _save_cp,
-        clear_phase as _clear_news_cp,
-    )
-    from portfolio_agent.tools.news_db import (
-        save_ticker_news, update_ticker_news_model,
-        load_seen_hashes as _load_hashes,
-        save_article_hashes as _save_art_hashes,
-        log_filter_decisions as _log_fd,
-    )
-    from portfolio_agent.tools.news_sources import get_market_news
-    from portfolio_agent._models import FAILOVER_CHAINS
-    import hashlib as _hashlib
-
-    run_date = date.today().isoformat()
 
     _articles_by_ticker: dict[str, list] = triage.get("articles_by_ticker", {})
     _source_by_ticker:   dict[str, str]  = triage.get("source_by_ticker", {})
@@ -274,49 +248,28 @@ async def _run_news_phase(
     except Exception as _fl_exc:
         log.warning(f"  [warn] filter_log failed (non-fatal): {_fl_exc}", event_type="warning")
 
-    log.info(f"\n{'━' * 64}", event_type="separator")
-    log.info(
-        f"  News Batch — {len(tickers_with_news)} / {len(all_tickers)} tickers → full agent",
-        event_type="phase_start",
-    )
-    log.info(
-        f"  {wl_count} watchlist  |  {port_new} portfolio-only  |  {trend_new} market-trending",
-        event_type="summary",
-    )
-    _skip_counts = {}
-    for _r in _skipped.values():
-        _skip_counts[_r] = _skip_counts.get(_r, 0) + 1
-    log.info(
-        f"  Stage 2 skipped: {triage['skipped_count']}  |  "
-        f"Stage 3 filtered: {s3_skipped}  |  "
-        f"No new articles: {_skip_counts.get('no_new_articles', 0)}",
-        event_type="summary",
-    )
-    log.info(
-        f"  [news/filter] total={len(all_tickers)} "
-        f"analyzed={len(tickers_with_news)} "
-        f"no_articles={_skip_counts.get('no_articles', 0)} "
-        f"low_materiality={_skip_counts.get('low_materiality', 0)} "
-        f"no_new_articles={_skip_counts.get('no_new_articles', 0)}",
-        event_type="filter_summary",
-        total=len(all_tickers), analyzed=len(tickers_with_news),
-        no_articles=_skip_counts.get('no_articles', 0),
-        low_materiality=_skip_counts.get('low_materiality', 0),
-        no_new_articles=_skip_counts.get('no_new_articles', 0),
+    return (
+        tickers_with_news,
+        _skipped,
+        scores,
+        triage,
+        articles_map,
+        _source_by_ticker,
+        s3_skipped,
     )
 
-    material = sorted(
-        [(t, scores[t]) for t in tickers_with_news if t in scores and scores[t]["score"] > 0],
-        key=lambda x: -x[1]["score"],
-    )
-    if material:
-        top = ", ".join(
-            f"{t}[{d['score']}] {d['summary'][:40]}…" if len(d['summary']) > 40
-            else f"{t}[{d['score']}] {d['summary']}"
-            for t, d in material[:6]
-        )
-        log.info(f"  Top     : {top}", event_type="summary")
-    log.info(f"{'━' * 64}\n", event_type="separator")
+
+async def _fetch_market_context(log) -> str:
+    """
+    Fetch the latest market headlines and condense them into bullet points via LLM.
+    Falls back to raw headline text if the LLM call fails, or "(not available)" if
+    the news fetch itself fails.
+
+    Returns market_context: str
+    """
+    from portfolio_agent.tools.news_sources import get_market_news
+    from portfolio_agent._models import FAILOVER_CHAINS
+    import litellm as _litellm
 
     try:
         mkt = json.loads(get_market_news(limit=5))
@@ -347,6 +300,102 @@ async def _run_news_phase(
             )
     except Exception:
         market_context = "(not available)"
+
+    return market_context
+
+
+def _persist_news(
+    chunk: list[str],
+    analyses: list[dict],
+    articles_map: dict[str, list],
+    _source_by_ticker: dict[str, str],
+    triage_chain: list,
+    model_idx: int,
+    completed_news: list[str],
+    failed_news: list[str],
+    label_used: str,
+    log,
+) -> None:
+    """
+    Persist one batch's worth of LLM analyses to the database.
+
+    For each ticker in chunk: maps the returned analysis dict, calls save_ticker_news,
+    update_ticker_news_model, and save_article_hashes. Appends to completed_news or
+    failed_news in-place.
+    """
+    from portfolio_agent.tools.news_db import (
+        save_ticker_news, update_ticker_news_model,
+        save_article_hashes as _save_art_hashes,
+    )
+
+    analysis_by_ticker = {
+        a.get("ticker", "").upper(): a
+        for a in analyses
+        if isinstance(a, dict) and a.get("ticker")
+    }
+    model_name_used, model_prov_used, label_used = (
+        triage_chain[model_idx] if model_idx < len(triage_chain) else triage_chain[-1]
+    )
+    for ticker in chunk:
+        if ticker in failed_news:
+            continue
+        data = analysis_by_ticker.get(ticker)
+        if not data:
+            log.warning(f"  [warn] No analysis returned for {ticker}", event_type="warning")
+            failed_news.append(ticker)
+            continue
+        try:
+            save_ticker_news(
+                ticker=ticker,
+                headline_1=data.get("headline_1", ""),
+                headline_2=data.get("headline_2", ""),
+                sentiment=data.get("sentiment", "NEUTRAL"),
+                sentiment_score=float(data.get("sentiment_score") or 0.0),
+                top_themes=data.get("top_themes", []),
+                trending=data.get("trending", ""),
+                source=_source_by_ticker.get(ticker, "finnhub"),
+            )
+            update_ticker_news_model(ticker, model_name_used, model_prov_used)
+            _save_art_hashes(ticker, articles_map.get(ticker, []))
+            log.info(
+                f"  [{label_used}] news saved for {ticker}",
+                event_type="db_write", ticker=ticker, action="saved", model=label_used,
+            )
+            completed_news.append(ticker)
+        except Exception as exc:
+            log.warning(
+                f"  [warn] Could not save news for {ticker}: {exc}",
+                event_type="warning",
+            )
+            failed_news.append(ticker)
+
+
+async def _run_news_llm_batches(
+    tickers_with_news: list[str],
+    market_context: str,
+    articles_map: dict[str, list],
+    _source_by_ticker: dict[str, str],
+    tracker,
+    log,
+) -> tuple[list[str], list[str], bool]:
+    """
+    Batch LLM loop with failover, Groq RPM/TPD handling, and context-too-large fallback.
+
+    Iterates over chunks of tickers_with_news, calls the triage failover chain for each
+    batch, handles all error/retry logic, and calls _persist_news for each successful chunk.
+
+    Returns:
+        completed_news  — tickers successfully saved
+        failed_news     — tickers that errored out
+        exhausted       — True if all models were exhausted and caller should return False
+    """
+    from portfolio_agent.tools.checkpoint import (
+        save_checkpoint as _save_cp,
+    )
+    from portfolio_agent._models import FAILOVER_CHAINS
+    import litellm as _litellm
+
+    run_date = date.today().isoformat()
 
     triage_chain  = FAILOVER_CHAINS.get("triage", [])
     model_idx     = 0
@@ -415,7 +464,7 @@ async def _run_news_phase(
                         f"{len(remaining)} news tickers will resume on next run.",
                         event_type="checkpoint_save", remaining=len(remaining), phase_name="news",
                     )
-                    return False
+                    return completed_news, failed_news, True
 
             while model_idx < len(triage_chain):
                 model_id, provider, label = triage_chain[model_idx]
@@ -523,53 +572,137 @@ async def _run_news_phase(
                     f"{len(remaining)} news tickers will resume on next run.",
                     event_type="checkpoint_save", remaining=len(remaining), phase_name="news",
                 )
-                return False
+                return completed_news, failed_news, True
             if tracker:
                 tracker.tick("news", len(completed_news), len(tickers_with_news),
                              ticker=chunk[-1] if chunk else "",
                              note=f"batch {batch_num}/{total_batches}")
             break
 
-        analysis_by_ticker = {
-            a.get("ticker", "").upper(): a
-            for a in analyses
-            if isinstance(a, dict) and a.get("ticker")
-        }
-        model_name_used, model_prov_used, label_used = (
-            triage_chain[model_idx] if model_idx < len(triage_chain) else triage_chain[-1]
+        _persist_news(
+            chunk=chunk,
+            analyses=analyses,
+            articles_map=articles_map,
+            _source_by_ticker=_source_by_ticker,
+            triage_chain=triage_chain,
+            model_idx=model_idx,
+            completed_news=completed_news,
+            failed_news=failed_news,
+            label_used=(
+                triage_chain[model_idx][2] if model_idx < len(triage_chain) else triage_chain[-1][2]
+            ),
+            log=log,
         )
-        for ticker in chunk:
-            if ticker in failed_news:
-                continue
-            data = analysis_by_ticker.get(ticker)
-            if not data:
-                log.warning(f"  [warn] No analysis returned for {ticker}", event_type="warning")
-                failed_news.append(ticker)
-                continue
-            try:
-                save_ticker_news(
-                    ticker=ticker,
-                    headline_1=data.get("headline_1", ""),
-                    headline_2=data.get("headline_2", ""),
-                    sentiment=data.get("sentiment", "NEUTRAL"),
-                    sentiment_score=float(data.get("sentiment_score") or 0.0),
-                    top_themes=data.get("top_themes", []),
-                    trending=data.get("trending", ""),
-                    source=_source_by_ticker.get(ticker, "finnhub"),
-                )
-                update_ticker_news_model(ticker, model_name_used, model_prov_used)
-                _save_art_hashes(ticker, articles_map.get(ticker, []))
-                log.info(
-                    f"  [{label_used}] news saved for {ticker}",
-                    event_type="db_write", ticker=ticker, action="saved", model=label_used,
-                )
-                completed_news.append(ticker)
-            except Exception as exc:
-                log.warning(
-                    f"  [warn] Could not save news for {ticker}: {exc}",
-                    event_type="warning",
-                )
-                failed_news.append(ticker)
+
+    return completed_news, failed_news, False
+
+
+async def _run_news_phase(
+    all_tickers: list[str],
+    watchlist: list[str],
+    portfolio_tickers: list[str],
+    trending_from_news: list[str],
+    extra_tickers: list[str] | None,
+    watchlist_path,
+    tracker=None,
+) -> bool:
+    """
+    Three-stage news pipeline — shared by --daily-news and --daily.
+
+    Stage 1+2 (no LLM): parallel yfinance fetch + keyword/volume triage
+    Stage 3   (1 Haiku): batch materiality scoring of survivors
+    Full agent (Sonnet): only tickers with materiality score > 0
+    """
+    log = _get_logger("news")
+    from portfolio_agent.tools.pipeline_skip import get_skip_tickers as _skip_tickers, log_skip as _log_skip
+    from portfolio_agent.tools.checkpoint import clear_phase as _clear_news_cp
+
+    _ns = _skip_tickers("news")
+    _skipped_restricted = [t for t in all_tickers if t in _ns]
+    if _skipped_restricted:
+        _log_skip("news", _skipped_restricted)
+        all_tickers = [t for t in all_tickers if t not in _ns]
+
+    always_run = set((extra_tickers or []) + portfolio_tickers)
+
+    new_for_watchlist = [t for t in trending_from_news if t not in set(watchlist)]
+    if new_for_watchlist:
+        update_watchlist(watchlist_path, new_for_watchlist)
+
+    # --- Stage 1+2+3: triage, materiality scoring, hash dedup, resume ---
+    (
+        tickers_with_news,
+        _skipped,
+        scores,
+        triage,
+        articles_map,
+        _source_by_ticker,
+        s3_skipped,
+    ) = _triage_news_tickers(all_tickers, always_run, log)
+
+    wl_count  = len(watchlist)
+    port_new  = len([t for t in portfolio_tickers if t not in set(watchlist)])
+    trend_new = len(new_for_watchlist)
+
+    log.info(f"\n{'━' * 64}", event_type="separator")
+    log.info(
+        f"  News Batch — {len(tickers_with_news)} / {len(all_tickers)} tickers → full agent",
+        event_type="phase_start",
+    )
+    log.info(
+        f"  {wl_count} watchlist  |  {port_new} portfolio-only  |  {trend_new} market-trending",
+        event_type="summary",
+    )
+    _skip_counts = {}
+    for _r in _skipped.values():
+        _skip_counts[_r] = _skip_counts.get(_r, 0) + 1
+    log.info(
+        f"  Stage 2 skipped: {triage['skipped_count']}  |  "
+        f"Stage 3 filtered: {s3_skipped}  |  "
+        f"No new articles: {_skip_counts.get('no_new_articles', 0)}",
+        event_type="summary",
+    )
+    log.info(
+        f"  [news/filter] total={len(all_tickers)} "
+        f"analyzed={len(tickers_with_news)} "
+        f"no_articles={_skip_counts.get('no_articles', 0)} "
+        f"low_materiality={_skip_counts.get('low_materiality', 0)} "
+        f"no_new_articles={_skip_counts.get('no_new_articles', 0)}",
+        event_type="filter_summary",
+        total=len(all_tickers), analyzed=len(tickers_with_news),
+        no_articles=_skip_counts.get('no_articles', 0),
+        low_materiality=_skip_counts.get('low_materiality', 0),
+        no_new_articles=_skip_counts.get('no_new_articles', 0),
+    )
+
+    material = sorted(
+        [(t, scores[t]) for t in tickers_with_news if t in scores and scores[t]["score"] > 0],
+        key=lambda x: -x[1]["score"],
+    )
+    if material:
+        top = ", ".join(
+            f"{t}[{d['score']}] {d['summary'][:40]}…" if len(d['summary']) > 40
+            else f"{t}[{d['score']}] {d['summary']}"
+            for t, d in material[:6]
+        )
+        log.info(f"  Top     : {top}", event_type="summary")
+    log.info(f"{'━' * 64}\n", event_type="separator")
+
+    # --- Fetch market context for batch prompt ---
+    market_context = await _fetch_market_context(log)
+
+    # --- Batch LLM loop with failover + persist ---
+    total_batches = (len(tickers_with_news) + _BATCH_NEWS_SIZE - 1) // _BATCH_NEWS_SIZE
+    completed_news, failed_news, exhausted = await _run_news_llm_batches(
+        tickers_with_news=tickers_with_news,
+        market_context=market_context,
+        articles_map=articles_map,
+        _source_by_ticker=_source_by_ticker,
+        tracker=tracker,
+        log=log,
+    )
+    if exhausted:
+        return False
 
     _clear_news_cp("news")
     if tracker:

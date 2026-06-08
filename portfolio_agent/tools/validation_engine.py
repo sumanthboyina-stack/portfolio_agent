@@ -507,7 +507,7 @@ def get_recent_evaluated_predictions(limit: int = 100) -> list[dict]:
                       start_price, pt_current_price
                FROM predictions
                WHERE evaluation_status IN ('evaluated', 'data_missing')
-               ORDER BY evaluated_at DESC LIMIT ?""",
+               ORDER BY prediction_date DESC, evaluated_at DESC LIMIT ?""",
             [limit],
         ).fetchall()
     return [dict(r) for r in rows]

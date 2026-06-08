@@ -86,31 +86,17 @@ def _format_research_block(data: dict) -> str:
     return "\n".join(lines)
 
 
-async def _run_daily_research(
+def _fetch_broker_data(
     all_tickers: list[str],
-    always_run: set[str],
-    tracker=None,
-) -> bool:
-    """Two-track research phase: raw broker fetch (Track A) + LLM summary (Track B)."""
-    log = _get_logger("research")
+    tracker,
+    log,
+) -> dict[str, dict]:
+    """Track A: parallel ThreadPoolExecutor fetch + upsert_raw_research for each ticker.
+
+    Returns raw_data_map: dict mapping ticker -> raw broker data dict.
+    """
     from portfolio_agent.tools.broker_research import get_broker_research
-    from portfolio_agent.tools.research_db import (
-        upsert_raw_research, upsert_llm_summary, needs_llm_summary,
-    )
-    from portfolio_agent.tools.checkpoint import (
-        pending_from_yesterday, save_checkpoint, clear_phase,
-    )
-    from portfolio_agent._models import FAILOVER_CHAINS
-    import litellm as _litellm
-
-    run_date = date.today().isoformat()
-
-    from portfolio_agent.tools.pipeline_skip import get_skip_tickers as _skip_tickers, log_skip as _log_skip
-    _rs = _skip_tickers("research")
-    _skipped_restricted = [t for t in all_tickers if t in _rs]
-    if _skipped_restricted:
-        _log_skip("research", _skipped_restricted)
-        all_tickers = [t for t in all_tickers if t not in _rs]
+    from portfolio_agent.tools.research_db import upsert_raw_research
 
     log.info(
         f"  Track A: fetching raw broker data for {len(all_tickers)} tickers (parallel, no LLM)…",
@@ -162,6 +148,22 @@ async def _run_daily_research(
         event_type="fetch_start",
     )
 
+    return raw_data_map
+
+
+def _filter_research_llm_queue(
+    raw_data_map: dict[str, dict],
+    all_tickers: list[str],
+    skip_tickers: set[str],
+    log,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]]:
+    """Build the LLM queue via needs_llm_summary() check and yesterday's pending tickers.
+
+    Returns (llm_queue, llm_with_data, llm_without_data).
+    """
+    from portfolio_agent.tools.research_db import needs_llm_summary
+    from portfolio_agent.tools.checkpoint import pending_from_yesterday
+
     yesterday_pending = pending_from_yesterday("research")
     if yesterday_pending:
         log.info(
@@ -192,44 +194,37 @@ async def _run_daily_research(
         event_type="summary",
     )
 
-    if not llm_queue:
-        clear_phase("research")
-        if tracker:
-            tracker.start_phase("research", total=0)
-            tracker.finish_phase(
-                "research", 0, 0,
-                note=f"Track A: {len(raw_data_map)} fetched · all summaries current",
-            )
-        log.info(
-            f"\n  Research phase done — Track A: {len(raw_data_map)} raw fetches, "
-            f"Track B: 0 LLM summaries needed",
-            event_type="phase_end", saved=0, failed=0,
-        )
-        return True
-
-    completed: list[str] = []
-    failed:    list[str] = []
-
     llm_with_data    = [(t, r) for t, r in llm_queue if t in raw_data_map]
-    if tracker:
-        tracker.start_phase("research", total=len(llm_queue))
     llm_without_data = [(t, r) for t, r in llm_queue if t not in raw_data_map]
-    if llm_without_data:
-        log.warning(
-            f"  [warn] {len(llm_without_data)} tickers skipped (no Track A data): "
-            f"{', '.join(t for t, _ in llm_without_data[:8])}"
-            f"{'…' if len(llm_without_data) > 8 else ''}",
-            event_type="warning",
-        )
-        failed.extend(t for t, _ in llm_without_data)
 
-    flash_chain = FAILOVER_CHAINS.get("flash", [])
-    model_idx   = 0
+    return llm_queue, llm_with_data, llm_without_data
+
+
+async def _run_research_llm_batches(
+    llm_queue: list[tuple[str, str]],
+    llm_with_data: list[tuple[str, str]],
+    raw_data_map: dict[str, dict],
+    tracker,
+    log,
+    run_date: str,
+    flash_chain: list,
+    completed: list[str],
+    failed: list[str],
+) -> bool:
+    """Track B: batch LLM loop with failover, Groq RPM/TPD handling, and checkpoint logic.
+
+    Mutates completed and failed in-place as batches are processed.
+    Returns True if all batches completed (or were checkpointed), False if all models exhausted.
+    """
+    import litellm as _litellm
+    from portfolio_agent.tools.checkpoint import save_checkpoint
+    from portfolio_agent.tools.research_db import upsert_llm_summary
 
     def _rchunks(lst, n):
         for k in range(0, len(lst), n):
             yield lst[k: k + n]
 
+    model_idx        = 0
     batch_num        = 0
     total_batches    = (len(llm_with_data) + _BATCH_SIZE - 1) // _BATCH_SIZE
     _res_last_exc: BaseException | None     = None
@@ -380,6 +375,7 @@ async def _run_daily_research(
         if _res_batch_hard_failed:
             continue
 
+        # Persist the analyses for this batch immediately
         analysis_by_ticker = {
             a.get("ticker", "").upper(): a
             for a in analyses
@@ -389,36 +385,143 @@ async def _run_daily_research(
             flash_chain[model_idx] if model_idx < len(flash_chain)
             else (label, provider, label)
         )
-        for ticker in chunk:
-            data = analysis_by_ticker.get(ticker)
-            if not data:
-                log.warning(
-                    f"  [warn] No summary returned for {ticker} in research batch",
-                    event_type="warning",
-                )
-                failed.append(ticker)
-                continue
-            try:
-                result = upsert_llm_summary(
-                    ticker=ticker,
-                    highlights=data.get("highlights", []),
-                    research_score=data.get("research_score"),
-                    summary=data.get("summary", ""),
-                    model_name=model_name_used,
-                    model_provider=model_prov_used,
-                )
-                log.info(
-                    f"  DB: research {result.get('action','?')} for {ticker} [{label_used}]",
-                    event_type="db_write", ticker=ticker, action=result.get("action", "?"),
-                    model=label_used,
-                )
-                completed.append(ticker)
-            except Exception as exc:
-                log.warning(
-                    f"  [warn] Could not save research summary for {ticker}: {exc}",
-                    event_type="warning",
-                )
-                failed.append(ticker)
+        _persist_research(
+            chunk=chunk,
+            analysis_by_ticker=analysis_by_ticker,
+            model_name_used=model_name_used,
+            model_prov_used=model_prov_used,
+            label_used=label_used,
+            completed=completed,
+            failed=failed,
+            log=log,
+        )
+
+    return True
+
+
+def _persist_research(
+    chunk: list[str],
+    analysis_by_ticker: dict[str, dict],
+    model_name_used: str,
+    model_prov_used: str,
+    label_used: str,
+    completed: list[str],
+    failed: list[str],
+    log,
+) -> None:
+    """Parse analyses and upsert_llm_summary for each ticker in a batch chunk.
+
+    Mutates completed and failed in-place.
+    """
+    from portfolio_agent.tools.research_db import upsert_llm_summary
+
+    for ticker in chunk:
+        data = analysis_by_ticker.get(ticker)
+        if not data:
+            log.warning(
+                f"  [warn] No summary returned for {ticker} in research batch",
+                event_type="warning",
+            )
+            failed.append(ticker)
+            continue
+        try:
+            result = upsert_llm_summary(
+                ticker=ticker,
+                highlights=data.get("highlights", []),
+                research_score=data.get("research_score"),
+                summary=data.get("summary", ""),
+                model_name=model_name_used,
+                model_provider=model_prov_used,
+            )
+            log.info(
+                f"  DB: research {result.get('action','?')} for {ticker} [{label_used}]",
+                event_type="db_write", ticker=ticker, action=result.get("action", "?"),
+                model=label_used,
+            )
+            completed.append(ticker)
+        except Exception as exc:
+            log.warning(
+                f"  [warn] Could not save research summary for {ticker}: {exc}",
+                event_type="warning",
+            )
+            failed.append(ticker)
+
+
+async def _run_daily_research(
+    all_tickers: list[str],
+    always_run: set[str],
+    tracker=None,
+) -> bool:
+    """Two-track research phase: raw broker fetch (Track A) + LLM summary (Track B)."""
+    log = _get_logger("research")
+    from portfolio_agent.tools.checkpoint import (
+        clear_phase,
+    )
+    from portfolio_agent._models import FAILOVER_CHAINS
+    from portfolio_agent.tools.pipeline_skip import get_skip_tickers as _skip_tickers, log_skip as _log_skip
+
+    run_date = date.today().isoformat()
+
+    _rs = _skip_tickers("research")
+    _skipped_restricted = [t for t in all_tickers if t in _rs]
+    if _skipped_restricted:
+        _log_skip("research", _skipped_restricted)
+        all_tickers = [t for t in all_tickers if t not in _rs]
+
+    # Track A: parallel broker fetch
+    raw_data_map = _fetch_broker_data(all_tickers, tracker, log)
+
+    # Build LLM queue
+    llm_queue, llm_with_data, llm_without_data = _filter_research_llm_queue(
+        raw_data_map, all_tickers, _rs, log,
+    )
+
+    if not llm_queue:
+        clear_phase("research")
+        if tracker:
+            tracker.start_phase("research", total=0)
+            tracker.finish_phase(
+                "research", 0, 0,
+                note=f"Track A: {len(raw_data_map)} fetched · all summaries current",
+            )
+        log.info(
+            f"\n  Research phase done — Track A: {len(raw_data_map)} raw fetches, "
+            f"Track B: 0 LLM summaries needed",
+            event_type="phase_end", saved=0, failed=0,
+        )
+        return True
+
+    completed: list[str] = []
+    failed:    list[str] = []
+
+    if tracker:
+        tracker.start_phase("research", total=len(llm_queue))
+    if llm_without_data:
+        log.warning(
+            f"  [warn] {len(llm_without_data)} tickers skipped (no Track A data): "
+            f"{', '.join(t for t, _ in llm_without_data[:8])}"
+            f"{'…' if len(llm_without_data) > 8 else ''}",
+            event_type="warning",
+        )
+        failed.extend(t for t, _ in llm_without_data)
+
+    flash_chain = FAILOVER_CHAINS.get("flash", [])
+    total_batches = (len(llm_with_data) + _BATCH_SIZE - 1) // _BATCH_SIZE
+
+    # Track B: LLM batch loop with failover
+    ok = await _run_research_llm_batches(
+        llm_queue=llm_queue,
+        llm_with_data=llm_with_data,
+        raw_data_map=raw_data_map,
+        tracker=tracker,
+        log=log,
+        run_date=run_date,
+        flash_chain=flash_chain,
+        completed=completed,
+        failed=failed,
+    )
+    if not ok:
+        return False
 
     clear_phase("research")
     if tracker:

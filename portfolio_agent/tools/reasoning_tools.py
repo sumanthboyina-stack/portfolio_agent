@@ -14,6 +14,15 @@ from datetime import date, timedelta
 from typing import Optional
 
 
+def _safe_to_dict(obj, label: str = "object") -> Optional[dict]:
+    """Call .to_dict() defensively — if obj is already a plain dict, return it as-is."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    return obj.to_dict()
+
+
 # ── macro snapshot (no LLM, pure yfinance) ────────────────────────────────────
 
 def get_macro_snapshot() -> str:
@@ -133,10 +142,10 @@ def load_ticker_context(ticker: str, news_days: int = 7) -> str:
 
     return json.dumps({
         "ticker":             ticker,
-        "fundamentals":       fundamentals.to_dict() if fundamentals else None,
-        "research":           research.to_dict() if research else None,
+        "fundamentals":       _safe_to_dict(fundamentals),
+        "research":           _safe_to_dict(research),
         "news":               news,
-        "prediction_history": [p.to_dict() for p in prediction_history],
+        "prediction_history": [_safe_to_dict(p) for p in prediction_history],
         "data_gaps":          data_gaps,
         "data_gap_note":      (
             "The reasoning agent will attempt to fill gaps by running live specialist "
@@ -425,11 +434,11 @@ def get_full_analysis_context(ticker: str) -> str:
 
     return json.dumps({
         "ticker":             ticker,
-        "fundamentals":       fundamentals.to_dict() if fundamentals else None,
-        "research":           research.to_dict() if research else None,
+        "fundamentals":       _safe_to_dict(fundamentals),
+        "research":           _safe_to_dict(research),
         "news":               news,
         "macro_snapshot":     macro_snapshot,
-        "prediction_history": [p.to_dict() for p in prediction_history],
+        "prediction_history": [_safe_to_dict(p) for p in prediction_history],
         "data_gaps":          data_gaps,
         "dynamic_weights":    weight_data,
         "weight_instruction": (

@@ -577,9 +577,9 @@ def get_all_latest_predictions() -> dict[str, Prediction]:
         rows = c.execute("""
             SELECT p.* FROM predictions p
             INNER JOIN (
-                SELECT ticker, MAX(created_at) AS max_at
+                SELECT ticker, MAX(id) AS max_id
                 FROM predictions GROUP BY ticker
-            ) latest ON p.ticker = latest.ticker AND p.created_at = latest.max_at
+            ) latest ON p.id = latest.max_id
         """).fetchall()
     result = {}
     for row in rows:

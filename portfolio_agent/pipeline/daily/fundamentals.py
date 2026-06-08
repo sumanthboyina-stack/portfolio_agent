@@ -57,37 +57,19 @@ def _format_data_block(data: dict) -> str:
     return "\n".join(lines)
 
 
-async def _run_daily_fundamentals(
+def _fetch_edgar_data(
     all_tickers: list[str],
     always_run: set[str],
-    tracker=None,
-) -> bool:
-    """Phase 1 of the daily job — EDGAR check + fundamentals agent + DB upsert."""
-    log = _get_logger("fundamentals")
-    from portfolio_agent.tools.edgar_check import batch_check_filings
-    from portfolio_agent.tools.fundamentals_db import needs_refresh, upsert_fundamentals
-    from portfolio_agent.tools.checkpoint import (
-        pending_from_yesterday, save_checkpoint, clear_phase,
-    )
-    from portfolio_agent._models import FAILOVER_CHAINS
-    import litellm as _litellm
+    yesterday_pending: list[str],
+    log,
+):
+    """Fetch EDGAR filings, determine which tickers need refresh, and prefetch financial data.
 
-    run_date = date.today().isoformat()
-
-    from portfolio_agent.tools.pipeline_skip import get_skip_tickers as _skip_tickers, log_skip as _log_skip
-    _fs = _skip_tickers("fundamentals")
-    _skipped_restricted = [t for t in all_tickers if t in _fs]
-    if _skipped_restricted:
-        _log_skip("fundamentals", _skipped_restricted)
-        all_tickers = [t for t in all_tickers if t not in _fs]
-
-    yesterday_pending = pending_from_yesterday("fundamentals")
-    if yesterday_pending:
-        log.info(
-            f"  [resume] {len(yesterday_pending)} tickers carried over from previous run: "
-            f"{', '.join(yesterday_pending[:10])}{'…' if len(yesterday_pending) > 10 else ''}",
-            event_type="resume",
-        )
+    Returns (to_refresh, prefetch, has_edgar, skipped_no_edgar, skipped_count, info_map).
+    """
+    from portfolio_agent.tools.edgar_check import batch_check_filings, _load_cik_map
+    from portfolio_agent.tools.fundamentals_db import needs_refresh
+    from portfolio_agent.tools.edgar import batch_prefetch_fundamentals, get_fundamentals_bundle
 
     log.info(
         f"\n  Checking EDGAR for new filings ({len(all_tickers)} tickers, max 4 workers)…",
@@ -120,17 +102,7 @@ async def _run_daily_fundamentals(
         event_type="summary",
     )
 
-    if not to_refresh:
-        clear_phase("fundamentals")
-        return True
-
-    from portfolio_agent.tools.edgar import batch_prefetch_fundamentals, get_fundamentals_bundle
-    from portfolio_agent.tools.edgar_check import _load_cik_map
-
-    completed: list[str] = []
-    failed:    list[str] = []
-    if tracker:
-        tracker.start_phase("fundamentals", total=len(to_refresh))
+    info_map = {t: i for t, _, i in to_refresh}
 
     tickers_to_fetch = [t for t, _, _ in to_refresh]
     log.info(
@@ -156,19 +128,41 @@ async def _run_daily_fundamentals(
         event_type="fetch_start",
     )
 
-    flash_chain = FAILOVER_CHAINS.get("flash", [])
-    model_idx   = 0
+    return to_refresh, prefetch, has_edgar, skipped_no_edgar, skipped_count, info_map
 
-    info_map = {t: i for t, _, i in to_refresh}
+
+async def _run_fundamentals_llm_batches(
+    has_edgar: list[str],
+    prefetch: dict,
+    flash_chain: list,
+    run_date: str,
+    completed: list[str],
+    failed: list[str],
+    tracker,
+    to_refresh: list[tuple[str, str, dict]],
+    log,
+) -> tuple[dict[str, list[dict]], bool]:
+    """Run the batch LLM processing loop with failover, Groq RPM/TPD handling, and checkpointing.
+
+    Returns (batch_analyses_by_ticker, checkpoint_done).
+    batch_analyses_by_ticker maps ticker -> list of analysis dicts from the LLM for that batch.
+    checkpoint_done is True if we had to checkpoint and should return False to the caller.
+    """
+    from portfolio_agent.tools.checkpoint import save_checkpoint
+    import litellm as _litellm
 
     def _chunks(lst, n):
         for k in range(0, len(lst), n):
             yield lst[k: k + n]
 
+    model_idx   = 0
     batch_num       = 0
     total_batches   = (len(has_edgar) + _BATCH_SIZE - 1) // _BATCH_SIZE
     _fund_last_exc: BaseException | None     = None
     _fund_groq_rpm_exc: BaseException | None = None
+
+    # Maps each ticker to its analysis dict returned from LLM
+    all_batch_results: list[tuple[list[str], list[dict], bool]] = []
 
     for batch_tickers in _chunks(has_edgar, _BATCH_SIZE):
         batch_num += 1
@@ -215,7 +209,7 @@ async def _run_daily_fundamentals(
                         event_type="checkpoint_save", remaining=len(remaining),
                         phase_name="fundamentals",
                     )
-                    return False
+                    return all_batch_results, True
 
             while model_idx < len(flash_chain):
                 model_id, provider, label = flash_chain[model_idx]
@@ -297,12 +291,39 @@ async def _run_daily_fundamentals(
                     event_type="checkpoint_save", remaining=len(remaining),
                     phase_name="fundamentals",
                 )
-                return False
+                return all_batch_results, True
             if tracker:
                 tracker.tick("fundamentals", len(completed), len(to_refresh),
                              note=f"batch {batch_num}/{total_batches}")
             break
 
+        # Carry batch results (including hard-failed flag) to the persist phase
+        all_batch_results.append((batch_tickers, analyses, _batch_hard_failed))
+
+    return all_batch_results, False
+
+
+def _persist_fundamentals(
+    all_batch_results: list[tuple[list[str], list[dict], bool]],
+    flash_chain: list,
+    model_idx: int,
+    info_map: dict,
+    log,
+) -> tuple[list[str], list[str]]:
+    """Parse LLM analyses and upsert each ticker's fundamentals into the DB.
+
+    Returns (completed, failed).
+    """
+    from portfolio_agent.tools.fundamentals_db import upsert_fundamentals
+
+    completed: list[str] = []
+    failed:    list[str] = []
+
+    # Recover label/provider for DB writes — use last known model index
+    label    = flash_chain[model_idx][2] if model_idx < len(flash_chain) else ""
+    provider = flash_chain[model_idx][1] if model_idx < len(flash_chain) else ""
+
+    for batch_tickers, analyses, _batch_hard_failed in all_batch_results:
         if _batch_hard_failed:
             continue
 
@@ -357,6 +378,85 @@ async def _run_daily_fundamentals(
                 )
                 failed.append(ticker)
 
+    return completed, failed
+
+
+async def _run_daily_fundamentals(
+    all_tickers: list[str],
+    always_run: set[str],
+    tracker=None,
+) -> bool:
+    """Phase 1 of the daily job — EDGAR check + fundamentals agent + DB upsert."""
+    log = _get_logger("fundamentals")
+    from portfolio_agent.tools.edgar_check import batch_check_filings
+    from portfolio_agent.tools.fundamentals_db import needs_refresh, upsert_fundamentals
+    from portfolio_agent.tools.checkpoint import (
+        pending_from_yesterday, save_checkpoint, clear_phase,
+    )
+    from portfolio_agent._models import FAILOVER_CHAINS
+    import litellm as _litellm
+
+    run_date = date.today().isoformat()
+
+    from portfolio_agent.tools.pipeline_skip import get_skip_tickers as _skip_tickers, log_skip as _log_skip
+    _fs = _skip_tickers("fundamentals")
+    _skipped_restricted = [t for t in all_tickers if t in _fs]
+    if _skipped_restricted:
+        _log_skip("fundamentals", _skipped_restricted)
+        all_tickers = [t for t in all_tickers if t not in _fs]
+
+    yesterday_pending = pending_from_yesterday("fundamentals")
+    if yesterday_pending:
+        log.info(
+            f"  [resume] {len(yesterday_pending)} tickers carried over from previous run: "
+            f"{', '.join(yesterday_pending[:10])}{'…' if len(yesterday_pending) > 10 else ''}",
+            event_type="resume",
+        )
+
+    # --- Phase 1: EDGAR fetch + needs-refresh filtering + prefetch ---
+    to_refresh, prefetch, has_edgar, skipped_no_edgar, skipped_count, info_map = _fetch_edgar_data(
+        all_tickers, always_run, yesterday_pending, log,
+    )
+
+    if not to_refresh:
+        clear_phase("fundamentals")
+        return True
+
+    completed: list[str] = []
+    failed:    list[str] = []
+    if tracker:
+        tracker.start_phase("fundamentals", total=len(to_refresh))
+
+    tickers_to_fetch = [t for t, _, _ in to_refresh]
+    flash_chain = FAILOVER_CHAINS.get("flash", [])
+
+    # --- Phase 2: Batch LLM processing with failover + checkpoint ---
+    all_batch_results, checkpoint_done = await _run_fundamentals_llm_batches(
+        has_edgar=has_edgar,
+        prefetch=prefetch,
+        flash_chain=flash_chain,
+        run_date=run_date,
+        completed=completed,
+        failed=failed,
+        tracker=tracker,
+        to_refresh=to_refresh,
+        log=log,
+    )
+
+    if checkpoint_done:
+        return False
+
+    # --- Phase 3: Parse analyses + DB upsert ---
+    model_idx = 0  # persist uses the same model_idx bookkeeping; keep at 0 for label resolution
+    completed, failed = _persist_fundamentals(
+        all_batch_results=all_batch_results,
+        flash_chain=flash_chain,
+        model_idx=model_idx,
+        info_map=info_map,
+        log=log,
+    )
+
+    total_batches = (len(has_edgar) + _BATCH_SIZE - 1) // _BATCH_SIZE
     clear_phase("fundamentals")
     if tracker:
         tracker.finish_phase("fundamentals", len(completed), len(failed))

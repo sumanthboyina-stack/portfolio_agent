@@ -85,15 +85,16 @@ def _db_stats() -> dict:
         return stats
 
     if schema_errors:
-        stats["schema_errors"] = list(dict.fromkeys(schema_errors))  # dedup, preserve order
+        stats["schema_errors"] = list(dict.fromkeys(schema_errors))
 
-    # Use the typed domain layer for top predictions — avoids duplicate-row issue
-    # from same-second inserts and gives a clean typed API.
     try:
         preds = get_all_latest_predictions()
         top = sorted(
             preds.values(),
-            key=lambda p: (p.composite_score or 0),
+            key=lambda p: (
+                p.prediction_date or "",
+                p.created_at or "",
+            ),
             reverse=True,
         )[:8]
         stats["top_predictions"] = [p.to_dict() for p in top]
@@ -131,44 +132,61 @@ def _latest_run() -> dict | None:
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Pipeline Status</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:0.1em;color:#4B5563;margin:0 0 12px">Pipeline Status</p>',
+        unsafe_allow_html=True,
+    )
     run = _latest_run()
     if run:
-        status_color = "#059669" if run["has_finish"] and not run["has_error"] \
-            else ("#DC2626" if run["has_error"] else "#3B82F6")
-        status_label = "✅ Completed" if run["has_finish"] and not run["has_error"] \
-            else ("❌ Errored" if run["has_error"] else "🔵 Running")
+        status_color = "#10B981" if run["has_finish"] and not run["has_error"] \
+            else ("#EF4444" if run["has_error"] else "#3B82F6")
+        status_label = "Completed" if run["has_finish"] and not run["has_error"] \
+            else ("Errored" if run["has_error"] else "Running")
+        status_dot   = "●"
         st.markdown(
-            f'<div style="background:#1E293B;border-radius:8px;padding:12px 14px">'
-            f'<div style="font-size:0.78rem;color:#94A3B8">Last run</div>'
-            f'<div style="font-size:0.9rem;font-weight:600;color:#F1F5F9;margin:2px 0">{run["date_str"]}</div>'
-            f'<div style="font-size:0.8rem;color:{status_color};font-weight:600">{status_label}</div>'
-            f'<div style="font-size:0.72rem;color:#475569;margin-top:4px">{run["lines"]:,} log lines</div>'
+            f'<div style="background:#1F2937;border-radius:10px;padding:14px 16px;'
+            f'border:1px solid #374151">'
+            f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;'
+            f'letter-spacing:0.05em;font-weight:600">Last run</div>'
+            f'<div style="font-size:0.95rem;font-weight:700;color:#F9FAFB;margin:4px 0 2px;'
+            f'letter-spacing:-0.02em">{run["date_str"]}</div>'
+            f'<div style="display:flex;align-items:center;gap:6px;margin-top:4px">'
+            f'<span style="color:{status_color};font-size:0.7rem">{status_dot}</span>'
+            f'<span style="font-size:0.78rem;color:{status_color};font-weight:600">'
+            f'{status_label}</span></div>'
+            f'<div style="font-size:0.68rem;color:#6B7280;margin-top:6px;'
+            f'padding-top:6px;border-top:1px solid #374151">'
+            f'{run["lines"]:,} log lines</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
     else:
-        st.markdown('<p style="font-size:0.82rem;color:#475569">No runs logged yet.</p>', unsafe_allow_html=True)
+        st.markdown(
+            '<p style="font-size:0.82rem;color:#6B7280">No runs logged yet.</p>',
+            unsafe_allow_html=True,
+        )
 
 
 # ── Main content ──────────────────────────────────────────────────────────────
 
 page_header(
-    "Portfolio Intelligence Dashboard",
-    subtitle="Real-time AI equity research · Updated every 24h",
+    "Portfolio Intelligence",
+    subtitle="AI-powered equity research · Updated every 24 hours",
     icon="📈",
 )
 
 stats = _db_stats()
 run   = _latest_run()
 
-# ── Key Metrics Row ───────────────────────────────────────────────────────────
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-
+# ── Alerts ────────────────────────────────────────────────────────────────────
 if stats.get("error"):
-    st.error(f"⚠️ Database error: {stats['error']}")
+    st.error(f"Database error: {stats['error']}")
 elif stats.get("schema_errors"):
-    st.warning(f"⚠️ DB schema errors in tables: {', '.join(stats['schema_errors'])} — counts may be incomplete")
+    st.warning(f"DB schema issues in: {', '.join(stats['schema_errors'])} — some counts may be incomplete")
+
+# ── Key Metrics ───────────────────────────────────────────────────────────────
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 metrics = [
     (c1, str(stats.get("tickers_fundamentals") or "—"), "Tickers Analyzed",   "📋", PRIMARY),
@@ -182,65 +200,65 @@ for col, val, label, icon, color in metrics:
     with col:
         st.markdown(stat_card_html(val, label, icon, color), unsafe_allow_html=True)
 
-st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
 
 # ── Two-column layout ─────────────────────────────────────────────────────────
 left, right = st.columns([3, 2], gap="large")
 
 with left:
-    # ── APEX Latest Predictions ───────────────────────────────────────────────
-    section_title("🤖 Latest APEX Predictions", badge_text="Live", badge_color=SUCCESS)
+    section_title("Latest APEX Predictions", badge_text="Live", badge_color=SUCCESS)
     preds = stats.get("top_predictions", [])
     if preds:
         for p in preds:
-            rec  = p.get("recommendation", "HOLD")
-            col_hex, bg, _ = REC_STYLES.get(rec, (NEUTRAL, "#F1F5F9", rec))
-            conf = p.get("confidence")
-            comp = p.get("composite_score")
+            rec      = p.get("recommendation", "HOLD")
+            col_hex, bg, _ = REC_STYLES.get(rec, (NEUTRAL, "#F9FAFB", rec))
+            conf     = p.get("confidence")
+            comp     = p.get("composite_score")
             date_str = (p.get("created_at") or "")[:10]
             pred_label = p.get("prediction", "")
 
             card(
                 f'<div style="display:flex;justify-content:space-between;align-items:center">'
                 f'<div style="display:flex;align-items:center;gap:12px">'
-                f'<span style="font-size:1.1rem;font-weight:800;color:#0F172A">{p["ticker"]}</span>'
+                f'<span style="font-size:1.05rem;font-weight:800;color:#111827;'
+                f'letter-spacing:-0.02em">{p["ticker"]}</span>'
                 f'{rec_badge_html(rec)}'
-                f'<span style="background:#F1F5F9;color:#64748B;padding:2px 8px;border-radius:6px;'
-                f'font-size:0.78rem">{pred_label}</span>'
+                f'<span style="background:#F3F4F6;color:#6B7280;padding:2px 8px;'
+                f'border-radius:6px;font-size:0.76rem;font-weight:500">'
+                f'{pred_label}</span>'
                 f'</div>'
                 f'<div style="text-align:right">'
-                f'<span style="font-size:0.8rem;color:#64748B">{date_str}</span>'
-                f'<br><span style="font-size:0.78rem;color:#94A3B8">'
-                f'Conf: {conf}/10 · Score: {comp}/10</span>'
+                f'<span style="font-size:0.78rem;color:#9CA3AF">{date_str}</span>'
+                f'<br><span style="font-size:0.73rem;color:#9CA3AF">'
+                f'Conf {conf}/10 · Score {comp}/10</span>'
                 f'</div></div>',
-                padding="14px 18px",
+                padding="13px 18px",
             )
     else:
         st.info("No predictions yet. Open **APEX Chat** and analyze a ticker.", icon="💡")
 
-    st.markdown("")
-    if st.button("🤖 Open APEX Chat →", type="primary", use_container_width=True):
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    if st.button("Open APEX Chat →", type="primary", use_container_width=True):
         st.switch_page("pages/4_🤖_Chat.py")
 
 with right:
     # ── Run Status ────────────────────────────────────────────────────────────
-    section_title("🗓️ Daily Pipeline Status")
+    section_title("Daily Pipeline Status")
     if run:
         if run["has_finish"] and not run["has_error"]:
-            st.success(f"✅ Completed successfully on {run['date_str']}", icon="✅")
+            st.success(f"Completed successfully — {run['date_str']}")
         elif run["has_error"]:
-            st.error(f"❌ Completed with errors on {run['date_str']}", icon="⚠️")
+            st.error(f"Completed with errors — {run['date_str']}")
         else:
-            st.info(f"🔵 In progress / incomplete — {run['date_str']}", icon="🔵")
-        st.caption(f"{run['lines']:,} log lines")
+            st.info(f"In progress / incomplete — {run['date_str']}")
+        st.caption(f"{run['lines']:,} log lines recorded")
     else:
-        st.warning("No pipeline runs found yet.", icon="⚠️")
+        st.warning("No pipeline runs found yet.")
 
-    st.markdown("")
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
     # ── Quick Actions ─────────────────────────────────────────────────────────
-    section_title("⚡ Quick Actions")
-
+    section_title("Quick Actions")
     qa1, qa2 = st.columns(2)
     with qa1:
         if st.button("📊 Database", use_container_width=True):
@@ -253,12 +271,12 @@ with right:
         if st.button("🤖 APEX Chat", use_container_width=True):
             st.switch_page("pages/4_🤖_Chat.py")
 
-    st.markdown("")
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
     # ── System Health ─────────────────────────────────────────────────────────
-    section_title("🔧 System")
-    db_ok = _DB.exists()
-    wl_ok = (_ROOT / "config" / "watchlist.yaml").exists()
+    section_title("System Health")
+    db_ok  = _DB.exists()
+    wl_ok  = (_ROOT / "config" / "watchlist.yaml").exists()
     env_ok = (_ROOT / ".env").exists()
 
     for label, ok in [
@@ -266,13 +284,15 @@ with right:
         ("Watchlist config",  wl_ok),
         (".env credentials",  env_ok),
     ]:
-        icon = "✅" if ok else "❌"
-        status = "OK" if ok else "Missing"
+        dot   = "●"
+        color = "#10B981" if ok else "#EF4444"
+        text  = "OK" if ok else "Missing"
         st.markdown(
-            f'<div style="display:flex;justify-content:space-between;padding:6px 0;'
-            f'border-bottom:1px solid #F1F5F9;font-size:0.875rem">'
-            f'<span style="color:#475569">{label}</span>'
-            f'<span style="font-weight:600;color:{"#059669" if ok else "#DC2626"}">'
-            f'{icon} {status}</span></div>',
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'padding:9px 0;border-bottom:1px solid #F9FAFB">'
+            f'<span style="font-size:0.84rem;color:#374151;font-weight:500">{label}</span>'
+            f'<span style="display:flex;align-items:center;gap:5px;font-size:0.78rem;'
+            f'font-weight:600;color:{color}">'
+            f'<span style="font-size:0.6rem">{dot}</span>{text}</span></div>',
             unsafe_allow_html=True,
         )

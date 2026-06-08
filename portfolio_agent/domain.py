@@ -447,6 +447,12 @@ class HorizonDistribution:
 
 # ── Prediction ─────────────────────────────────────────────────────────────────
 
+_VALID_PREDICTIONS     = frozenset({"BULLISH", "BEARISH", "NEUTRAL"})
+_VALID_RECOMMENDATIONS = frozenset({"STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"})
+_INT_SCORE_FIELDS      = ("confidence", "fundamental_score", "research_score",
+                          "macro_score", "news_score")
+
+
 @dataclass
 class Prediction(_DictCompat):
     """One APEX horizon prediction row (one per ticker per horizon per day)."""
@@ -499,7 +505,32 @@ class Prediction(_DictCompat):
     log_loss: float | None = None
 
     def __post_init__(self) -> None:
-        self.ticker = self.ticker.upper()
+        self.ticker = self.ticker.upper().strip()
+        # Normalize enums — clamp to a known-good default rather than raising,
+        # so DB rows with legacy values still deserialize cleanly.
+        if self.prediction not in _VALID_PREDICTIONS:
+            self.prediction = "NEUTRAL"
+        if self.recommendation not in _VALID_RECOMMENDATIONS:
+            self.recommendation = "HOLD"
+        # Clamp integer scores to [1, 10].
+        for _f in _INT_SCORE_FIELDS:
+            _v = getattr(self, _f)
+            if _v is not None:
+                setattr(self, _f, max(1, min(10, int(round(_v)))))
+        # Clamp composite_score to [1.0, 10.0].
+        if self.composite_score is not None:
+            self.composite_score = max(1.0, min(10.0, round(float(self.composite_score), 4)))
+        # Ensure distribution is always a HorizonDistribution instance, never a plain dict.
+        # Python dataclasses don't enforce types at construction time, so guard here.
+        if isinstance(self.distribution, dict):
+            d = self.distribution
+            self.distribution = HorizonDistribution(
+                strong_down=d.get("strong_down"),
+                moderate_down=d.get("moderate_down"),
+                flat=d.get("flat"),
+                moderate_up=d.get("moderate_up"),
+                strong_up=d.get("strong_up"),
+            )
 
     @classmethod
     def from_db_row(cls, row: dict) -> "Prediction":

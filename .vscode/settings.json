@@ -1,4 +1,19 @@
 {
     "python.terminal.useEnvFile": true,
-    "python.envFile": "${workspaceFolder}/.env"
+    "python.envFile": "${workspaceFolder}/.env",
+    "database-client.connections": [
+        {
+            "name": "portfolio.db",
+            "dbType": "SQLite",
+            "dbPath": "${workspaceFolder}/data/portfolio.db"
+        }
+    ],
+    "sqltools.useNodeRuntime": true,
+    "sqltools.connections": [
+        {
+            "name": "portfolio.db",
+            "driver": "SQLite",
+            "database": "/Users/sumanthboyina/portfolio-agent/data/portfolio.db"
+        }
+    ]
 }

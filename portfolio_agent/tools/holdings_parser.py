@@ -70,33 +70,86 @@ def _flex_header(headers: list[str], *candidates: str) -> Optional[int]:
     return None
 
 
+_FIDELITY_DATA_COLS = {
+    "quantity", "last price", "current value", "cost basis total",
+    "average cost basis", "description",
+}
+
+
+def _is_fidelity_header_row(normalized: list[str]) -> bool:
+    """True if this row looks like a Fidelity data-header (has Symbol + data columns)."""
+    if "symbol" not in normalized:
+        return False
+    return any(c in normalized for c in _FIDELITY_DATA_COLS) or "account number" in normalized
+
+
+def _find_fidelity_sections(all_rows: list) -> list[tuple[int, list[str], str, str]]:
+    """
+    Locate all data-header rows in a Fidelity CSV.
+
+    Handles two export layouts:
+    • Inline (modern): single header row with Account Number / Account Name as columns
+      e.g.  Account Number,Account Name,Symbol,Description,...
+    • Sectioned (multi-account): separate metadata rows before each Symbol header
+      e.g.  Account Number,X123,Account Name,Roth IRA
+            Symbol,Description,...
+
+    Returns list of (header_row_idx, header_cols, account_name, account_number).
+    """
+    sections: list[tuple[int, list[str], str, str]] = []
+    pending_name = ""
+    pending_number = ""
+
+    for i, row in enumerate(all_rows):
+        normalized = [c.strip().lower() for c in row]
+
+        # ── Metadata key-value row (sectioned format) ─────────────────────
+        # Signature: exactly 2–4 non-empty cells, no "symbol", first cell is
+        # "account number" or "account name", second cell is an actual value
+        # (not another column header name).
+        is_metadata = (
+            "account number" in normalized
+            and "symbol" not in normalized
+            and len([c for c in row if c.strip()]) <= 6
+        )
+        if is_metadata:
+            norm = normalized
+            if "account number" in norm:
+                idx = norm.index("account number")
+                val = row[idx + 1].strip() if idx + 1 < len(row) else ""
+                # Only treat as value if it doesn't look like a column header
+                if val and val.lower() not in _FIDELITY_DATA_COLS | {"account name", "symbol", "description"}:
+                    pending_number = val
+            if "account name" in norm:
+                idx = norm.index("account name")
+                val = row[idx + 1].strip() if idx + 1 < len(row) else ""
+                if val and val.lower() not in _FIDELITY_DATA_COLS | {"account number", "symbol", "description"}:
+                    pending_name = val
+            continue
+
+        # ── Data header row ────────────────────────────────────────────────
+        if _is_fidelity_header_row(normalized):
+            headers = [c.strip() for c in row]
+            # Inline format: Account Number and Account Name ARE columns
+            # → don't use pending values (they'll be read per-row from the data)
+            if "account number" in normalized and "account name" in normalized:
+                sections.append((i, headers, "", ""))
+            else:
+                sections.append((i, headers, pending_name, pending_number))
+            pending_name = ""
+            pending_number = ""
+
+    return sections
+
+
 def parse_fidelity_csv(content: str | bytes) -> list[dict]:
     text = _decode(content)
     reader = csv.reader(io.StringIO(text))
     all_rows = list(reader)
 
-    header_idx = None
-    for i, row in enumerate(all_rows):
-        normalized = [c.strip().lower() for c in row]
-        if "symbol" in normalized and "account number" in normalized:
-            header_idx = i
-            break
-
-    if header_idx is None:
+    sections = _find_fidelity_sections(all_rows)
+    if not sections:
         return []
-
-    headers = [c.strip() for c in all_rows[header_idx]]
-    data_rows = all_rows[header_idx + 1:]
-
-    i_account_name   = _flex_header(headers, "Account Name", "Account Name/Number")
-    i_account_number = _flex_header(headers, "Account Number")
-    i_symbol         = _flex_header(headers, "Symbol")
-    i_description    = _flex_header(headers, "Description")
-    i_quantity       = _flex_header(headers, "Quantity")
-    i_last_price     = _flex_header(headers, "Last Price", "Current Price")
-    i_current_value  = _flex_header(headers, "Current Value", "Value")
-    i_cost_basis     = _flex_header(headers, "Cost Basis Total", "Total Cost Basis")
-    i_avg_cost       = _flex_header(headers, "Average Cost Basis", "Avg Cost Basis", "Average Cost")
 
     def _get(row: list[str], idx: Optional[int]) -> str:
         if idx is None or idx >= len(row):
@@ -104,38 +157,52 @@ def parse_fidelity_csv(content: str | bytes) -> list[dict]:
         return row[idx].strip()
 
     results = []
-    for row in data_rows:
-        if not any(c.strip() for c in row):
-            continue
+    for sec_idx, (header_idx, headers, sec_account_name, sec_account_number) in enumerate(sections):
+        next_header = sections[sec_idx + 1][0] if sec_idx + 1 < len(sections) else len(all_rows)
+        data_rows = all_rows[header_idx + 1:next_header]
 
-        # Skip footer/disclaimer rows — long text in the first cell, no real ticker
-        first_cell = row[0].strip() if row else ""
-        if re.match(r"^\d{1,2}/\d{1,2}/\d{4}", first_cell):
-            continue
-        if len(first_cell) > 60:
-            continue
+        i_account_name   = _flex_header(headers, "Account Name", "Account Name/Number")
+        i_account_number = _flex_header(headers, "Account Number")
+        i_symbol         = _flex_header(headers, "Symbol")
+        i_description    = _flex_header(headers, "Description")
+        i_quantity       = _flex_header(headers, "Quantity")
+        i_last_price     = _flex_header(headers, "Last Price", "Current Price")
+        i_current_value  = _flex_header(headers, "Current Value", "Value")
+        i_cost_basis     = _flex_header(headers, "Cost Basis Total", "Total Cost Basis")
+        i_avg_cost       = _flex_header(headers, "Average Cost Basis", "Avg Cost Basis", "Average Cost")
 
-        symbol = _get(row, i_symbol)
-        if _is_invalid_ticker(symbol):
-            continue
+        for row in data_rows:
+            if not any(c.strip() for c in row):
+                continue
 
-        ticker = symbol.upper()
-        account_name = _get(row, i_account_name)
-        account_number = _get(row, i_account_number)
+            first_cell = row[0].strip() if row else ""
+            # Skip footer/disclaimer rows
+            if re.match(r"^\d{1,2}/\d{1,2}/\d{4}", first_cell):
+                continue
+            if len(first_cell) > 60:
+                continue
 
-        results.append({
-            "ticker": ticker,
-            "description": _get(row, i_description),
-            "shares": _clean_float(_get(row, i_quantity)),
-            "avg_cost": _clean_float(_get(row, i_avg_cost)),
-            "cost_basis_total": _clean_float(_get(row, i_cost_basis)),
-            "current_price": _clean_float(_get(row, i_last_price)),
-            "current_value": _clean_float(_get(row, i_current_value)),
-            "account_name": account_name,
-            "account_number": account_number,
-            "account_type": _fidelity_account_type(account_name),
-            "sector": "",
-        })
+            symbol = _get(row, i_symbol)
+            if _is_invalid_ticker(symbol):
+                continue
+
+            ticker = symbol.upper()
+            account_name   = _get(row, i_account_name) or sec_account_name
+            account_number = _get(row, i_account_number) or sec_account_number
+
+            results.append({
+                "ticker": ticker,
+                "description": _get(row, i_description),
+                "shares": _clean_float(_get(row, i_quantity)),
+                "avg_cost": _clean_float(_get(row, i_avg_cost)),
+                "cost_basis_total": _clean_float(_get(row, i_cost_basis)),
+                "current_price": _clean_float(_get(row, i_last_price)),
+                "current_value": _clean_float(_get(row, i_current_value)),
+                "account_name": account_name,
+                "account_number": account_number,
+                "account_type": _fidelity_account_type(account_name),
+                "sector": "",
+            })
 
     return results
 
@@ -223,22 +290,23 @@ def parse_vanguard_csv(content: str | bytes) -> list[dict]:
 
 def detect_broker(content: str | bytes) -> Optional[str]:
     text = _decode(content)
-    sample = text[:500].lower()
+    sample = text[:5000].lower()
 
     if "fidelity" in sample:
         return "fidelity"
     if "vanguard" in sample:
         return "vanguard"
 
-    # Check column headers for Fidelity-specific columns
-    first_lines = text[:2000]
-    if "average cost basis" in first_lines.lower():
+    # Fidelity-specific column names
+    fidelity_signals = {"average cost basis", "cost basis total", "last price change"}
+    if sum(1 for s in fidelity_signals if s in sample) >= 2:
+        return "fidelity"
+    if any(s in sample for s in fidelity_signals):
         return "fidelity"
 
-    # Check for Vanguard-specific column pattern
+    # Vanguard-specific column pattern
     vanguard_cols = {"investment name", "share price", "% of portfolio"}
-    found = sum(1 for col in vanguard_cols if col in first_lines.lower())
-    if found >= 2:
+    if sum(1 for col in vanguard_cols if col in sample) >= 2:
         return "vanguard"
 
     return None
