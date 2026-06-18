@@ -107,7 +107,7 @@ def _load_metric_series() -> pd.DataFrame:
     with sqlite3.connect(str(_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT prediction_date, evaluated_at, ticker, horizon_days,
+            SELECT as_of_date AS prediction_date, evaluated_at, ticker, horizon_days,
                    brier_score, log_loss,
                    actual_return, predicted_return_low, predicted_return_high,
                    predicted_direction, actual_direction,
@@ -117,7 +117,7 @@ def _load_metric_series() -> pd.DataFrame:
             FROM predictions
             WHERE evaluation_status = 'evaluated'
               AND brier_score IS NOT NULL
-            ORDER BY prediction_date ASC
+            ORDER BY as_of_date ASC
         """).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
@@ -179,7 +179,7 @@ def _compute_filtered_metrics(model_names: list[str] | None, lookback: int) -> l
                 AS low_conviction_accuracy
         FROM predictions
         WHERE evaluation_status = 'evaluated'
-          AND prediction_date >= DATE('now', '-' || ? || ' days')
+          AND as_of_date >= DATE('now', '-' || ? || ' days')
           {model_clause}
         GROUP BY horizon_days
     """
@@ -273,9 +273,10 @@ with st.sidebar:
     # Options: "All models" + each higher model individually + "Lower reasoning" (grouped)
     _radio_options = ["All models"] + _higher_names + (["Lower reasoning"] if _lower_names else [])
 
-    _model_sel = st.radio(
+    _model_sel = st.selectbox(
         "model_filter",
         _radio_options,
+        index=0,
         label_visibility="collapsed",
         key="val_model_radio",
     )
@@ -608,11 +609,7 @@ def _render_scorecard_tiles(by_horizon: dict, all_horizons: list, horizon_labels
 # ── Tab 1: Scorecard ──────────────────────────────────────────────────────────
 
 with tabs[0]:
-    metrics = (
-        _compute_filtered_metrics(_model_filter, lookback)
-        if _model_filter else
-        get_rolling_metrics(lookback)
-    )
+    metrics = _compute_filtered_metrics(_model_filter, lookback)
     if not metrics:
         st.info(
             "No evaluated predictions yet. "
@@ -1090,9 +1087,7 @@ with tabs[1]:
 # ── Tab 3: Accuracy Heatmap ───────────────────────────────────────────────────
 
 with tabs[2]:
-    if _model_filter:
-        st.caption(f"ℹ️ Model filter active (`{'`, `'.join(_model_filter)}`) — heatmap uses pre-aggregated data and cannot be model-filtered. Showing all models.")
-    heatmap_data = get_accuracy_heatmap_data()
+    heatmap_data = get_accuracy_heatmap_data(lookback_days=lookback, model_names=_model_filter)
     if not heatmap_data:
         st.info("No evaluated predictions yet. Run Evaluation to generate heatmap data.")
     else:
@@ -1139,9 +1134,7 @@ with tabs[2]:
 # ── Tab 4: Calibration ────────────────────────────────────────────────────────
 
 with tabs[3]:
-    if _model_filter:
-        st.caption(f"ℹ️ Model filter active (`{'`, `'.join(_model_filter)}`) — calibration data uses pre-aggregated probability buckets and cannot be model-filtered. Showing all models.")
-    _cal_raw = get_calibration_data()
+    _cal_raw = get_calibration_data(lookback_days=lookback, model_names=_model_filter)
     if isinstance(_cal_raw, list):
         _cal_raw = {"conviction": _cal_raw, "summary": {}, "reliability": [],
                     "bucket_table": [], "horizon_breakdown": {}}
@@ -1359,7 +1352,7 @@ perfect = 0.0 · coin flip = 0.25 · worst = 1.0
 # ── Tab 5: Recent Predictions ─────────────────────────────────────────────────
 
 with tabs[4]:
-    preds = get_recent_evaluated_predictions(limit=200)
+    preds = get_recent_evaluated_predictions(limit=500, lookback_days=lookback)
     # Apply global model filter first
     if _model_filter and preds:
         preds = [p for p in preds if p.get("model_name") in _model_filter]
@@ -1380,7 +1373,7 @@ with tabs[4]:
             [p for p in preds
              if (not h_filter or p.get("horizon_days") in h_filter)
              and (not o_filter or p.get("outcome") in o_filter)],
-            key=lambda p: p.get("prediction_date") or "",
+            key=lambda p: p.get("as_of_date") or p.get("prediction_date") or "",
             reverse=True,
         )
 
@@ -1433,7 +1426,7 @@ with tabs[4]:
                     dist_parts.append(f"{label}{int(v)}%")
 
             rows.append({
-                "Date":            p.get("prediction_date") or "",
+                "Date":            p.get("as_of_date") or p.get("prediction_date") or "",
                 "Ticker":          p.get("ticker") or "",
                 "Horizon":         f"{p['horizon_days']}d" if p.get("horizon_days") else "—",
                 "Predicted":       p.get("predicted_direction") or "—",
@@ -1538,10 +1531,8 @@ with tabs[5]:
 # ── Tab 7: Drift ──────────────────────────────────────────────────────────────
 
 with tabs[6]:
-    if _model_filter:
-        st.caption(f"ℹ️ Model filter active — drift and volume data uses pre-aggregated queries. Showing all models.")
-    drift_5d = get_drift_data(horizon_days=5, window=30)
-    vol_data  = get_volume_by_horizon(lookback_days=90)
+    drift_5d = get_drift_data(horizon_days=5, window=30, lookback_days=lookback, model_names=_model_filter)
+    vol_data  = get_volume_by_horizon(lookback_days=lookback)
 
     col_l, col_r = st.columns(2)
 
@@ -1600,7 +1591,7 @@ with tabs[6]:
 # ── Tab 8: Version Comparison ─────────────────────────────────────────────────
 
 with tabs[7]:
-    ver_data = get_system_version_comparison()
+    ver_data = get_system_version_comparison(lookback_days=lookback, model_names=_model_filter)
     if not ver_data:
         st.info("No version comparison data yet — needs evaluated predictions.")
     else:

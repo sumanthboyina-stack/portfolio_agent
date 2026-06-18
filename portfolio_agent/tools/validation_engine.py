@@ -10,14 +10,21 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from portfolio_agent.tools.prediction_db import _db
 from portfolio_agent.tools.yfinance_tools import get_close
 from portfolio_agent.log import get_logger as _get_logger
 
 _log = _get_logger("validation")
+_CST = ZoneInfo("America/Chicago")
+
+
+def _today_cst() -> date:
+    """Current date in CST/CDT."""
+    return datetime.now(_CST).date()
 
 
 # ── Return buckets ────────────────────────────────────────────────────────────
@@ -125,7 +132,7 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
     """
     from portfolio_agent.tools.prediction_db import get_matured_pending_predictions, update_prediction_outcome, is_trading_day
     if today is None:
-        today = date.today()
+        today = _today_cst()
     if not force and not is_trading_day(today):
         _log.info(f"  [validation/L1] {today} is not a trading day — skipped (use force=True to override)",
                   event_type="phase_start", date=str(today), skipped=True)
@@ -151,7 +158,7 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
         h_days   = pred.get("horizon_days", "?")
         pred_dir = pred.get("predicted_direction", "?")
         try:
-            start = (pred.get("prediction_date") or pred.get("created_at", "")[:10])
+            start = (pred.get("as_of_date") or pred.get("created_at", "")[:10])
             end   = pred.get("evaluation_date")
             if not start or not end:
                 _log.warning(f"  [{i}/{len(pending)}] {ticker} {h_days}d — skipped (missing dates)",
@@ -239,17 +246,17 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
         _fl_old    = (today - timedelta(days=10)).isoformat()  # cap at 10d (5d return is stale beyond that)
         with _db() as _fl_c:
             _fl_rows = _fl_c.execute(
-                """SELECT id, ticker, date FROM news_filter_log
+                """SELECT id, ticker, as_of_date FROM news_filter_log
                    WHERE final_decision = 'dropped'
                      AND followup_5d_return IS NULL
-                     AND date <= ?
-                     AND date >= ?""",
+                     AND as_of_date <= ?
+                     AND as_of_date >= ?""",
                 [_fl_recent, _fl_old],
             ).fetchall()
         _fl_rows = [dict(r) for r in _fl_rows]
         _fl_updated = 0
         for _fl in _fl_rows:
-            _start_p = get_close(_fl["ticker"], _fl["date"])
+            _start_p = get_close(_fl["ticker"], _fl["as_of_date"])
             _end_p   = get_close(_fl["ticker"], today.isoformat())
             if _start_p and _end_p and _start_p > 0:
                 _ret = (_end_p / _start_p) - 1
@@ -281,7 +288,7 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
     from portfolio_agent.tools.prediction_db import upsert_rolling_metric
 
     if today is None:
-        today = date.today()
+        today = _today_cst()
     today_str = today.isoformat()
 
     _log.info(f"  [validation/L2] Recomputing rolling metrics for {today_str}…",
@@ -400,9 +407,11 @@ def weekly_pattern_analysis() -> dict:
 
     # Skip if already ran this week
     with _db() as c:
+        _week_ago = (_today_cst() - timedelta(days=7)).isoformat()
         existing = c.execute(
             """SELECT id FROM validation_reports
-               WHERE period = 'weekly' AND report_date >= date('now', '-7 days')""",
+               WHERE period = 'weekly' AND report_date >= ?""",
+            [_week_ago],
         ).fetchone()
     if existing:
         return {"skipped": True, "reason": "already ran this week"}
@@ -415,9 +424,10 @@ def weekly_pattern_analysis() -> dict:
                       risk_segment, evaluated_at, error_magnitude
                FROM predictions
                WHERE evaluation_status = 'evaluated'
-                 AND evaluated_at >= date('now', '-7 days')
+                 AND evaluated_at >= ?
                  AND outcome IN ('wrong_significant', 'wrong_minor')
                ORDER BY ABS(error_magnitude) DESC LIMIT 30""",
+            [_week_ago],
         ).fetchall()
 
     wrong = [dict(r) for r in rows]
@@ -494,42 +504,57 @@ def _build_postmortem_prompt(wrong: list[dict]) -> str:
 
 # ── Dashboard read helpers ─────────────────────────────────────────────────────
 
-def get_recent_evaluated_predictions(limit: int = 100) -> list[dict]:
+def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None = None) -> list[dict]:
+    where = "WHERE evaluation_status IN ('evaluated', 'data_missing')"
+    params: list = []
+    if lookback_days:
+        cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
+        where += " AND as_of_date >= ?"
+        params.append(cutoff)
+    params.append(limit)
     with _db() as c:
         rows = c.execute(
-            """SELECT ticker, prediction_date, horizon_days, predicted_direction,
+            f"""SELECT ticker, as_of_date, horizon_days, predicted_direction,
                       predicted_return_low, predicted_return_high,
                       actual_return, actual_bucket, outcome, conviction_score, excess_return,
                       risk_segment, system_version, evaluated_at, evaluation_status,
                       in_predicted_range, error_magnitude,
                       p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                      brier_score, log_loss,
+                      brier_score, log_loss, model_name,
                       start_price, pt_current_price
                FROM predictions
-               WHERE evaluation_status IN ('evaluated', 'data_missing')
-               ORDER BY prediction_date DESC, evaluated_at DESC LIMIT ?""",
-            [limit],
+               {where}
+               ORDER BY as_of_date DESC, evaluated_at DESC LIMIT ?""",
+            params,
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_accuracy_heatmap_data() -> list[dict]:
+def get_accuracy_heatmap_data(lookback_days: int | None = None, model_names: list[str] | None = None) -> list[dict]:
+    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", "actual_direction IS NOT NULL"]
+    params: list = []
+    if lookback_days:
+        clauses.append("as_of_date >= ?")
+        params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
+    if model_names:
+        clauses.append(f"model_name IN ({','.join('?' * len(model_names))})")
+        params.extend(model_names)
+    where = "WHERE " + " AND ".join(clauses)
     with _db() as c:
         rows = c.execute(
-            """SELECT horizon_days,
+            f"""SELECT horizon_days,
                       COALESCE(risk_segment, 'unknown') AS segment,
                       COUNT(*) AS n,
                       AVG(CASE WHEN UPPER(actual_direction) = UPPER(predicted_direction) THEN 1.0 ELSE 0.0 END) AS dir_acc
                FROM predictions
-               WHERE evaluation_status = 'evaluated'
-                 AND horizon_days IS NOT NULL
-                 AND actual_direction IS NOT NULL
+               {where}
                GROUP BY horizon_days, segment""",
+            params,
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_calibration_data() -> dict:
+def get_calibration_data(lookback_days: int | None = None, model_names: list[str] | None = None) -> dict:
     """
     Returns all data needed for the calibration tab:
 
@@ -544,9 +569,18 @@ def get_calibration_data() -> dict:
       actual_up = 1 if actual_return > +0.5%, else 0
       Brier baseline = 0.25 (coin flip), log-loss baseline = ln(2) ≈ 0.693
     """
+    clauses = ["evaluation_status = 'evaluated'", "actual_direction IS NOT NULL"]
+    params: list = []
+    if lookback_days:
+        clauses.append("as_of_date >= ?")
+        params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
+    if model_names:
+        clauses.append(f"model_name IN ({','.join('?' * len(model_names))})")
+        params.extend(model_names)
+    where = "WHERE " + " AND ".join(clauses)
     with _db() as c:
         rows = c.execute(
-            """SELECT conviction_score,
+            f"""SELECT conviction_score,
                       actual_return,
                       actual_direction,
                       CASE WHEN UPPER(actual_direction) = UPPER(predicted_direction) THEN 1.0 ELSE 0.0 END AS dir_correct,
@@ -554,8 +588,8 @@ def get_calibration_data() -> dict:
                       horizon_days,
                       COALESCE(risk_segment, 'unknown') AS segment
                FROM predictions
-               WHERE evaluation_status = 'evaluated'
-                 AND actual_direction IS NOT NULL""",
+               {where}""",
+            params,
         ).fetchall()
 
     rows = [dict(r) for r in rows]
@@ -654,18 +688,24 @@ def get_calibration_data() -> dict:
     }
 
 
-def get_drift_data(horizon_days: int = 5, window: int = 30) -> list[dict]:
-    cutoff = (date.today() - timedelta(days=90)).isoformat()
+def get_drift_data(horizon_days: int = 5, window: int = 30, lookback_days: int = 90, model_names: list[str] | None = None) -> list[dict]:
+    cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
+    extra = ""
+    params: list = [horizon_days, cutoff]
+    if model_names:
+        extra = f"AND model_name IN ({','.join('?' * len(model_names))})"
+        params.extend(model_names)
     with _db() as c:
         rows = c.execute(
-            """SELECT DATE(evaluated_at) AS eval_date,
+            f"""SELECT DATE(evaluated_at) AS eval_date,
                       CASE WHEN UPPER(actual_direction) = UPPER(predicted_direction) THEN 1.0 ELSE 0.0 END AS correct
                FROM predictions
                WHERE evaluation_status = 'evaluated'
                  AND horizon_days = ?
                  AND evaluated_at >= ?
+                 {extra}
                ORDER BY eval_date""",
-            [horizon_days, cutoff],
+            params,
         ).fetchall()
 
     if not rows:
@@ -687,31 +727,40 @@ def get_drift_data(horizon_days: int = 5, window: int = 30) -> list[dict]:
 
 
 def get_volume_by_horizon(lookback_days: int = 90) -> list[dict]:
-    cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+    cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
     with _db() as c:
         rows = c.execute(
-            """SELECT DATE(created_at) AS pred_date, horizon_days, COUNT(*) AS n
+            """SELECT as_of_date AS pred_date, horizon_days, COUNT(*) AS n
                FROM predictions
-               WHERE created_at >= ? AND horizon_days IS NOT NULL
-               GROUP BY pred_date, horizon_days
-               ORDER BY pred_date""",
+               WHERE as_of_date >= ? AND horizon_days IS NOT NULL
+               GROUP BY as_of_date, horizon_days
+               ORDER BY as_of_date""",
             [cutoff],
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_system_version_comparison() -> list[dict]:
+def get_system_version_comparison(lookback_days: int | None = None, model_names: list[str] | None = None) -> list[dict]:
+    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL"]
+    params: list = []
+    if lookback_days:
+        clauses.append("as_of_date >= ?")
+        params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
+    if model_names:
+        clauses.append(f"model_name IN ({','.join('?' * len(model_names))})")
+        params.extend(model_names)
+    where = "WHERE " + " AND ".join(clauses)
     with _db() as c:
         rows = c.execute(
-            """SELECT COALESCE(system_version, 'v1.0') AS sys_ver,
+            f"""SELECT COALESCE(system_version, 'v1.0') AS sys_ver,
                       horizon_days,
                       COUNT(*) AS n,
                       AVG(CASE WHEN UPPER(actual_direction) = UPPER(predicted_direction) THEN 1.0 ELSE 0.0 END) AS dir_acc,
                       AVG(excess_return) AS mean_excess
                FROM predictions
-               WHERE evaluation_status = 'evaluated'
-                 AND horizon_days IS NOT NULL
+               {where}
                GROUP BY sys_ver, horizon_days
                ORDER BY sys_ver, horizon_days""",
+            params,
         ).fetchall()
     return [dict(r) for r in rows]

@@ -86,15 +86,17 @@ Question: Daily portfolio review — provide investment recommendation.
 
 Using the context above (fundamentals, research, news, macro, dynamic_weights, prediction_history):
 
-1. State the weight regime and dynamic weights (from dynamic_weights in context).
+1. State the weight regime and signal summary (from dynamic_weights.regime and dynamic_weights.signal_strengths).
 2. Have each analyst score their domain 1-10: DR. CHEN (fundamentals), MARCUS WEBB (research),
    ELENA VARGA (macro), JAMES PARK (news).
 3. Cross-examine if scores diverge > 3 pts.
 4. Compare to prior prediction if one exists.
-5. Compute composite = fund_w×fund_score + res_w×res_score + mac_w×mac_score + news_w×news_score.
-6. Map composite to STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL.
-7. For EACH scheduled horizon below, provide direction, return range, conviction, AND a probability
-   distribution across 5 return buckets (integers summing to 100):
+5. For EACH scheduled horizon, look up its weights from dynamic_weights.weights_by_horizon[horizon_days]
+   and compute: horizon_composite = fund_w×fund_score + res_w×res_score + mac_w×mac_score + news_w×news_score.
+   For the top-level composite_score use the weights from the longest scheduled horizon (most balanced view).
+6. Map the overall composite to STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL.
+7. For EACH scheduled horizon below, provide direction, return range, conviction, the horizon-specific
+   weights used, AND a probability distribution across 5 return buckets (integers summing to 100):
    strong_down (<-5%), moderate_down (-5% to -1%), flat (-1% to +1%), moderate_up (+1% to +5%), strong_up (>+5%).
    Be honest: if you're uncertain, spread probability across buckets. Don't collapse everything into one.
 {horizons_instruction}
@@ -132,6 +134,8 @@ End your response with EXACTLY this JSON block (no text after):
       "predicted_return_low": 1.5,
       "predicted_return_high": 4.0,
       "conviction_score": 7,
+      "horizon_composite": 6.8,
+      "weights_used": {{"news": 0.60, "research": 0.22, "macro": 0.12, "fundamentals": 0.06}},
       "reasoning_text": "News/momentum catalyst driving 5-day outlook",
       "distribution": {{
         "strong_down": 5,

@@ -370,12 +370,18 @@ def fill_data_gaps(ticker: str, context: dict) -> tuple[dict, list[str]]:
 
 # ── Combined single-call context for the reasoning agent ─────────────────────
 
-def get_full_analysis_context(ticker: str) -> str:
+def get_full_analysis_context(
+    ticker: str,
+    horizons: list[int] | None = None,
+) -> str:
     """
     Load ALL data needed by the APEX reasoning agent in a single call:
       1. Stored fundamentals, research, news (7d), prediction history
       2. Live macro snapshot (yfinance, no LLM)
-      3. Pre-computed dynamic weights via the weight engine
+      3. Pre-computed dynamic weights — one set per scheduled horizon
+
+    horizons: the horizon_days list for today's run (e.g. [5], [21], [5, 21, 63]).
+    Defaults to [5, 21, 63] when called from the interactive chat path.
 
     The weights are deterministically computed by Python — the LLM must use
     the returned weights verbatim in the synthesis step.
@@ -386,6 +392,9 @@ def get_full_analysis_context(ticker: str) -> str:
     from portfolio_agent.tools.research_db import get_stored_research
     from portfolio_agent.tools.prediction_db import get_prediction_history
     from portfolio_agent.tools.weight_engine import compute_dynamic_weights
+
+    if horizons is None:
+        horizons = [5, 21, 63]
 
     ticker = ticker.upper()
 
@@ -410,13 +419,14 @@ def get_full_analysis_context(ticker: str) -> str:
     except Exception:
         pass
 
-    # ── 3. Dynamic weights ────────────────────────────────────────────────────
+    # ── 3. Dynamic weights — per horizon + shared signal context ─────────────
     weight_data = compute_dynamic_weights(
         ticker=ticker,
         news_data=news,
         research_data=research,
         macro_snapshot=macro_snapshot,
         fundamentals_data=fundamentals,
+        horizons=horizons,
     )
 
     # Build score-cap instruction for the LLM
@@ -432,6 +442,19 @@ def get_full_analysis_context(ticker: str) -> str:
         if cap_lines else "All data sources populated — no score caps."
     )
 
+    # Per-horizon weight summaries for the weight instruction
+    wbh = weight_data.get("weights_by_horizon") or {}
+
+    def _pct(v: float) -> str:
+        return f"{round(v * 100)}%"
+
+    horizon_weight_lines = [
+        f"  {h}d: News {_pct(w['news'])} · Research {_pct(w['research'])} · "
+        f"Macro {_pct(w['macro'])} · Fundamentals {_pct(w['fundamentals'])}"
+        for h, w in sorted(wbh.items())
+    ]
+    horizon_weight_str = "\n".join(horizon_weight_lines) if horizon_weight_lines else "(none)"
+
     return json.dumps({
         "ticker":             ticker,
         "fundamentals":       _safe_to_dict(fundamentals),
@@ -442,8 +465,10 @@ def get_full_analysis_context(ticker: str) -> str:
         "data_gaps":          data_gaps,
         "dynamic_weights":    weight_data,
         "weight_instruction": (
-            f"CRITICAL: Use the exact weights in dynamic_weights.weights. "
-            f"Regime: {weight_data['regime']}. {weight_data['weight_summary']}. "
+            f"CRITICAL: Use the exact per-horizon weights from "
+            f"dynamic_weights.weights_by_horizon for each horizon's composite score. "
+            f"Regime: {weight_data['regime']}.\n"
+            f"Per-horizon weights:\n{horizon_weight_str}\n"
             f"{cap_instruction}"
         ),
     }, default=str)

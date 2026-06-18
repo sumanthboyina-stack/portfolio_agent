@@ -855,7 +855,7 @@ def _chat_tool_get_fundamentals(ticker: str) -> dict:
 def _chat_tool_get_research(ticker: str) -> dict:
     from portfolio_agent.tools.research_db import get_stored_research
     data = get_stored_research(ticker.upper())
-    if data and data.get("raw_fetched_at"):
+    if data and (data.get("as_of_date") or data.get("raw_fetched_at")):
         return {"source": "db", "ticker": ticker.upper(), "research": data}
     try:
         from portfolio_agent.tools.broker_research import get_broker_research

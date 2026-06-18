@@ -21,11 +21,17 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from portfolio_agent.log import get_logger as _get_logger
 from portfolio_agent.tools.db import db_conn
 
 _log = _get_logger("news")
+_CST = ZoneInfo("America/Chicago")
+
+
+def _today_cst() -> str:
+    return datetime.now(_CST).date().isoformat()
 
 
 def _parse_themes(raw: str | None) -> list:
@@ -62,7 +68,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS news_daily_update (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            date             TEXT    NOT NULL,
+            as_of_date       TEXT    NOT NULL,
             ticker           TEXT    NOT NULL,
             row_type         TEXT    NOT NULL DEFAULT 'ticker',
             headline_1       TEXT,
@@ -79,13 +85,13 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     # One ticker-summary per ticker per day
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uidx_ticker_daily
-        ON news_daily_update(date, ticker)
+        ON news_daily_update(as_of_date, ticker)
         WHERE row_type = 'ticker'
     """)
     # One market item per headline per day (deduplicates cross-source)
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uidx_market_headline
-        ON news_daily_update(date, headline_1)
+        ON news_daily_update(as_of_date, headline_1)
         WHERE row_type = 'market_item'
     """)
     # ── Filter audit log: one row per ticker per day across all 77 tickers ──────
@@ -96,7 +102,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS news_filter_log (
             id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-            date                     TEXT    NOT NULL,
+            as_of_date               TEXT    NOT NULL,
             ticker                   TEXT    NOT NULL,
             stage_2_decision         TEXT    NOT NULL,
             stage_2_reason           TEXT,
@@ -111,7 +117,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uidx_filter_log_daily
-        ON news_filter_log(date, ticker)
+        ON news_filter_log(as_of_date, ticker)
     """)
     # ── Article-hash table — Stage 4 change detection ─────────────────────────
     # PRIMARY KEY (ticker, title_hash) prevents duplicates.
@@ -139,6 +145,11 @@ def _add_model_cols(conn: sqlite3.Connection) -> None:
         ("model_name",     "TEXT"),
         ("model_provider", "TEXT"),
     ])
+    # Rename date → as_of_date (idempotent — only runs if old column still exists)
+    for tbl in ("news_daily_update", "news_filter_log"):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({tbl})")}
+        if "date" in cols and "as_of_date" not in cols:
+            conn.execute(f"ALTER TABLE {tbl} RENAME COLUMN date TO as_of_date")
 
 
 @contextmanager
@@ -165,14 +176,14 @@ def get_todays_ticker_news(ticker: str) -> str:
     Returns:
         JSON: {found: bool, record: {...} or null}
     """
-    today = date.today().isoformat()
+    today = _today_cst()
     with _db() as c:
         row = c.execute(
-            """SELECT id, date, ticker, headline_1, headline_2, sentiment,
+            """SELECT id, as_of_date, ticker, headline_1, headline_2, sentiment,
                       sentiment_score, top_themes, trending,
                       impacted_tickers, source, updated_at
                FROM news_daily_update
-               WHERE date = ? AND ticker = ? AND row_type = 'ticker'""",
+               WHERE as_of_date = ? AND ticker = ? AND row_type = 'ticker'""",
             [today, ticker.upper()],
         ).fetchone()
     if row:
@@ -180,7 +191,7 @@ def get_todays_ticker_news(ticker: str) -> str:
             "found": True,
             "record": {
                 "id": row["id"],
-                "date": row["date"],
+                "as_of_date": row["as_of_date"],
                 "ticker": row["ticker"],
                 "headline_1": row["headline_1"],
                 "headline_2": row["headline_2"],
@@ -206,13 +217,13 @@ def get_todays_market_news() -> str:
         JSON: {date, count, items: [{id, headline, source, sentiment,
                sentiment_score, impacted_tickers, top_themes}]}
     """
-    today = date.today().isoformat()
+    today = _today_cst()
     with _db() as c:
         rows = c.execute(
             """SELECT id, headline_1, source, sentiment, sentiment_score,
                       impacted_tickers, top_themes, updated_at
                FROM news_daily_update
-               WHERE date = ? AND row_type = 'market_item'
+               WHERE as_of_date = ? AND row_type = 'market_item'
                ORDER BY id ASC""",
             [today],
         ).fetchall()
@@ -229,7 +240,7 @@ def get_todays_market_news() -> str:
         }
         for r in rows
     ]
-    return json.dumps({"date": today, "count": len(items), "items": items})
+    return json.dumps({"as_of_date": today, "count": len(items), "items": items})
 
 
 def get_historical_news(ticker: str, days: int = 7) -> str:
@@ -244,19 +255,19 @@ def get_historical_news(ticker: str, days: int = 7) -> str:
         JSON: {ticker, days, count, records:[{date, headline_1, headline_2,
         sentiment, sentiment_score, top_themes, trending, impacted_tickers, source}]}
     """
-    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(_CST).date() - timedelta(days=days)).isoformat()
     with _db() as c:
         rows = c.execute(
-            """SELECT date, headline_1, headline_2, sentiment, sentiment_score,
+            """SELECT as_of_date, headline_1, headline_2, sentiment, sentiment_score,
                       top_themes, trending, impacted_tickers, source
                FROM news_daily_update
-               WHERE ticker = ? AND date >= ? AND row_type = 'ticker'
-               ORDER BY date DESC""",
+               WHERE ticker = ? AND as_of_date >= ? AND row_type = 'ticker'
+               ORDER BY as_of_date DESC""",
             [ticker.upper(), cutoff],
         ).fetchall()
     records = [
         {
-            "date": r["date"],
+            "as_of_date": r["as_of_date"],
             "headline_1": r["headline_1"],
             "headline_2": r["headline_2"],
             "sentiment": r["sentiment"],
@@ -281,18 +292,18 @@ def get_all_recent_news(days: int = 7) -> str:
     Returns:
         JSON: {days, tickers_tracked, records:[...]}
     """
-    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(_CST).date() - timedelta(days=days)).isoformat()
     with _db() as c:
         rows = c.execute(
-            """SELECT n.ticker, n.date AS latest_date, n.sentiment,
+            """SELECT n.ticker, n.as_of_date AS latest_date, n.sentiment,
                       n.sentiment_score, n.headline_1, n.trending, n.source
                FROM news_daily_update n
                INNER JOIN (
-                   SELECT ticker, MAX(date) AS max_date
+                   SELECT ticker, MAX(as_of_date) AS max_date
                    FROM news_daily_update
-                   WHERE date >= ? AND row_type = 'ticker'
+                   WHERE as_of_date >= ? AND row_type = 'ticker'
                    GROUP BY ticker
-               ) latest ON n.ticker = latest.ticker AND n.date = latest.max_date
+               ) latest ON n.ticker = latest.ticker AND n.as_of_date = latest.max_date
                WHERE n.row_type = 'ticker'
                ORDER BY n.sentiment_score ASC""",
             [cutoff],
@@ -345,14 +356,14 @@ def save_ticker_news(
     Returns:
         JSON: {saved, date, ticker, action: "inserted"|"updated"}
     """
-    today = date.today().isoformat()
+    today = _today_cst()
     ticker = ticker.upper()
     themes_str = _normalise_themes(top_themes)
     try:
         with _db() as c:
             existing = c.execute(
                 """SELECT id FROM news_daily_update
-                   WHERE date = ? AND ticker = ? AND row_type = 'ticker'""",
+                   WHERE as_of_date = ? AND ticker = ? AND row_type = 'ticker'""",
                 [today, ticker],
             ).fetchone()
             if existing:
@@ -375,7 +386,7 @@ def save_ticker_news(
             else:
                 c.execute(
                     """INSERT INTO news_daily_update
-                           (date, ticker, row_type, headline_1, headline_2, sentiment,
+                           (as_of_date, ticker, row_type, headline_1, headline_2, sentiment,
                             sentiment_score, top_themes, trending,
                             impacted_tickers, source, updated_at)
                        VALUES (?, ?, 'ticker', ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
@@ -385,7 +396,7 @@ def save_ticker_news(
                 )
                 action = "inserted"
             c.commit()
-        return json.dumps({"saved": True, "date": today, "ticker": ticker, "action": action})
+        return json.dumps({"saved": True, "as_of_date": today, "ticker": ticker, "action": action})
     except Exception as exc:
         return json.dumps({"saved": False, "error": str(exc)})
 
@@ -415,26 +426,26 @@ def save_market_news_item(
     Returns:
         JSON: {saved, date, headline, source, reason: "inserted"|"duplicate"|"error"}
     """
-    today = date.today().isoformat()
+    today = _today_cst()
     themes_str = _normalise_themes(top_themes)
     try:
         with _db() as c:
             exists = c.execute(
                 """SELECT 1 FROM news_daily_update
-                   WHERE date = ? AND headline_1 = ? AND row_type = 'market_item'""",
+                   WHERE as_of_date = ? AND headline_1 = ? AND row_type = 'market_item'""",
                 [today, headline],
             ).fetchone()
             if exists:
                 return json.dumps({
                     "saved": False,
-                    "date": today,
+                    "as_of_date": today,
                     "headline": headline,
                     "source": source,
                     "reason": "duplicate",
                 })
             c.execute(
                 """INSERT INTO news_daily_update
-                       (date, ticker, row_type, headline_1, sentiment, sentiment_score,
+                       (as_of_date, ticker, row_type, headline_1, sentiment, sentiment_score,
                         top_themes, impacted_tickers, source, updated_at)
                    VALUES (?, 'MARKET', 'market_item', ?, ?, ?, ?, ?, ?, datetime('now'))""",
                 [today, headline, sentiment, float(sentiment_score),
@@ -442,7 +453,7 @@ def save_market_news_item(
             )
             c.commit()
         return json.dumps({
-            "saved": True, "date": today,
+            "saved": True, "as_of_date": today,
             "headline": headline, "source": source, "reason": "inserted",
         })
     except Exception as exc:
@@ -461,13 +472,13 @@ def update_ticker_news_model(
     Called after run_analysis_with_failover() returns so we know which model succeeded.
     news_date defaults to today. Silently no-ops if the row doesn't exist yet.
     """
-    target_date = news_date or date.today().isoformat()
+    target_date = news_date or _today_cst()
     try:
         with _db() as c:
             c.execute(
                 """UPDATE news_daily_update
                    SET model_name = ?, model_provider = ?
-                   WHERE date = ? AND ticker = ? AND row_type = 'ticker'""",
+                   WHERE as_of_date = ? AND ticker = ? AND row_type = 'ticker'""",
                 [model_name, model_provider, target_date, ticker.upper()],
             )
             c.commit()
@@ -489,7 +500,7 @@ def load_seen_hashes(tickers: list[str], lookback_days: int = 7) -> dict[str, se
     result: dict[str, set[str]] = {t.upper(): set() for t in tickers}
     if not tickers:
         return result
-    cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+    cutoff = (datetime.now(_CST).date() - timedelta(days=lookback_days)).isoformat()
     placeholders = ",".join("?" * len(tickers))
     try:
         with _db() as c:
@@ -559,7 +570,7 @@ def log_filter_decisions(decisions: list[dict]) -> None:
     followup_5d_return is left NULL here and filled later by the validation engine.
     Silently skips on any DB error so it never blocks the main batch loop.
     """
-    today = date.today().isoformat()
+    today = _today_cst()
     try:
         with _db() as c:
             for d in decisions:
@@ -567,11 +578,11 @@ def log_filter_decisions(decisions: list[dict]) -> None:
                 mk_json = json.dumps(mk) if mk else None
                 c.execute(
                     """INSERT INTO news_filter_log
-                           (date, ticker, stage_2_decision, stage_2_reason,
+                           (as_of_date, ticker, stage_2_decision, stage_2_reason,
                             stage_2_matched_keywords, stage_3_decision,
                             stage_3_score, stage_3_summary, final_decision)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(date, ticker) DO UPDATE SET
+                       ON CONFLICT(as_of_date, ticker) DO UPDATE SET
                            stage_2_decision         = excluded.stage_2_decision,
                            stage_2_reason           = excluded.stage_2_reason,
                            stage_2_matched_keywords = excluded.stage_2_matched_keywords,

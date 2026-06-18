@@ -123,19 +123,27 @@ def _load_db_runs(limit: int = 40) -> list[dict]:
 
 def _start_job(flag: str) -> tuple[int, Path, str]:
     """Launch job in background, piping stdout+stderr to a timestamped log file."""
+    import shlex
     ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
     job_label = {
-        "--daily":              "daily",
-        "--daily-fundamentals": "fundamentals",
-        "--daily-research":     "research",
-        "--daily-news":         "news",
-    }.get(flag, "daily")
+        "--batch morning":       "morning",
+        "--batch intraday":      "intraday",
+        "--batch evening":       "evening",
+        "--daily --force-all":   "daily",
+        "--daily":               "daily",
+        "--daily-fundamentals":  "fundamentals",
+        "--daily-research":      "research",
+        "--daily-news":          "news",
+        "--validate":            "validation",
+    }.get(flag, flag.replace("-", "").replace(" ", "_")[:20])
     run_id    = f"{ts}_{job_label}"
     log_path  = _LOGS / f"{run_id}.log"
     log_file  = open(log_path, "w", buffering=1)   # line-buffered
     env       = {**os.environ, "PIPELINE_RUN_ID": run_id}
+    # Split compound flags like "--batch intraday" into separate argv elements
+    flag_args = shlex.split(flag)
     proc = subprocess.Popen(
-        ["python", "-u", str(_MAIN), flag],         # -u = unbuffered stdout
+        ["python", "-u", str(_MAIN)] + flag_args,   # -u = unbuffered stdout
         cwd=str(_ROOT),
         stdout=log_file,
         stderr=subprocess.STDOUT,                   # merge stderr into stdout
@@ -149,8 +157,8 @@ def _scan_logs() -> list[dict]:
     runs = []
     for log in _LOGS.glob("*.log"):
         name = log.stem
-        # New format:  YYYYMMDD_HHMMSS_daily / _news / _fundamentals / _research
-        m = re.match(r"^(\d{8})_(\d{6})_(daily|news|fundamentals|research)$", name)
+        # New format:  YYYYMMDD_HHMMSS_daily / _news / _fundamentals / _research / _validation
+        m = re.match(r"^(\d{8})_(\d{6})_(daily|news|fundamentals|research|validation)$", name)
         if m:
             try:
                 run_dt   = datetime.strptime(f"{m.group(1)}_{m.group(2)}", "%Y%m%d_%H%M%S")
@@ -181,6 +189,8 @@ def _scan_logs() -> list[dict]:
             has_fin = "fundamentals phase done" in lower or "finished :" in lower
         elif job_type == "research":
             has_fin = "research phase done" in lower or "finished :" in lower
+        elif job_type == "validation":
+            has_fin = "validation complete." in lower or "finished :" in lower
         else:
             has_fin = "finished :" in lower
         # has_err only flags pipeline-stopping failures — transient provider
@@ -236,6 +246,9 @@ def _phase_ticker_counts(log_text: str, job_type: str) -> dict:
             base += " (" + ", ".join(parts) + ")"
         return base
 
+    # Validation has no ticker phases — show dashes everywhere
+    if job_type == "validation":
+        return {"News": "—", "Research": "—", "Fundamentals": "—", "Predictions": "—"}
     # For single-phase jobs only populate the relevant column
     if job_type in ("news", "research", "fundamentals"):
         return {
@@ -251,6 +264,26 @@ def _phase_ticker_counts(log_text: str, job_type: str) -> dict:
         "Predictions":  _fmt("apex"),
     }
 
+
+def _db_status_label(s: str, log_file: str = "", job_type: str = "daily") -> str:
+    if s == "running" and log_file and Path(log_file).exists():
+        try:
+            txt = Path(log_file).read_text(errors="replace").lower()
+            job = job_type.lower()
+            done = (
+                "daily pipeline complete" in txt if job == "daily"
+                else f"{job} phase done" in txt if job in ("news", "research", "fundamentals")
+                else "validation complete." in txt if job == "validation"
+                else "pipeline complete" in txt
+            )
+            if done:
+                return "✅ Completed"
+        except Exception:
+            pass
+    return {"completed": "✅ Completed", "error": "❌ Errored", "running": "🔵 Running"}.get(s, f"🔵 {s.title()}")
+
+def _validation_done_in_log(txt: str) -> bool:
+    return "validation complete." in txt.lower()
 
 def _read_log_tail(path: Path, max_lines: int = 300) -> str:
     if not path or not path.exists():
@@ -475,10 +508,18 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
     # Determine which phases are relevant for this job type
     phase_keys = {
         "daily":        ["news", "research", "fundamentals", "apex"],
+        "morning":      ["news", "research", "fundamentals", "apex"],
+        "intraday":     ["apex"],
+        "evening":      [],
         "fundamentals": ["fundamentals"],
         "research":     ["research"],
         "news":         ["news"],
+        "validation":   [],
     }.get(job_type, ["news", "research", "fundamentals", "apex"])
+
+    if job_type == "validation":
+        st.caption("✅ Scoring matured predictions & recomputing rolling metrics…")
+        return
 
     # Nothing to show yet
     if total == 0 and all(ph[k]["status"] == "pending" for k in phase_keys):
@@ -538,6 +579,7 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
     )
 
     # ── per-phase progress bars ────────────────────────────────────────────────
+    bars_html = '<div style="display:flex;flex-direction:column;gap:8px;margin-top:4px">'
     for k in phase_keys:
         p      = ph[k]
         icon, label, phase_num = PHASE_META[k]
@@ -545,44 +587,46 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         color  = STATUS_COLOR[status]
 
         if status == "pending":
-            bar_val  = 0.0
+            pct      = 0
             bar_text = "Waiting…"
         elif status == "running":
-            bar_val  = p["completed"] / max(p["total"], 1)
+            pct        = int(p["completed"] / max(p["total"], 1) * 100)
             ticker_str = f" · {p['ticker']} in progress" if p["ticker"] else ""
-            batch_str  = f" · {p['note']}" if p.get("note") and k == "news" else ""
-            bar_text = f"{p['completed']} / {p['total']} complete{ticker_str}{batch_str}"
+            bar_text   = f"{p['completed']} / {p['total']} complete{ticker_str}"
+            if k == "news" and p.get("note"):
+                bar_text += f" · {p['note']}"
         elif status == "done":
-            bar_val  = 1.0
+            pct      = 100
             fail_str = f", {p['failed']} failed" if p.get("failed") else ""
             bar_text = f"{p['completed']} saved{fail_str}"
+            if k == "research" and p.get("track_a"):
+                bar_text += f" · {p['track_a']} raw fetched"
+            if k == "news":
+                parts = []
+                if p.get("filter_analyzed"): parts.append(f"{p['filter_analyzed']} analyzed")
+                if p.get("filter_low_mat"):  parts.append(f"{p['filter_low_mat']} low-mat")
+                if p.get("filter_no_new"):   parts.append(f"{p['filter_no_new']} no-new")
+                if p.get("filter_no_art"):   parts.append(f"{p['filter_no_art']} no-art")
+                if parts: bar_text += " · " + " | ".join(parts)
         else:  # exhausted
-            bar_val  = p["completed"] / max(p["total"], 1)
+            pct      = int(p["completed"] / max(p["total"], 1) * 100)
             bar_text = f"{p['completed']} / {p['total']} · ⚠️ {p.get('note', 'models exhausted')}"
 
-        # Research: show track A info too
-        extra = ""
-        if k == "research" and p.get("track_a"):
-            extra = f"  ·  {p['track_a']} raw broker records fetched (no LLM)"
-        if k == "news":
-            if p.get("filter_analyzed") or p.get("filter_low_mat") or p.get("filter_no_new") or p.get("filter_no_art"):
-                parts = [f"{p['filter_analyzed']} analyzed"]
-                if p.get("filter_low_mat"):  parts.append(f"{p['filter_low_mat']} low-materiality")
-                if p.get("filter_no_new"):   parts.append(f"{p['filter_no_new']} no-new-articles")
-                if p.get("filter_no_art"):   parts.append(f"{p['filter_no_art']} no-articles")
-                extra = "  ·  " + " | ".join(parts)
-            elif p.get("flagged"):
-                extra = f"  ·  {p['flagged']} tickers flagged for analysis"
-
-        col_label, col_bar = st.columns([2, 7])
-        with col_label:
-            st.markdown(
-                f'<div style="padding:6px 0;color:{color};font-weight:600;font-size:0.88rem">'
-                f'{phase_num} {icon} {label}</div>',
-                unsafe_allow_html=True,
-            )
-        with col_bar:
-            st.progress(bar_val, text=bar_text + extra)
+        bg_track = "#1E293B"
+        fill_color = color
+        bars_html += (
+            f'<div style="display:flex;align-items:center;gap:10px;min-height:28px">'
+            f'<div style="width:160px;flex-shrink:0;font-size:0.82rem;font-weight:600;color:{color}">'
+            f'{phase_num} {icon} {label}</div>'
+            f'<div style="flex:1;background:{bg_track};border-radius:6px;height:10px;overflow:hidden">'
+            f'<div style="width:{pct}%;height:100%;background:{fill_color};border-radius:6px;'
+            f'transition:width 0.4s ease"></div></div>'
+            f'<div style="width:300px;flex-shrink:0;font-size:0.78rem;color:#94A3B8;'
+            f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{bar_text}</div>'
+            f'</div>'
+        )
+    bars_html += '</div>'
+    st.markdown(bars_html, unsafe_allow_html=True)
 
 
 # ── Session state init ────────────────────────────────────────────────────────
@@ -604,21 +648,23 @@ if st.session_state.active_pid:
     _active_run = _load_run_from_db(st.session_state.get("active_run_id") or "")
     if _active_run:
         db_done = _active_run["run"].get("status") in ("completed", "error")
-    # Log-content fallback for runs without DB tracking
+    # Log check always runs — most reliable completion signal
     log_done = False
-    if not db_done and st.session_state.active_log and Path(st.session_state.active_log).exists():
+    if st.session_state.active_log and Path(st.session_state.active_log).exists():
         _log_txt = Path(st.session_state.active_log).read_text(errors="replace").lower()
         job = st.session_state.active_job or "daily"
         if job == "daily":
-            log_done = any(k in _log_txt for k in ("daily pipeline complete", "finished"))
+            log_done = "daily pipeline complete" in _log_txt
         elif job == "fundamentals":
             log_done = "fundamentals phase done" in _log_txt
         elif job == "research":
             log_done = "research phase done" in _log_txt
         elif job == "news":
             log_done = "news phase done" in _log_txt
+        elif job == "validation":
+            log_done = "validation complete." in _log_txt
         else:
-            log_done = any(k in _log_txt for k in ("pipeline complete", "finished"))
+            log_done = "pipeline complete" in _log_txt
     if pid_done or db_done or log_done:
         st.session_state.active_pid = None  # keep active_log for display
 
@@ -641,10 +687,14 @@ with st.sidebar:
         st.session_state.active_pid = None
 
     _JOB_DEFS = [
-        ("--daily",              "▶  Full Daily",   "daily",        "News + Research + Fundamentals + APEX"),
+        ("--batch morning",      "🌅  Morning",      "morning",      "Event detection + scheduled/event APEX predictions"),
+        ("--batch intraday",     "⚡  Intraday",     "intraday",     "Severity-3 event check + APEX if triggered"),
+        ("--batch evening",      "🌆  Evening",      "evening",      "Validate matured predictions + recompute metrics"),
+        ("--daily --force-all",  "▶  Full Daily",   "daily",        "Legacy: News + Research + Fundamentals + APEX (all tickers)"),
         ("--daily-news",         "📰  News Only",    "news",         "News triage + news agent only"),
         ("--daily-research",     "🔬  Research Only","research",     "Broker data fetch + LLM research summary"),
         ("--daily-fundamentals", "📄  Fundamentals", "fundamentals", "EDGAR check + batch fundamentals LLM"),
+        ("--validate",           "✅  Validate",     "validation",   "Score matured predictions + recompute metrics"),
     ]
 
     for flag, run_label, job_key, help_text in _JOB_DEFS:
@@ -654,7 +704,6 @@ with st.sidebar:
         if is_this_running:
             if st.button(
                 f"⏹  Stop {run_label.split()[-1]}",
-                type="primary",
                 use_container_width=True,
                 key=f"sb_btn_{job_key}",
                 help="Click to stop this job",
@@ -664,7 +713,6 @@ with st.sidebar:
         else:
             if st.button(
                 run_label,
-                type="primary",
                 use_container_width=True,
                 key=f"sb_btn_{job_key}",
                 disabled=is_other_running,
@@ -679,7 +727,7 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button("🔄  Refresh", use_container_width=True, key="sb_refresh", type="primary"):
+    if st.button("🔄  Refresh", use_container_width=True, key="sb_refresh"):
         st.rerun()
 
     if job_is_alive:
@@ -713,9 +761,13 @@ page_header(
 if job_is_alive:
     job_label = {
         "daily":        "Full Daily",
+        "morning":      "Morning Batch",
+        "intraday":     "Intraday Batch",
+        "evening":      "Evening Batch",
         "fundamentals": "Fundamentals-Only",
         "research":     "Research-Only",
         "news":         "News-Only",
+        "validation":   "Validation",
     }.get(st.session_state.active_job or "", "Pipeline")
     st.markdown(
         f'<div style="background:#DBEAFE;border:1px solid #93C5FD;border-radius:10px;'
@@ -736,7 +788,10 @@ else:
         _ts = _to_local(_db_latest.get("started_at", ""))
         _jt = _db_latest.get("job_type", "").upper()
         _fin = _db_latest.get("finished_at", "")
-        if _s == "completed":
+        _lf = _db_latest.get("log_file", "")
+        # Override "running" if the log file shows completion
+        _status_lbl = _db_status_label(_s, _lf, _db_latest.get("job_type", "daily"))
+        if _status_lbl == "✅ Completed":
             bg, border, fg, icon = "#D1FAE5", "#6EE7B7", "#065F46", "✅"
             _status_text = "Completed"
         elif _s == "error":
@@ -794,11 +849,14 @@ if active_log_path and active_log_path.exists():
     else:
         _fin_job = st.session_state.active_job or "daily"
         _lt_lower = log_text.lower()
-        _finished = (
-            "daily pipeline complete" in _lt_lower or "finished" in _lt_lower
-            if _fin_job == "daily"
-            else f"{_fin_job} phase done" in _lt_lower
-        )
+        _DONE_PHRASES = {
+            "daily":    ["daily pipeline complete", "morning batch complete", "finished"],
+            "morning":  ["morning batch complete", "finished"],
+            "intraday": ["intraday batch complete", "finished"],
+            "evening":  ["evening batch complete", "finished"],
+        }
+        _fin_phrases = _DONE_PHRASES.get(_fin_job, [f"{_fin_job} phase done", "finished"])
+        _finished = any(p in _lt_lower for p in _fin_phrases)
         section_title(
             "📋 Last Run Output",
             badge_text=f"{'✅ Finished' if _finished else '🔵 Ended'}  ·  {log_lines} lines",
@@ -853,9 +911,6 @@ if _CP.exists():
 
 # ── Historical runs ───────────────────────────────────────────────────────────
 
-def _db_status_label(s: str) -> str:
-    return {"completed": "✅ Completed", "error": "❌ Errored", "running": "🔵 Running"}.get(s, f"🔵 {s.title()}")
-
 def _db_phase_counts(db_run: dict, job_type: str) -> dict:
     phases = db_run.get("phases", {})
     def _fmt(key: str) -> str:
@@ -868,6 +923,8 @@ def _db_phase_counts(db_run: dict, job_type: str) -> dict:
         base = f"{done}/{tot}" if tot else str(done)
         return base + (f" ({fail}✗)" if fail else "")
     jt = job_type.lower()
+    if jt == "validation":
+        return {"News": "—", "Research": "—", "Fundamentals": "—", "Predictions": "—"}
     if jt in ("news", "research", "fundamentals"):
         return {
             "News":         _fmt("news")         if jt == "news"         else "—",
@@ -887,10 +944,14 @@ _log_runs   = _scan_logs()
 _legacy     = [r for r in _log_runs if r["log_path"].stem not in _db_run_ids]
 
 # Build unified display list: DB entries first (sorted newest first), then legacy
+_active_run_id_for_log = st.session_state.get("active_run_id", "")
 _all_display: list[dict] = []
 for r in _db_all:
     ts_raw = _to_local(r.get("started_at", ""))
     log_f  = r.get("log_file", "")
+    # DB doesn't store the log path — use session_state path for the active run
+    if not log_f and r["run_id"] == _active_run_id_for_log and st.session_state.get("active_log"):
+        log_f = st.session_state.active_log
     _all_display.append({
         "_source":   "db",
         "_run_id":   r["run_id"],
@@ -898,7 +959,7 @@ for r in _db_all:
         "_db_run":   {"run": r, "phases": r.get("phases", {})},
         "_job_type": r.get("job_type", "daily"),
         "Job":       r.get("job_type", "").upper(),
-        "Status":    _db_status_label(r.get("status", "")),
+        "Status":    _db_status_label(r.get("status", ""), log_f, r.get("job_type", "daily")),
         "Started":   ts_raw,
         "Source":    "DB",
         **_db_phase_counts(r, r.get("job_type", "daily")),

@@ -22,8 +22,19 @@ def _build_horizons_instruction(horizons: list[int]) -> str:
     return "\n".join(lines) if lines else "  • 5d (~1 week) — news flow, momentum"
 
 
-async def _run_daily_apex(portfolio_tickers: list[str], tracker=None) -> None:
-    """Phase 4 — per-ticker APEX dual-run predictions."""
+async def _run_daily_apex(
+    portfolio_tickers: list[str],
+    tracker=None,
+    trigger_map: dict[str, tuple[str, int | None]] | None = None,
+    scheduled_horizons_override: list[int] | None = None,
+) -> None:
+    """
+    Phase 4 — per-ticker APEX dual-run predictions.
+
+    trigger_map: {ticker → (trigger_type, trigger_event_id)} for event-driven runs.
+    scheduled_horizons_override: pass explicit horizons (event-driven cadence path);
+        when None, falls back to get_scheduled_horizons() (legacy / --force-all path).
+    """
     log = _get_logger("apex")
     from portfolio_agent.tools.reasoning_tools import get_full_analysis_context
     from portfolio_agent.tools.prediction_db import (
@@ -32,6 +43,9 @@ async def _run_daily_apex(portfolio_tickers: list[str], tracker=None) -> None:
     )
     from portfolio_agent.tools.yfinance_tools import get_close as _get_close
     from portfolio_agent.tools.apex_dual_run import run_apex_dual as _run_apex_dual
+
+    if trigger_map is None:
+        trigger_map = {}
 
     if not portfolio_tickers:
         log.info("  No portfolio tickers configured — skipping APEX phase.", event_type="info")
@@ -50,8 +64,11 @@ async def _run_daily_apex(portfolio_tickers: list[str], tracker=None) -> None:
             tracker.finish_phase("apex", 0, 0, note="not a trading day")
         return
 
-    scheduled_horizons = get_scheduled_horizons(today_date)
-    horizons_instr     = _build_horizons_instruction(scheduled_horizons)
+    if scheduled_horizons_override is not None:
+        scheduled_horizons = scheduled_horizons_override
+    else:
+        scheduled_horizons = get_scheduled_horizons(today_date)
+    horizons_instr = _build_horizons_instruction(scheduled_horizons)
     log.info(f"  Scheduled horizons today: {scheduled_horizons}", event_type="info")
 
     seen_pt: set[str] = set()
@@ -107,7 +124,7 @@ async def _run_daily_apex(portfolio_tickers: list[str], tracker=None) -> None:
         ctx   = None
         price = None
         try:
-            ctx = get_full_analysis_context(t)
+            ctx = get_full_analysis_context(t, horizons=scheduled_horizons)
         except Exception:
             pass
         try:
@@ -219,6 +236,8 @@ async def _run_daily_apex(portfolio_tickers: list[str], tracker=None) -> None:
             save_errors: list[str] = []
             horizons_needed = [h for h in scheduled_horizons if h not in done_today]
 
+            _trig_type, _trig_ev_id = trigger_map.get(ticker, (None, None))
+
             for h_days in scheduled_horizons:
                 if h_days in done_today:
                     continue
@@ -238,6 +257,8 @@ async def _run_daily_apex(portfolio_tickers: list[str], tracker=None) -> None:
                     p_flat=dist.get("flat"),
                     p_moderate_up=dist.get("moderate_up"),
                     p_strong_up=dist.get("strong_up"),
+                    trigger_type=_trig_type,
+                    trigger_event_id=_trig_ev_id,
                 )
                 if save.get("saved"):
                     saved_count += 1

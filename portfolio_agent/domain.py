@@ -278,7 +278,7 @@ class ResearchSnapshot(_DictCompat):
         return cls(
             ticker=row["ticker"],
             id=row.get("id"),
-            raw_fetched_at=row.get("raw_fetched_at"),
+            raw_fetched_at=row.get("as_of_date") or row.get("raw_fetched_at"),
             consensus=row.get("consensus") or "",
             consensus_mean=_safe_float(row.get("consensus_mean")),
             num_analysts=_safe_int(row.get("num_analysts")),
@@ -540,7 +540,7 @@ class Prediction(_DictCompat):
             recommendation=row.get("recommendation") or "HOLD",
             id=row.get("id"),
             created_at=row.get("created_at") or "",
-            prediction_date=row.get("prediction_date") or "",
+            prediction_date=row.get("as_of_date") or row.get("prediction_date") or "",
             horizon_days=_safe_int(row.get("horizon_days")),
             prediction_type=row.get("prediction_type"),
             evaluation_date=row.get("evaluation_date"),

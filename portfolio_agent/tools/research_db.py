@@ -17,8 +17,15 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+_CST = ZoneInfo("America/Chicago")
+
+
+def _today_cst() -> str:
+    return datetime.now(_CST).date().isoformat()
 
 from portfolio_agent.domain import ResearchSnapshot
 from portfolio_agent.tools.db import (
@@ -47,7 +54,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             id                   INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker               TEXT    NOT NULL UNIQUE,
             -- Track A: daily raw (no LLM)
-            raw_fetched_at       TEXT,
+            as_of_date           TEXT,
             consensus            TEXT,
             consensus_mean       REAL,
             num_analysts         INTEGER,
@@ -64,8 +71,6 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             highlights           TEXT,
             research_score       INTEGER,
             summary              TEXT,
-            -- legacy / compat
-            as_of_date           TEXT,
             updated_at           TEXT DEFAULT (datetime('now'))
         )
     """)
@@ -73,7 +78,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     migrate_columns(conn, "research", [
-        ("raw_fetched_at",      "TEXT"),
+        ("as_of_date",          "TEXT"),
+        ("raw_fetched_at",      "TEXT"),   # legacy — kept for existing rows, no longer written
         ("last_llm_run_date",   "TEXT"),
         ("model_name",          "TEXT"),
         ("model_provider",      "TEXT"),
@@ -81,6 +87,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("finnhub_pt",          "TEXT"),
         ("price_target_median", "REAL"),
     ])
+    # Back-fill as_of_date from raw_fetched_at for existing rows
+    conn.execute("""
+        UPDATE research SET as_of_date = raw_fetched_at
+        WHERE as_of_date IS NULL AND raw_fetched_at IS NOT NULL
+    """)
 
 
 # ── read helpers ───────────────────────────────────────────────────────────────
@@ -131,7 +142,7 @@ def needs_llm_summary(ticker: str) -> tuple[bool, str]:
 
     last_llm = stored["last_llm_run_date"]
     try:
-        age_days = (date.today() - date.fromisoformat(last_llm)).days
+        age_days = (datetime.now(_CST).date() - date.fromisoformat(last_llm)).days
     except ValueError:
         return True, "bad_date"
 
@@ -185,7 +196,7 @@ def upsert_raw_research(
     Safe to call every day; never overwrites highlights / summary / score.
     """
     ticker = ticker.upper()
-    today  = date.today().isoformat()
+    today  = _today_cst()
     try:
         with _db() as c:
             existing = c.execute(
@@ -207,7 +218,7 @@ def upsert_raw_research(
             if existing:
                 c.execute(
                     """UPDATE research SET
-                           raw_fetched_at      = ?,
+                           as_of_date          = ?,
                            consensus           = ?,
                            consensus_mean      = ?,
                            num_analysts        = ?,
@@ -222,23 +233,22 @@ def upsert_raw_research(
                            quarterly_ratings   = ?,
                            rec_trend           = ?,
                            finnhub_pt          = ?,
-                           as_of_date          = ?,
                            updated_at          = datetime('now')
                        WHERE ticker = ?""",
-                    raw_args + [today, ticker],
+                    raw_args + [ticker],
                 )
                 action = "raw_updated"
             else:
                 c.execute(
                     """INSERT INTO research
-                           (ticker, raw_fetched_at, consensus, consensus_mean,
+                           (ticker, as_of_date, consensus, consensus_mean,
                             num_analysts, price_target_avg, price_target_median,
                             price_target_high, price_target_low, current_price,
                             upside_to_mean_pct, latest_upgrade_date, recent_upgrades,
                             quarterly_ratings, rec_trend, finnhub_pt,
-                            as_of_date, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
-                    [ticker] + raw_args + [today],
+                            updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                    [ticker] + raw_args,
                 )
                 action = "raw_inserted"
             c.commit()
@@ -261,7 +271,7 @@ def upsert_llm_summary(
     Updates last_llm_run_date to today. Never touches the raw data columns.
     """
     ticker = ticker.upper()
-    today  = date.today().isoformat()
+    today  = _today_cst()
     try:
         with _db() as c:
             existing = c.execute(
@@ -286,11 +296,11 @@ def upsert_llm_summary(
                 # Row not yet created by raw fetch — insert a minimal row
                 c.execute(
                     """INSERT INTO research
-                           (ticker, raw_fetched_at, as_of_date,
-                            last_llm_run_date, highlights, research_score, summary,
+                           (ticker, as_of_date, last_llm_run_date,
+                            highlights, research_score, summary,
                             model_name, model_provider, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
-                    [ticker, today, today, today,
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                    [ticker, today, today,
                      _to_json(highlights or []), research_score, summary,
                      model_name, model_provider],
                 )

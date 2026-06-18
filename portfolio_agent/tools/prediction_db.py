@@ -5,7 +5,7 @@ Each row represents one horizon prediction for one ticker on one date.
 Most days only a 5d prediction is generated; 21d on Mondays; 63d on month-start.
 
 Schema (predictions table):
-  ticker, created_at, prediction_date,
+  ticker, created_at, as_of_date,
   horizon_days, prediction_type, evaluation_date,
   predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
   prediction, recommendation, confidence, target_price, horizon (legacy),
@@ -23,6 +23,19 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+_CST = ZoneInfo("America/Chicago")
+
+
+def _now_cst() -> str:
+    """Current CST/CDT datetime as ISO string."""
+    return datetime.now(_CST).isoformat()
+
+
+def _today_cst() -> str:
+    """Current CST/CDT date as ISO date string (YYYY-MM-DD)."""
+    return datetime.now(_CST).date().isoformat()
 
 from portfolio_agent.domain import Prediction
 from portfolio_agent.tools.db import db_conn, migrate_columns
@@ -45,8 +58,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS predictions (
             id                    INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker                TEXT    NOT NULL,
-            created_at            TEXT    NOT NULL DEFAULT (datetime('now')),
-            prediction_date       TEXT,
+            created_at            TEXT    NOT NULL,
+            as_of_date            TEXT,
             horizon_days          INTEGER,
             prediction_type       TEXT,
             evaluation_date       TEXT,
@@ -97,7 +110,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_predictions_ticker_date
-        ON predictions (ticker, created_at DESC)
+        ON predictions (ticker, as_of_date DESC)
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS metrics_rolling (
@@ -127,7 +140,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             patterns_identified TEXT,
             llm_summary         TEXT,
             metrics_snapshot    TEXT,
-            created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+            created_at          TEXT    NOT NULL
         )
     """)
 
@@ -142,7 +155,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("pt_low",                      "REAL"),
         ("pt_num_analysts",             "INTEGER"),
         ("pt_current_price",            "REAL"),
-        ("prediction_date",             "TEXT"),
+        ("as_of_date",                  "TEXT"),
         ("horizon_days",                "INTEGER"),
         ("prediction_type",             "TEXT"),
         ("evaluation_date",             "TEXT"),
@@ -183,6 +196,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("is_single_model",             "INTEGER DEFAULT 0"),
         ("used_fallback",               "INTEGER DEFAULT 0"),
         ("parent_merged_id",            "INTEGER"),
+        ("trigger_type",                "TEXT"),
+        ("trigger_event_id",            "INTEGER"),
     ])
     # Index for per-model accuracy queries and parent linkage
     conn.execute(
@@ -199,9 +214,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE metrics_rolling ADD COLUMN mean_log_loss REAL")
 
     # Index on new columns — only safe after migration ensures columns exist
+    # Rename prediction_date → as_of_date (idempotent)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
+    if "prediction_date" in cols and "as_of_date" not in cols:
+        conn.execute("ALTER TABLE predictions RENAME COLUMN prediction_date TO as_of_date")
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_predictions_ticker_horizon
-        ON predictions (ticker, prediction_date, horizon_days)
+        ON predictions (ticker, as_of_date, horizon_days)
     """)
 
 
@@ -280,7 +300,7 @@ def get_today_horizons(ticker: str, today: str) -> set[int]:
     with _db() as c:
         rows = c.execute(
             """SELECT horizon_days FROM predictions
-               WHERE ticker = ? AND substr(created_at, 1, 10) = ?
+               WHERE ticker = ? AND as_of_date = ?
                AND horizon_days IS NOT NULL""",
             [ticker.upper(), today],
         ).fetchall()
@@ -335,14 +355,18 @@ def insert_prediction(
     is_single_model: bool = False,
     used_fallback: bool = False,
     parent_merged_id: Optional[int] = None,
+    # Event-driven metadata
+    trigger_type: Optional[str] = None,
+    trigger_event_id: Optional[int] = None,
 ) -> dict:
     """
     Insert a new prediction row (append-only). One row per horizon per ticker per date.
     Returns {saved, ticker, changed, previous}.
     """
     ticker = ticker.upper()
-    today_date = date.today()
-    today_str = today_date.isoformat()
+    now_cst   = _now_cst()
+    today_str = _today_cst()
+    today_date = date.fromisoformat(today_str)
 
     # Derive horizon_days from legacy horizon string if not provided
     if horizon_days is None and horizon:
@@ -371,7 +395,7 @@ def insert_prediction(
         with _db() as c:
             c.execute(
                 """INSERT INTO predictions
-                       (ticker, prediction_date, horizon_days, prediction_type, evaluation_date,
+                       (ticker, created_at, as_of_date, horizon_days, prediction_type, evaluation_date,
                         predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
                         prediction, confidence, recommendation, target_price,
                         horizon, fundamental_score, research_score, macro_score,
@@ -386,13 +410,14 @@ def insert_prediction(
                         snapshot_news_headlines, start_price,
                         p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                         is_ensemble, agreement_score, is_single_model,
-                        used_fallback, parent_merged_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        used_fallback, parent_merged_id,
+                        trigger_type, trigger_event_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?)""",
                 [
-                    ticker, today_str, horizon_days, prediction_type, evaluation_date,
+                    ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
                     prediction, confidence, recommendation, target_price,
                     horizon, fundamental_score, research_score, macro_score,
@@ -411,6 +436,7 @@ def insert_prediction(
                     p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                     int(is_ensemble), agreement_score, int(is_single_model),
                     int(used_fallback), parent_merged_id,
+                    trigger_type, trigger_event_id,
                 ],
             )
             c.commit()
@@ -453,7 +479,7 @@ def get_prediction_history(ticker: str, limit: int = 10) -> list[Prediction]:
 def get_matured_pending_predictions(today: str) -> list[dict]:
     """Return predictions where evaluation_date=today and not yet evaluated."""
     with _db() as c:
-        rows = c.execute(
+        rows = c.execute(  # noqa: E501
             """SELECT * FROM predictions
                WHERE evaluation_date = ?
                AND (evaluation_status IS NULL OR evaluation_status = 'pending')
@@ -484,14 +510,14 @@ def update_prediction_outcome(
                 actual_return=?, actual_direction=?, benchmark_return=?,
                 excess_return=?, outcome=?, outcome_score=?,
                 error_magnitude=?, in_predicted_range=?,
-                evaluation_status=?, evaluated_at=datetime('now'),
+                evaluation_status=?, evaluated_at=?,
                 actual_bucket=?, brier_score=?, log_loss=?
                WHERE id=?""",
             [
                 actual_return, actual_direction, benchmark_return,
                 excess_return, outcome, outcome_score,
                 error_magnitude, 1 if in_predicted_range else 0,
-                evaluation_status,
+                evaluation_status, _now_cst(),
                 actual_bucket, brier_score, log_loss,
                 prediction_id,
             ],
@@ -507,7 +533,7 @@ def upsert_rolling_metric(row: dict) -> None:
                 directional_accuracy, in_range_pct, mean_excess_return,
                 mean_error_magnitude, high_conviction_accuracy, low_conviction_accuracy,
                 brier_score, mean_log_loss, num_predictions, computed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 row["metric_date"], row["horizon_days"], row["segment"],
                 row["system_version"], row["lookback_days"],
@@ -515,6 +541,7 @@ def upsert_rolling_metric(row: dict) -> None:
                 row.get("mean_excess_return"), row.get("mean_error_magnitude"),
                 row.get("high_conviction_accuracy"), row.get("low_conviction_accuracy"),
                 row.get("brier_score"), row.get("mean_log_loss"), row.get("num_predictions"),
+                _now_cst(),
             ],
         )
         c.commit()
@@ -529,16 +556,16 @@ def insert_validation_report(
     with _db() as c:
         c.execute(
             """INSERT INTO validation_reports
-               (report_date, period, patterns_identified, llm_summary, metrics_snapshot)
-               VALUES (date('now'), ?, ?, ?, ?)""",
-            [period, json.dumps(patterns_identified),
-             llm_summary, json.dumps(metrics_snapshot or {})],
+               (report_date, period, patterns_identified, llm_summary, metrics_snapshot, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [_today_cst(), period, json.dumps(patterns_identified),
+             llm_summary, json.dumps(metrics_snapshot or {}), _now_cst()],
         )
         c.commit()
 
 
 def get_rolling_metrics(lookback_days: int = 90) -> list[dict]:
-    today = date.today().isoformat()
+    today = _today_cst()
     with _db() as c:
         rows = c.execute(
             """SELECT * FROM metrics_rolling

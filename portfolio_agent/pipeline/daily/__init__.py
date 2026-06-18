@@ -23,6 +23,11 @@ from portfolio_agent.pipeline.daily.fundamentals import _run_daily_fundamentals
 from portfolio_agent.pipeline.daily.news import _run_news_phase
 from portfolio_agent.pipeline.daily.research import _run_daily_research
 from portfolio_agent.pipeline.daily.apex import _run_daily_apex
+from portfolio_agent.pipeline.batch import (
+    run_batch_morning,
+    run_batch_intraday,
+    run_batch_evening,
+)
 
 # ── Run identity (shared across all daily entry points) ───────────────────────
 _PROJECT_ROOT: Path = Path(__file__).resolve().parents[3]
@@ -165,24 +170,6 @@ async def run_daily(extra_tickers: list[str] | None = None) -> None:
 
     log.info("\n── Phase 4: APEX Predictions ───────────────────────────────────", event_type="phase_start")
     await _run_daily_apex(portfolio_tickers, tracker=_tracker)
-
-    try:
-        from portfolio_agent.tools.validation_engine import (
-            evaluate_matured_predictions, recompute_rolling_metrics,
-        )
-        _v1 = evaluate_matured_predictions()
-        log.info(
-            f"  [validate/L1] {_v1.get('evaluated', 0)} evaluated, "
-            f"{_v1.get('data_missing', 0)} data_missing, {_v1.get('errors', 0)} errors",
-            event_type="summary",
-        )
-        _v2 = recompute_rolling_metrics()
-        log.info(
-            f"  [validate/L2] {_v2.get('metrics_written', 0)} metric rows written",
-            event_type="summary",
-        )
-    except Exception as _ve:
-        log.info(f"  [validate] Error: {_ve}", event_type="info")
 
     GEMINI_COUNTER.print_stats(prefix=" (end of daily run)")
     _tracker.finish_run("completed")

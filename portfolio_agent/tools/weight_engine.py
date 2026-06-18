@@ -1,22 +1,17 @@
 """
-Dynamic weight engine for the APEX reasoning agent.
+Dynamic weight engine — horizon-aware, context-driven source weighting.
 
-Replaces static 40/30/20/10 weights with context-aware weights that reflect
-the actual information content of each data source at analysis time.
+Each horizon has its own base weights reflecting which signal dominates that
+time window.  The same event-driven boosts/penalties are then applied on top:
+earnings prints, VIX spikes, analyst staleness, leadership changes, etc.
 
-Core insight: weights should represent signal-to-noise ratio, not category
-importance. On an earnings release day, yesterday's cached fundamentals
-carry almost no signal — the earnings print is everything. On a quiet
-Tuesday with no news, fundamentals and research should carry the weight.
+Horizon intuition:
+  5d  — news + short-term momentum dominate; fundamentals nearly irrelevant
+  21d — balanced but research (analyst consensus) gains parity with news
+  63d — fundamentals reclaim the majority; news fades to noise
+  250d — fundamentals + macro dominate; news is minimal
 
-Algorithm:
-  1. Compute a boost multiplier per source (how much extra signal does it
-     carry today above its baseline?)
-  2. Compute a penalty per source (how stale / about-to-be-superseded is it?)
-  3. raw_weight = base × (1 + boost) × (1 - penalty)
-  4. Normalize to sum to 1.0
-
-Output includes: weights dict, regime label, signal rationale per source.
+A WEIGHT_FLOOR (5%) prevents any source from being fully zeroed out.
 """
 
 from __future__ import annotations
@@ -24,7 +19,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
-# ── Base weights (quiet day, all data fresh, no major events) ─────────────────
+# ── Legacy single-horizon base (kept for backward compat / chat path) ──────────
 BASE: dict[str, float] = {
     "fundamentals": 0.40,
     "research":     0.30,
@@ -32,20 +27,56 @@ BASE: dict[str, float] = {
     "news":         0.10,
 }
 
-# Boost constants — applied as: base × (1 + boost)
-_B_NONE     = 0.00   # no incremental signal
-_B_LOW      = 0.40   # mild — recent activity but nothing dramatic
-_B_MEDIUM   = 1.00   # notable — worth upweighting 2x
-_B_HIGH     = 2.50   # major — 3.5x effective weight
-_B_DOMINANT = 4.50   # event owns the story — 5.5x effective weight
+# ── Horizon-specific base weights ─────────────────────────────────────────────
+HORIZON_BASE_WEIGHTS: dict[int, dict[str, float]] = {
+    5: {
+        "news":         0.55,
+        "research":     0.25,
+        "macro":        0.15,
+        "fundamentals": 0.05,
+    },
+    21: {
+        "news":         0.30,
+        "research":     0.30,
+        "macro":        0.15,
+        "fundamentals": 0.25,
+    },
+    63: {
+        "news":         0.15,
+        "research":     0.25,
+        "macro":        0.20,
+        "fundamentals": 0.40,
+    },
+    250: {
+        "news":         0.05,
+        "research":     0.15,
+        "macro":        0.25,
+        "fundamentals": 0.55,
+    },
+}
 
-# Penalty constants — applied as: (1 - penalty)
+DEFAULT_BASE_WEIGHTS: dict[str, float] = {
+    "news":         0.20,
+    "research":     0.25,
+    "macro":        0.20,
+    "fundamentals": 0.35,
+}
+
+WEIGHT_FLOOR = 0.05
+
+# ── Boost / penalty constants ─────────────────────────────────────────────────
+_B_NONE     = 0.00
+_B_LOW      = 0.40
+_B_MEDIUM   = 1.00
+_B_HIGH     = 2.50
+_B_DOMINANT = 4.50
+
 _P_NONE   = 0.00
 _P_LIGHT  = 0.15
 _P_MEDIUM = 0.35
-_P_HEAVY  = 0.60   # source is stale or about to be superseded
+_P_HEAVY  = 0.60
 
-# ── Keyword sets for news event detection ────────────────────────────────────
+# ── Keyword sets for news event detection ─────────────────────────────────────
 
 _EARNINGS_BEAT_MISS = {
     "beat", "miss", "exceeded", "fell short", "topped estimates",
@@ -83,40 +114,28 @@ _SECTOR_ROTATION = {
 }
 
 
-# ── Signal detection functions ────────────────────────────────────────────────
+# ── Signal detection (horizon-independent) ────────────────────────────────────
 
-def _news_signal(
-    news_data: list[dict],
-) -> tuple[float, str, str]:
-    """
-    Returns (boost, event_type, rationale).
-
-    event_type:
-      EARNINGS_RELEASE | EARNINGS_PREVIEW | LEADERSHIP_CHANGE | MA_EVENT |
-      REGULATORY | ELEVATED_SENTIMENT | MILD_SENTIMENT | NONE
-    """
+def _news_signal(news_data: list[dict]) -> tuple[float, str, str]:
+    """Returns (boost, event_type, rationale)."""
     if not news_data:
         return _B_NONE, "NONE", "No news data — news receives minimum weight"
 
-    # Only last 2 days qualify as high-impact (today's signal, not week-old context)
     recent_cutoff = (date.today() - timedelta(days=2)).isoformat()
     recent = [n for n in news_data if (n.get("date") or "") >= recent_cutoff]
 
-    # Combine all text from recent items
     all_text = " ".join(
         f"{n.get('headline_1','')} {n.get('headline_2','')} "
         f"{n.get('summary','')} {str(n.get('top_themes',''))}"
         for n in recent
     ).lower()
 
-    # Full 7-day text for gentler signals
     full_text = " ".join(
         f"{n.get('headline_1','')} {n.get('headline_2','')} "
         f"{n.get('summary','')} {str(n.get('top_themes',''))}"
         for n in news_data
     ).lower()
 
-    # Check in priority order (most impactful first)
     if any(kw in all_text for kw in _EARNINGS_BEAT_MISS):
         return _B_DOMINANT, "EARNINGS_RELEASE", (
             "Earnings print detected in last 2 days "
@@ -148,7 +167,6 @@ def _news_signal(
             "Sector rotation keywords in 7-day news — macro + news both mildly elevated"
         )
 
-    # Sentiment magnitude fallback across all 7 days
     scores = [
         n["sentiment_score"] for n in news_data
         if n.get("sentiment_score") is not None
@@ -172,17 +190,15 @@ def _news_signal(
     )
 
 
-def _macro_signal(
-    macro_snapshot: Optional[dict],
-) -> tuple[float, str, str]:
+def _macro_signal(macro_snapshot: Optional[dict]) -> tuple[float, str, str]:
     """Returns (boost, event_type, rationale)."""
     if not macro_snapshot:
         return _B_NONE, "NO_DATA", "Macro snapshot unavailable"
 
-    vix     = macro_snapshot.get("vix")
-    sp_1m   = macro_snapshot.get("sp500_1mo_pct")
-    regime  = macro_snapshot.get("macro_regime_hint", "NEUTRAL")
-    spread  = macro_snapshot.get("yield_curve_spread")
+    vix    = macro_snapshot.get("vix")
+    sp_1m  = macro_snapshot.get("sp500_1mo_pct")
+    regime = macro_snapshot.get("macro_regime_hint", "NEUTRAL")
+    spread = macro_snapshot.get("yield_curve_spread")
 
     if vix and vix > 30:
         return _B_HIGH, "EXTREME_VOLATILITY", (
@@ -225,14 +241,12 @@ def _macro_signal(
     )
 
 
-def _research_signal(
-    research_data: Optional[dict],
-) -> tuple[float, float, str]:
-    """Returns (boost, penalty, rationale). Boost and penalty are additive adjustments."""
+def _research_signal(research_data: Optional[dict]) -> tuple[float, float, str]:
+    """Returns (boost, penalty, rationale)."""
     if not research_data:
         return 0.0, _P_MEDIUM, "No research data in DB — research weight penalised"
 
-    raw_fetched    = research_data.get("raw_fetched_at") or ""
+    raw_fetched    = research_data.get("as_of_date") or research_data.get("raw_fetched_at") or ""
     latest_upgrade = research_data.get("latest_upgrade_date") or ""
     recent_upgs    = research_data.get("recent_upgrades") or []
     if isinstance(recent_upgs, str):
@@ -245,7 +259,6 @@ def _research_signal(
     week_ago  = (date.today() - timedelta(days=7)).isoformat()
     month_ago = (date.today() - timedelta(days=30)).isoformat()
 
-    # Count very recent analyst actions
     recent_count = sum(
         1 for u in recent_upgs
         if isinstance(u, dict) and (u.get("date") or "") >= week_ago
@@ -281,9 +294,7 @@ def _fundamentals_penalty(
     as_of  = fundamentals_data.get("as_of_date") or ""
     filing = fundamentals_data.get("filing_date") or ""
 
-    # If we are on/near an earnings event, check freshness of filing
     if news_event_type in ("EARNINGS_RELEASE", "EARNINGS_PREVIEW"):
-        # New filing just dropped (last 3 days) → actually very fresh
         three_days_ago = (date.today() - timedelta(days=3)).isoformat()
         if filing and filing >= three_days_ago:
             return _P_NONE, (
@@ -300,7 +311,6 @@ def _fundamentals_penalty(
             "when the management team that generated them is no longer in place"
         )
 
-    # Age-based staleness
     anchor = filing or as_of
     if anchor:
         try:
@@ -310,8 +320,7 @@ def _fundamentals_penalty(
             if age < 90:
                 return _P_LIGHT, f"Fundamentals are {age}d old — slight staleness penalty"
             return _P_MEDIUM, (
-                f"Fundamentals are {age}d old — notable staleness; "
-                "weight modestly reduced"
+                f"Fundamentals are {age}d old — notable staleness; weight modestly reduced"
             )
         except ValueError:
             pass
@@ -319,56 +328,33 @@ def _fundamentals_penalty(
     return _P_LIGHT, "Fundamentals age indeterminate — light staleness penalty applied"
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Core signal application ────────────────────────────────────────────────────
 
-def compute_dynamic_weights(
-    ticker: str,
+def _apply_signals(
+    base: dict[str, float],
     news_data: list[dict],
     research_data: Optional[dict],
     macro_snapshot: Optional[dict],
     fundamentals_data: Optional[dict],
-) -> dict:
+) -> tuple[dict, str, dict, dict, dict]:
     """
-    Compute context-aware weights for the APEX panel synthesis.
+    Apply event-driven boosts/penalties to a base weight dict.
 
-    Returns a dict with:
-      weights          — {fundamentals, research, macro, news} summing to 1.0
-      regime           — human-readable label for this analysis session
-      signal_strengths — raw boost/penalty values per source
-      rationale        — one-sentence explanation per source weight
+    Returns (raw_weights, regime, rationale, data_caps, signal_strengths).
+    raw_weights are pre-floor, pre-normalization.
     """
-    # Step 1: compute signals
-    n_boost, news_event, n_rationale    = _news_signal(news_data)
-    m_boost, macro_event, m_rationale   = _macro_signal(macro_snapshot)
-    r_boost, r_penalty, r_rationale     = _research_signal(research_data)
-    f_penalty, f_rationale              = _fundamentals_penalty(fundamentals_data, news_event)
+    n_boost, news_event, n_rat   = _news_signal(news_data)
+    m_boost, macro_event, m_rat  = _macro_signal(macro_snapshot)
+    r_boost, r_penalty, r_rat    = _research_signal(research_data)
+    f_penalty, f_rat             = _fundamentals_penalty(fundamentals_data, news_event)
 
-    # Step 2: raw weights
     raw = {
-        "fundamentals": BASE["fundamentals"] * (1.0 - f_penalty),
-        "research":     BASE["research"]     * (1.0 + r_boost) * (1.0 - r_penalty),
-        "macro":        BASE["macro"]        * (1.0 + m_boost),
-        "news":         BASE["news"]         * (1.0 + n_boost),
+        "fundamentals": base["fundamentals"] * (1.0 - f_penalty),
+        "research":     base["research"]     * (1.0 + r_boost) * (1.0 - r_penalty),
+        "macro":        base["macro"]        * (1.0 + m_boost),
+        "news":         base["news"]         * (1.0 + n_boost),
     }
 
-    # Step 3: normalize
-    total = sum(raw.values())
-    weights = {k: round(v / total, 3) for k, v in raw.items()}
-
-    # Fix floating-point rounding so they sum exactly to 1.000
-    diff = round(1.000 - sum(weights.values()), 3)
-    weights["fundamentals"] = round(weights["fundamentals"] + diff, 3)
-
-    # Score caps: domains with no data are capped at 5; heavily penalised at 7.
-    # Macro is always available (live yfinance) so never capped.
-    data_caps = {
-        "fundamentals": 5 if not fundamentals_data else (7 if f_penalty >= _P_HEAVY else 10),
-        "research":     5 if not research_data else 10,
-        "macro":        10,
-        "news":         5 if not news_data else 10,
-    }
-
-    # Step 4: regime label
     if news_event in ("EARNINGS_RELEASE", "LEADERSHIP_CHANGE"):
         regime = news_event
     elif news_event == "MA_EVENT":
@@ -384,7 +370,119 @@ def compute_dynamic_weights(
     else:
         regime = "MIXED"
 
-    # Step 5: human-readable weight summary
+    data_caps = {
+        "fundamentals": 5 if not fundamentals_data else (7 if f_penalty >= _P_HEAVY else 10),
+        "research":     5 if not research_data else 10,
+        "macro":        10,
+        "news":         5 if not news_data else 10,
+    }
+
+    rationale = {
+        "fundamentals": f_rat,
+        "research":     r_rat,
+        "macro":        m_rat,
+        "news":         n_rat,
+    }
+    signal_strengths = {
+        "news_boost":     n_boost,
+        "macro_boost":    m_boost,
+        "research_boost": r_boost,
+        "fund_penalty":   f_penalty,
+        "news_event":     news_event,
+        "macro_event":    macro_event,
+    }
+
+    return raw, regime, rationale, data_caps, signal_strengths
+
+
+def _normalize(raw: dict[str, float], use_floor: bool = False) -> dict[str, float]:
+    """Normalize weights to 1.0, with optional WEIGHT_FLOOR clamping."""
+    if use_floor:
+        raw = {k: max(v, WEIGHT_FLOOR) for k, v in raw.items()}
+    total = sum(raw.values())
+    weights = {k: round(v / total, 3) for k, v in raw.items()}
+    diff = round(1.000 - sum(weights.values()), 3)
+    weights["fundamentals"] = round(weights["fundamentals"] + diff, 3)
+    return weights
+
+
+# ── Public API: per-horizon ────────────────────────────────────────────────────
+
+def compute_dynamic_weights_for_horizon(
+    ticker: str,
+    horizon_days: int,
+    db_context: dict,
+    macro_snapshot: dict,
+) -> dict[str, float]:
+    """
+    Compute dynamic weights for a specific horizon.
+
+    Picks the horizon's base weights, then applies the same dynamic
+    adjustments (event triggers, staleness penalties) as before.
+    db_context expects keys: 'news' (list), 'research' (dict), 'fundamentals' (dict).
+    """
+    base = HORIZON_BASE_WEIGHTS.get(horizon_days, DEFAULT_BASE_WEIGHTS).copy()
+    raw, _, _, _, _ = _apply_signals(
+        base,
+        db_context.get("news") or [],
+        db_context.get("research"),
+        macro_snapshot,
+        db_context.get("fundamentals"),
+    )
+    return _normalize(raw, use_floor=True)
+
+
+def compute_dynamic_weights_all_horizons(
+    ticker: str,
+    horizons: list[int],
+    db_context: dict,
+    macro_snapshot: dict,
+) -> dict[int, dict[str, float]]:
+    """Compute weights for all horizons in a single call."""
+    return {
+        h: compute_dynamic_weights_for_horizon(ticker, h, db_context, macro_snapshot)
+        for h in horizons
+    }
+
+
+# ── Public API: legacy + extended ─────────────────────────────────────────────
+
+def compute_dynamic_weights(
+    ticker: str,
+    news_data: list[dict],
+    research_data: Optional[dict],
+    macro_snapshot: Optional[dict],
+    fundamentals_data: Optional[dict],
+    horizons: list[int] | None = None,
+) -> dict:
+    """
+    Compute context-aware weights for the APEX panel synthesis.
+
+    When horizons is provided, also computes per-horizon weights under the
+    'weights_by_horizon' key.
+
+    Returns a dict with:
+      weights              — single-horizon weights (legacy BASE)
+      weights_by_horizon   — {horizon_days: {source: weight}} if horizons given
+      data_caps, regime, weight_summary, per_source, signal_strengths
+    """
+    raw, regime, rationale, data_caps, signal_strengths = _apply_signals(
+        BASE, news_data, research_data, macro_snapshot, fundamentals_data
+    )
+    weights = _normalize(raw, use_floor=False)
+
+    # Per-horizon weights
+    weights_by_horizon: dict[int, dict[str, float]] | None = None
+    if horizons:
+        db_ctx = {
+            "news":         news_data,
+            "research":     research_data,
+            "fundamentals": fundamentals_data,
+        }
+        weights_by_horizon = compute_dynamic_weights_all_horizons(
+            ticker, horizons, db_ctx, macro_snapshot or {}
+        )
+
     def _pct(v: float) -> str:
         return f"{round(v * 100)}%"
 
@@ -395,7 +493,6 @@ def compute_dynamic_weights(
         f"News {_pct(weights['news'])}"
     )
 
-    # Deviation from base (for display)
     def _delta(key: str) -> str:
         base_pct = round(BASE[key] * 100)
         cur_pct  = round(weights[key] * 100)
@@ -405,27 +502,21 @@ def compute_dynamic_weights(
         sign = "+" if diff_val > 0 else ""
         return f"{cur_pct}% ({sign}{diff_val}% vs base {base_pct}%)"
 
-    return {
+    result = {
         "weights":   weights,
         "data_caps": data_caps,
         "regime":    regime,
         "weight_summary": weight_summary,
         "per_source": {
-            "fundamentals": {"weight": weights["fundamentals"], "delta": _delta("fundamentals"),
-                             "rationale": f_rationale},
-            "research":     {"weight": weights["research"],     "delta": _delta("research"),
-                             "rationale": r_rationale},
-            "macro":        {"weight": weights["macro"],        "delta": _delta("macro"),
-                             "rationale": m_rationale},
-            "news":         {"weight": weights["news"],         "delta": _delta("news"),
-                             "rationale": n_rationale},
+            src: {
+                "weight":    weights[src],
+                "delta":     _delta(src),
+                "rationale": rationale[src],
+            }
+            for src in ("fundamentals", "research", "macro", "news")
         },
-        "signal_strengths": {
-            "news_boost":     n_boost,
-            "macro_boost":    m_boost,
-            "research_boost": r_boost,
-            "fund_penalty":   f_penalty,
-            "news_event":     news_event,
-            "macro_event":    macro_event,
-        },
+        "signal_strengths": signal_strengths,
     }
+    if weights_by_horizon is not None:
+        result["weights_by_horizon"] = weights_by_horizon
+    return result

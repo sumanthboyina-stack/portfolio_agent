@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _DB = Path(__file__).resolve().parents[2] / "data" / "portfolio.db"
+_CST = ZoneInfo("America/Chicago")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(_CST).isoformat()
 
 
 def _get_conn() -> sqlite3.Connection:

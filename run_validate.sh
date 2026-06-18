@@ -5,7 +5,9 @@ TS=$(date +%Y%m%d_%H%M%S)
 LOG_DIR="/Users/sumanthboyina/portfolio-agent/logs"
 mkdir -p "$LOG_DIR"
 
-exec >> "${LOG_DIR}/${TS}_validate.log" 2>&1   # merge stderr into stdout
+RUN_ID="${TS}_validation"
+export PIPELINE_RUN_ID="${RUN_ID}"
+exec >> "${LOG_DIR}/${RUN_ID}.log" 2>&1   # merge stderr into stdout
 
 echo "========================================"
 echo "  Validation job started : $(date)"

@@ -12,6 +12,7 @@ sources can be merged and de-duplicated transparently.
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
@@ -52,17 +53,33 @@ def fetch_company_news(ticker: str, max_age_hours: int = 24) -> list[dict]:
     date_from = (cutoff - timedelta(days=1)).strftime("%Y-%m-%d")  # one day buffer
     date_to   = now.strftime("%Y-%m-%d")
 
-    try:
-        resp = requests.get(
-            f"{_BASE}/company-news",
-            params=_params({"symbol": ticker.upper(), "from": date_from, "to": date_to}),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        items = resp.json() or []
-    except Exception as exc:
-        _log.warning("finnhub company-news failed for %s: %s", ticker, exc)
-        return []
+    items: list = []
+    for attempt in range(2):
+        try:
+            resp = requests.get(
+                f"{_BASE}/company-news",
+                params=_params({"symbol": ticker.upper(), "from": date_from, "to": date_to}),
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            items = resp.json() or []
+            break
+        except requests.exceptions.HTTPError as exc:
+            if (
+                exc.response is not None
+                and exc.response.status_code == 429
+                and attempt == 0
+            ):
+                _log.warning(
+                    "finnhub company-news rate limited for %s — retrying after 30s…", ticker
+                )
+                time.sleep(30)
+                continue
+            _log.warning("finnhub company-news failed for %s: %s", ticker, exc)
+            return []
+        except Exception as exc:
+            _log.warning("finnhub company-news failed for %s: %s", ticker, exc)
+            return []
 
     articles: list[dict] = []
     for item in items:

@@ -33,6 +33,9 @@ from portfolio_agent.pipeline.daily import (
     run_daily_news          as _run_daily_news,
     run_daily_fundamentals_only as _run_daily_fundamentals_only,
     run_daily_research_only as _run_daily_research_only,
+    run_batch_morning       as _run_batch_morning,
+    run_batch_intraday      as _run_batch_intraday,
+    run_batch_evening       as _run_batch_evening,
 )
 
 
@@ -98,6 +101,25 @@ def _parse_args() -> argparse.Namespace:
         help="Research-only daily job: raw broker fetch + LLM summary for all watchlist tickers.",
     )
     p.add_argument(
+        "--batch",
+        choices=["morning", "intraday", "evening"],
+        metavar="BATCH",
+        help=(
+            "Run a named batch job: morning (news+research+fundamentals+event-driven APEX), "
+            "intraday (severity-3 event check + APEX if triggered), "
+            "evening (validation + slow-data refresh)."
+        ),
+    )
+    p.add_argument(
+        "--force-all",
+        action="store_true",
+        help=(
+            "With --batch morning or --daily: bypass event-driven cadence and generate "
+            "predictions for every portfolio ticker using the legacy daily schedule. "
+            "Useful for testing and comparison."
+        ),
+    )
+    p.add_argument(
         "--validate",
         action="store_true",
         help="Layer 1+2: evaluate matured predictions and recompute rolling metrics",
@@ -127,8 +149,21 @@ async def _main() -> None:
 
     tickers: list[str] = [t.upper() for t in args.tickers]
 
+    if args.batch == "morning":
+        await _run_batch_morning(extra_tickers=tickers or None, force_all=args.force_all)
+        return
+
+    if args.batch == "intraday":
+        await _run_batch_intraday(extra_tickers=tickers or None)
+        return
+
+    if args.batch == "evening":
+        await _run_batch_evening(extra_tickers=tickers or None)
+        return
+
     if args.daily:
-        await _run_daily(extra_tickers=tickers or None)
+        # --daily now routes through event-driven morning batch (unless --force-all)
+        await _run_batch_morning(extra_tickers=tickers or None, force_all=args.force_all)
         return
 
     if args.daily_news:
@@ -144,9 +179,13 @@ async def _main() -> None:
         return
 
     if args.validate:
+        import os
         from portfolio_agent.tools.validation_engine import (
             evaluate_matured_predictions, recompute_rolling_metrics,
         )
+        from portfolio_agent.tools.progress_tracker import PipelineProgressTracker
+        _run_id = os.environ.get("PIPELINE_RUN_ID", "")
+        _tracker = PipelineProgressTracker(_run_id, "validation", os.getpid()) if _run_id else None
         log.info("=" * 60, event_type="separator")
         log.info("=== APEX Validation — Layer 1: Outcome Assignment ===", event_type="phase_start")
         log.info("=" * 60, event_type="separator")
@@ -158,7 +197,6 @@ async def _main() -> None:
         r2 = recompute_rolling_metrics()
         log.info("", event_type="info")
         log.info("=" * 60, event_type="separator")
-        log.info("Validation complete.", event_type="phase_end")
         log.info(
             f"  L1: {r1.get('evaluated',0)} evaluated  "
             f"{r1.get('data_missing',0)} data_missing  "
@@ -167,6 +205,9 @@ async def _main() -> None:
         )
         log.info(f"  L2: {r2.get('metrics_written',0)} metric rows written", event_type="summary")
         log.info("=" * 60, event_type="separator")
+        if _tracker:
+            _tracker.finish_run("completed")
+        log.info("Validation complete.", event_type="phase_end")
         return
 
     if args.weekly_analysis:

@@ -47,7 +47,7 @@ def _load_predictions(
     """Load latest prediction per ticker/horizon for the given date (or all dates if None)."""
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT id, ticker, prediction_date, recommendation, prediction,
+            """SELECT id, ticker, as_of_date, recommendation, prediction,
                       confidence, composite_score, horizon_days, prediction_type,
                       predicted_direction, predicted_return_low, predicted_return_high,
                       conviction_score, fundamental_score, research_score, macro_score,
@@ -59,10 +59,11 @@ def _load_predictions(
                       p_moderate_up, p_strong_up, created_at, evaluation_date,
                       risk_segment, system_version, snapshot_fundamentals_score,
                       snapshot_news_score, snapshot_research_score, snapshot_macro_score,
-                      snapshot_news_headlines, brier_score
+                      snapshot_news_headlines, brier_score,
+                      trigger_type, trigger_event_id
                FROM predictions
-               WHERE prediction_date IS NOT NULL
-               ORDER BY prediction_date DESC, created_at DESC""",
+               WHERE as_of_date IS NOT NULL
+               ORDER BY as_of_date DESC, created_at DESC""",
         ).fetchall()
 
     df = pd.DataFrame([dict(r) for r in rows])
@@ -70,7 +71,7 @@ def _load_predictions(
         return df
 
     if selected_date is not None:
-        df = df[df["prediction_date"] == selected_date.isoformat()]
+        df = df[df["as_of_date"] == selected_date.isoformat()]
 
     if horizon_days is not None:
         df = df[df["horizon_days"] == horizon_days]
@@ -90,14 +91,14 @@ def _load_predictions(
 def _load_ticker_history(ticker: str) -> pd.DataFrame:
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT id, ticker, prediction_date, recommendation, prediction,
+            """SELECT id, ticker, as_of_date, recommendation, prediction,
                       confidence, composite_score, horizon_days,
                       predicted_direction, predicted_return_low, predicted_return_high,
                       conviction_score, evaluation_status, outcome, actual_return,
                       start_price, created_at
                FROM predictions
-               WHERE ticker = ? AND prediction_date IS NOT NULL
-               ORDER BY prediction_date ASC, created_at ASC""",
+               WHERE ticker = ? AND as_of_date IS NOT NULL
+               ORDER BY as_of_date ASC, created_at ASC""",
             (ticker,),
         ).fetchall()
     return pd.DataFrame([dict(r) for r in rows])
@@ -130,16 +131,16 @@ def _load_system_stats(selected_date: date) -> dict:
     date_str = selected_date.isoformat()
     with _conn() as conn:
         total_today = conn.execute(
-            "SELECT COUNT(DISTINCT ticker) FROM predictions WHERE prediction_date = ?",
+            "SELECT COUNT(DISTINCT ticker) FROM predictions WHERE as_of_date = ?",
             (date_str,),
         ).fetchone()[0]
 
         latest_row = conn.execute(
-            "SELECT created_at, system_version FROM predictions WHERE prediction_date IS NOT NULL ORDER BY created_at DESC LIMIT 1"
+            "SELECT created_at, system_version FROM predictions WHERE as_of_date IS NOT NULL ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
 
         total_tickers = conn.execute(
-            "SELECT COUNT(DISTINCT ticker) FROM predictions WHERE prediction_date IS NOT NULL"
+            "SELECT COUNT(DISTINCT ticker) FROM predictions WHERE as_of_date IS NOT NULL"
         ).fetchone()[0]
 
         n_matured = conn.execute(
@@ -160,18 +161,116 @@ def _load_system_stats(selected_date: date) -> dict:
     }
 
 
-def _latest_prediction_date() -> date:
-    """Return the most recent prediction_date in the DB, falling back to today."""
+def _latest_as_of_date() -> date:
+    """Return the most recent as_of_date in the DB, falling back to today."""
     try:
         with _conn() as conn:
             row = conn.execute(
-                "SELECT MAX(prediction_date) FROM predictions WHERE prediction_date IS NOT NULL"
+                "SELECT MAX(as_of_date) FROM predictions WHERE as_of_date IS NOT NULL"
             ).fetchone()
         if row and row[0]:
             return date.fromisoformat(row[0])
     except Exception:
         pass
     return date.today()
+
+
+# ── Company name lookup ───────────────────────────────────────────────────────
+
+_COMPANY_NAMES: dict[str, str] = {
+    # Portfolio
+    "AAPL":  "Apple",
+    "AJG":   "Arthur J. Gallagher",
+    "AMZN":  "Amazon",
+    "COST":  "Costco",
+    "GOOG":  "Alphabet (C)",
+    "GOOGL": "Alphabet (A)",
+    "IVV":   "iShares S&P 500 ETF",
+    "KO":    "Coca-Cola",
+    "LLY":   "Eli Lilly",
+    "LULU":  "Lululemon",
+    "META":  "Meta Platforms",
+    "MSFT":  "Microsoft",
+    "NVDA":  "NVIDIA",
+    "TSLA":  "Tesla",
+    "VOO":   "Vanguard S&P 500 ETF",
+    "WMT":   "Walmart",
+    "XOM":   "ExxonMobil",
+    # Watchlist — semis & hardware
+    "AMD":   "AMD",
+    "INTC":  "Intel",
+    "ASML":  "ASML Holding",
+    "MU":    "Micron Technology",
+    "AMAT":  "Applied Materials",
+    "KLAC":  "KLA Corporation",
+    "LRCX":  "Lam Research",
+    "MRVL":  "Marvell Technology",
+    "MCHP":  "Microchip Technology",
+    "NXPI":  "NXP Semiconductors",
+    "ON":    "ON Semiconductor",
+    "MPWR":  "Monolithic Power",
+    "ARM":   "Arm Holdings",
+    "SMCI":  "Super Micro Computer",
+    "QCOM":  "Qualcomm",
+    # Watchlist — software & cloud
+    "PANW":  "Palo Alto Networks",
+    "CRWD":  "CrowdStrike",
+    "FTNT":  "Fortinet",
+    "ZS":    "Zscaler",
+    "NET":   "Cloudflare",
+    "SNPS":  "Synopsys",
+    "CDNS":  "Cadence Design",
+    "WDAY":  "Workday",
+    "ADBE":  "Adobe",
+    "CRM":   "Salesforce",
+    "ORCL":  "Oracle",
+    "NOW":   "ServiceNow",
+    "INTU":  "Intuit",
+    "SNOW":  "Snowflake",
+    "DDOG":  "Datadog",
+    "HUBS":  "HubSpot",
+    # Watchlist — fintech & payments
+    "SHOP":  "Shopify",
+    "SQ":    "Block",
+    "PYPL":  "PayPal",
+    "COIN":  "Coinbase",
+    "HOOD":  "Robinhood",
+    "SOFI":  "SoFi Technologies",
+    "AFRM":  "Affirm",
+    "UPST":  "Upstart",
+    # Watchlist — consumer & travel
+    "ABNB":  "Airbnb",
+    "UBER":  "Uber",
+    "DASH":  "DoorDash",
+    "RIVN":  "Rivian",
+    "NIO":   "NIO",
+    # Watchlist — media & social
+    "PLTR":  "Palantir",
+    "RBLX":  "Roblox",
+    "APP":   "Applovin",
+    "DUOL":  "Duolingo",
+    "ROKU":  "Roku",
+    "PINS":  "Pinterest",
+    "SNAP":  "Snap",
+    "SPOT":  "Spotify",
+    "TTD":   "The Trade Desk",
+    "SE":    "Sea Limited",
+    # Watchlist — other
+    "IONQ":  "IonQ",
+    "AGNC":  "AGNC Investment",
+    "AXT":   "AXT Inc.",
+    "AAR":   "AAR Corp",
+    "BP":    "BP",
+    "RXO":   "RXO Inc.",
+    "HP":    "Helmerich & Payne",
+    "BMW":   "BMW AG",
+    "SPCX":  "SPCX",
+}
+
+
+def _cname(ticker: str) -> str:
+    """Return company name for display, or empty string if unknown."""
+    return _COMPANY_NAMES.get(ticker.upper(), "")
 
 
 # ── Pure helper functions ─────────────────────────────────────────────────────
@@ -392,7 +491,7 @@ def _plot_score_radar(row: dict) -> go.Figure:
 def render_system_strip(df_all: pd.DataFrame, selected_date: date) -> None:
     """Piece 1: System strip showing status, last run, coverage."""
     stats = _load_system_stats(selected_date)
-    n_today = int((df_all["prediction_date"] == selected_date.isoformat()).sum()) if not df_all.empty else 0
+    n_today = int((df_all["as_of_date"] == selected_date.isoformat()).sum()) if not df_all.empty else 0
 
     if n_today > 0:
         dot = "🟢"
@@ -458,9 +557,12 @@ def render_action_item_card(row: dict, card_key: str) -> None:
     with st.container(border=True):
         c1, c2 = st.columns([4, 1.5])
         with c1:
+            _name = _cname(ticker)
+            _name_html = f'<span style="font-size:0.78rem;color:#94A3B8;font-weight:400">{_name}</span>' if _name else ''
             st.markdown(
                 f'<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">'
                 f'<span style="font-size:1.1rem;font-weight:800;color:#0F172A">{ticker}</span>'
+                f'{_name_html}'
                 f'<span style="background:{PRIMARY_LIGHT};color:{PRIMARY};padding:1px 7px;'
                 f'border-radius:10px;font-size:0.72rem;font-weight:700">{h_str}</span>'
                 f'<span style="font-size:0.78rem;color:#64748B">Confidence <b>{conf_str}</b></span>'
@@ -489,7 +591,7 @@ def render_action_item_card(row: dict, card_key: str) -> None:
         with c2:
             if st.button("View Details", key=card_key, use_container_width=True):
                 st.session_state["drill_ticker"] = ticker
-                st.session_state["drill_date"] = row.get("prediction_date")
+                st.session_state["drill_date"] = row.get("as_of_date")
                 st.rerun()
 
 
@@ -603,9 +705,12 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
     with st.container(border=True):
         top_c, btn_c = st.columns([4.5, 1.5])
         with top_c:
+            _name = _cname(ticker)
+            _name_html = f'<span style="font-size:0.75rem;color:#94A3B8;font-weight:400">{_name}</span>' if _name else ''
             st.markdown(
                 f'<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:4px">'
                 f'<span style="font-size:1rem;font-weight:800;color:#0F172A">{ticker}</span>'
+                f'{_name_html}'
                 f'<span style="background:{PRIMARY_LIGHT};color:{PRIMARY};padding:1px 7px;'
                 f'border-radius:10px;font-size:0.7rem;font-weight:700">{h_str}</span>'
                 f'<span style="background:{pred_bg};color:{pred_color};padding:1px 8px;'
@@ -640,7 +745,7 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
         with btn_c:
             if st.button("View Details", key=card_key, use_container_width=True):
                 st.session_state["drill_ticker"] = ticker
-                st.session_state["drill_date"] = row.get("prediction_date")
+                st.session_state["drill_date"] = row.get("as_of_date")
                 st.rerun()
 
 
@@ -658,8 +763,13 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
     with st.container(border=True):
         top_c, btn_c = st.columns([4.5, 1.5])
         with top_c:
+            _name = _cname(ticker)
+            _name_html = f'<span style="font-size:0.75rem;color:#94A3B8;font-weight:400">{_name}</span>' if _name else ''
             st.markdown(
-                f'<span style="font-size:1rem;font-weight:800;color:#0F172A">{ticker}</span>',
+                f'<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px">'
+                f'<span style="font-size:1rem;font-weight:800;color:#0F172A">{ticker}</span>'
+                f'{_name_html}'
+                f'</div>',
                 unsafe_allow_html=True,
             )
             for row in horizon_rows:
@@ -706,7 +816,7 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
         with btn_c:
             if st.button("View Details", key=card_key, use_container_width=True):
                 st.session_state["drill_ticker"] = ticker
-                st.session_state["drill_date"] = first.get("prediction_date")
+                st.session_state["drill_date"] = first.get("as_of_date")
                 st.rerun()
 
 
@@ -762,13 +872,15 @@ def render_all_predictions(df: pd.DataFrame) -> None:
 def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
     """Piece 5: Per-ticker drill-down panel."""
     st.markdown("---")
-    section_title(f"Drill-down: {drill_ticker}", badge_text="Detail View", badge_color=PURPLE)
+    _drill_name = _cname(drill_ticker)
+    _drill_label = f"{drill_ticker} — {_drill_name}" if _drill_name else drill_ticker
+    section_title(f"Drill-down: {_drill_label}", badge_text="Detail View", badge_color=PURPLE)
 
     # Load all rows for this ticker on this date (all horizons)
     with _conn() as conn:
         rows = conn.execute(
             """SELECT * FROM predictions
-               WHERE ticker = ? AND (prediction_date = ? OR ? IS NULL)
+               WHERE ticker = ? AND (as_of_date = ? OR ? IS NULL)
                ORDER BY horizon_days ASC, created_at DESC""",
             (drill_ticker, drill_date, drill_date),
         ).fetchall()
@@ -809,11 +921,17 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             st.session_state.pop("drill_date", None)
             st.rerun()
 
+    _drill_cname = _cname(drill_ticker)
+    _drill_cname_html = (
+        f'<span style="font-size:1rem;color:#94A3B8;font-weight:400">{_drill_cname}</span>'
+        if _drill_cname else ''
+    )
     header_html = (
         f'<div style="background:white;border:1px solid #E2E8F0;border-radius:12px;'
         f'padding:16px 20px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">'
         f'<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">'
         f'<span style="font-size:2rem;font-weight:900;color:#0F172A">{drill_ticker}</span>'
+        f'{_drill_cname_html}'
         f'<span style="background:{rec_bg};color:{rec_color};padding:4px 14px;'
         f'border-radius:6px;font-size:0.88rem;font-weight:700">{rec_label}</span>'
         f'<span style="background:{pred_bg};color:{pred_color};padding:4px 14px;'
@@ -998,11 +1116,11 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             st.info(f"No prediction history found for {drill_ticker}.", icon="📊")
         else:
             display_cols = [
-                "prediction_date", "horizon_days", "recommendation", "prediction",
+                "as_of_date", "horizon_days", "recommendation", "prediction",
                 "composite_score", "conviction_score", "evaluation_status", "outcome",
             ]
             rename_map = {
-                "prediction_date":  "Prediction Date",
+                "as_of_date":  "Prediction Date",
                 "horizon_days":     "Forecast Horizon",
                 "recommendation":   "Recommendation",
                 "prediction":       "Sentiment",
@@ -1068,10 +1186,10 @@ if not _DB.exists():
     st.stop()
 
 # ── Piece 2: Controls Bar ────────────────────────────────────────────────────
-ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([2, 1, 2, 2, 1])
+ctrl1, ctrl2, ctrl3, ctrl4, ctrl5, ctrl6 = st.columns([2, 1, 1.5, 2, 2, 1])
 
 with ctrl1:
-    _default_date = _latest_prediction_date()
+    _default_date = _latest_as_of_date()
     selected_date = st.date_input(
         "Prediction date",
         value=_default_date,
@@ -1088,6 +1206,14 @@ with ctrl2:
     )
 
 with ctrl3:
+    trigger_choice = st.selectbox(
+        "Trigger",
+        options=["All", "scheduled", "event"],
+        index=0,
+        help="Filter by how the prediction was triggered",
+    )
+
+with ctrl4:
     min_conv = st.slider(
         "Min Conviction Score",
         min_value=0.0,
@@ -1097,14 +1223,14 @@ with ctrl3:
         help="Minimum conviction score (0 = show all)",
     )
 
-with ctrl4:
+with ctrl5:
     hide_no_edge = st.checkbox(
         "Hide low-edge segments",
         value=False,
         help="Hide predictions where validation accuracy < 52%",
     )
 
-with ctrl5:
+with ctrl6:
     if st.button("🔄 Refresh", use_container_width=True):
         st.rerun()
 
@@ -1121,6 +1247,14 @@ df_today = _load_predictions(
 
 # Load all-date data for the system strip denominator
 df_all = _load_predictions(selected_date=None)
+
+# Apply trigger filter
+if trigger_choice != "All" and not df_today.empty and "trigger_type" in df_today.columns:
+    if trigger_choice == "scheduled":
+        df_today = df_today[df_today["trigger_type"].fillna("").str.startswith("scheduled")]
+    elif trigger_choice == "event":
+        df_today = df_today[df_today["trigger_type"].fillna("").str.startswith("event")]
+    df_today = df_today.reset_index(drop=True)
 
 # Optionally filter out low-edge rows
 if hide_no_edge and not df_today.empty:

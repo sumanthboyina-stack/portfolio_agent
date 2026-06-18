@@ -64,7 +64,7 @@ def _db_status(tickers: list[str]) -> dict[str, dict]:
                 if t[0] in status:
                     status[t[0]]["fund"] = True
             for t in c.execute(
-                f"SELECT DISTINCT ticker FROM research WHERE raw_fetched_at IS NOT NULL AND ticker IN ({ph})", tickers
+                f"SELECT DISTINCT ticker FROM research WHERE as_of_date IS NOT NULL AND ticker IN ({ph})", tickers
             ).fetchall():
                 if t[0] in status:
                     status[t[0]]["res"] = True

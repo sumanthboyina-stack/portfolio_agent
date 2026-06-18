@@ -8,12 +8,13 @@
             "dbPath": "${workspaceFolder}/data/portfolio.db"
         }
     ],
-    "sqltools.useNodeRuntime": true,
+    "sqltools.useNodeRuntime": "/opt/homebrew/bin/node",
     "sqltools.connections": [
         {
             "name": "portfolio.db",
             "driver": "SQLite",
             "database": "/Users/sumanthboyina/portfolio-agent/data/portfolio.db"
         }
-    ]
+    ],
+    "sqltools.autoConnectTo": ["portfolio.db"]
 }
