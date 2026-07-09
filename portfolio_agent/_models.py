@@ -2,22 +2,27 @@
 LLM model registry — task-aware routing with multi-provider failover.
 
 Hierarchy principle:
-  Low-reasoning tasks  (triage, flash, fast):   free Gemini/Groq/Cerebras/OpenRouter
+  Low-reasoning tasks  (triage, flash, fast):   free Gemini/Groq/Cerebras/OpenRouter first;
+                                                 GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet
+                                                 as paid last-resort when all free models are exhausted.
   High-reasoning tasks (analyst, reasoning):     paid quality-first → OR high-reasoning → Groq
 
 Task → model mapping (in priority order):
 
   triage    Gemini-2.5-Flash-Lite → Gemini-2.5-Flash → Groq-70B → Cerebras-120B
-            → OR-Laguna-M.1 → OR-Nemotron-Nano → OR-Ring-1T → OR-Granite-8B
-            Bulk news batch classification (no paid models — Lite has higher daily quota).
+            → OR-Nemotron-Nano → OR-Granite-8B
+            → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet  (paid last resort)
+            Bulk news batch classification.
             ⚠ Cerebras has 8K context cap — batch size may need reducing when it kicks in.
 
   flash     Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
-            → OR-Laguna-M.1 → OR-Qwen3.6-Flash → OR-Ring-1T
-            Fundamentals / research batch LLM (no paid models).
+            → OR-Granite-8B
+            → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet  (paid last resort)
+            Fundamentals / research batch LLM.
 
   fast      Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
-            → OR-Laguna-M.1 → OR-Ring-1T
+            → OR-Ring-1T
+            → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet  (paid last resort)
             Clearance, technical. Uses ADK tools.
 
   analyst   Claude-Sonnet → GPT-4o → Claude-Haiku → Gemini-Flash → GPT-mini → Gemini-Flash-Lite
@@ -138,27 +143,43 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
         (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
         (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
-        (_OR_LAGUNA_M1,      "openrouter",  "OR-Laguna-M.1"),
         (_OR_NEMOTRON_FREE,  "openrouter",  "OR-Nemotron-Nano"),
-        (_OR_RING_1T,        "openrouter",  "OR-Ring-2.6-1T"),
         (_OR_GRANITE_8B,     "openrouter",  "OR-Granite-4.1-8B"),
+        # OR-Laguna-M.1 removed: 5–10 min stalls (20260622)
+        # OR-Ring-2.6-1T removed: 402 out-of-credits (20260624) — also stuck ModelSession
+        # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
+        (_GPT_MINI,          "openai",      "GPT-4o-mini"),
+        (_HAIKU,             "anthropic",   "Claude-Haiku"),
+        (_GPT_4O,            "openai",      "GPT-4o"),
+        (_SONNET,            "anthropic",   "Claude-Sonnet"),
     ],
     "flash": [
         (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
         (_GEMINI_FLASH_LITE, "google",      "Gemini-2.5-Flash-Lite"),
         (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
         (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
-        (_OR_LAGUNA_M1,      "openrouter",  "OR-Laguna-M.1"),
-        (_OR_QWEN36_FLASH,   "openrouter",  "OR-Qwen3.6-Flash"),
-        (_OR_RING_1T,        "openrouter",  "OR-Ring-2.6-1T"),
+        (_OR_GRANITE_8B,     "openrouter",  "OR-Granite-4.1-8B"),
+        # OR-Laguna-M.1 removed: 5–10 min stalls.
+        # OR-Qwen3.6-Flash removed: 402 out-of-credits (20260622).
+        # OR-Ring-2.6-1T removed: same 402 error (20260623).
+        # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
+        (_GPT_MINI,          "openai",      "GPT-4o-mini"),
+        (_HAIKU,             "anthropic",   "Claude-Haiku"),
+        (_GPT_4O,            "openai",      "GPT-4o"),
+        (_SONNET,            "anthropic",   "Claude-Sonnet"),
     ],
     "fast": [
         (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
         (_GEMINI_FLASH_LITE, "google",      "Gemini-2.5-Flash-Lite"),
         (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
         (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
-        (_OR_LAGUNA_M1,      "openrouter",  "OR-Laguna-M.1"),
         (_OR_RING_1T,        "openrouter",  "OR-Ring-2.6-1T"),
+        # OR-Laguna-M.1 removed: caused multi-minute stalls in batch runs
+        # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
+        (_GPT_MINI,          "openai",      "GPT-4o-mini"),
+        (_HAIKU,             "anthropic",   "Claude-Haiku"),
+        (_GPT_4O,            "openai",      "GPT-4o"),
+        (_SONNET,            "anthropic",   "Claude-Sonnet"),
     ],
     # High-reasoning: paid direct providers first, then OR high-reasoning fallbacks only.
     # Haiku, Flash, Flash-Lite, GPT-4o-mini, Groq-70B intentionally excluded —
@@ -256,7 +277,9 @@ def _is_failover_error(exc: BaseException) -> bool:
         "tokens exceed",
         "token limit",
         "quota exceeded",
-        "payment required",             # 402
+        "payment required",             # 402 — standard HTTP phrasing
+        "requires more credits",        # 402 — OpenRouter phrasing
+        "can only afford",              # 402 — OpenRouter token budget message
         "insufficient credits",
         "billing",
         "not_found",                    # 404 — model deprecated / not available

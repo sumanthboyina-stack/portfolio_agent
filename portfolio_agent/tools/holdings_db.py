@@ -53,6 +53,26 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_holdings_ticker ON holdings (ticker)"
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_price_history (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            date         TEXT NOT NULL,
+            ticker       TEXT NOT NULL,
+            close_price  REAL,
+            shares       REAL,
+            market_value REAL,
+            cost_basis   REAL,
+            broker       TEXT,
+            account_name TEXT,
+            UNIQUE(date, ticker, broker)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pph_date ON portfolio_price_history (date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pph_ticker ON portfolio_price_history (ticker)"
+    )
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -179,6 +199,214 @@ def delete_broker_holdings(broker: str) -> int:
         )
         conn.commit()
     return cursor.rowcount
+
+
+def snapshot_portfolio_prices(as_of_date: str | None = None) -> dict:
+    """
+    Fetch the last closing price for every current holding via yfinance and
+    write one row per (date, ticker, broker) into portfolio_price_history.
+    Called by the evening batch pipeline.
+    """
+    from datetime import date as _date
+    import yfinance as yf
+
+    today = as_of_date or _date.today().isoformat()
+    holdings = get_holdings()
+    if not holdings:
+        return {"snapped": 0, "date": today}
+
+    tickers = list({h["ticker"] for h in holdings if h.get("ticker")})
+
+    # Fetch last close in one yfinance call
+    prices: dict[str, float] = {}
+    try:
+        for chunk in [tickers[i:i+20] for i in range(0, len(tickers), 20)]:
+            data = yf.download(
+                " ".join(chunk), period="5d", interval="1d",
+                auto_adjust=True, progress=False,
+                group_by="ticker",
+            )
+            for t in chunk:
+                try:
+                    col = data["Close"] if len(chunk) == 1 else data[t]["Close"]
+                    prices[t] = float(col.dropna().iloc[-1])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    rows = []
+    for h in holdings:
+        t = h.get("ticker")
+        if not t:
+            continue
+        cp = prices.get(t)
+        shares = h.get("shares")
+        mv = round(cp * shares, 2) if cp and shares else None
+        cb = h.get("cost_basis_total")
+        rows.append((
+            today, t,
+            round(cp, 4) if cp else None,
+            shares, mv, cb,
+            h.get("broker"), h.get("account_name"),
+        ))
+
+    with _db() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO portfolio_price_history
+               (date, ticker, close_price, shares, market_value, cost_basis,
+                broker, account_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        conn.commit()
+
+    return {"snapped": len(rows), "date": today}
+
+
+def get_price_history(
+    tickers: list[str] | None = None,
+    brokers: list[str] | None = None,
+) -> list[dict]:
+    """Return all price history rows, optionally filtered by ticker/broker."""
+    with _db() as conn:
+        clauses, params = [], []
+        if tickers:
+            clauses.append(f"ticker IN ({','.join('?'*len(tickers))})")
+            params.extend(tickers)
+        if brokers:
+            clauses.append(f"broker IN ({','.join('?'*len(brokers))})")
+            params.extend(brokers)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = conn.execute(
+            f"SELECT * FROM portfolio_price_history {where} ORDER BY date, ticker",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def backfill_missing_price_snapshots() -> dict:
+    """
+    Find trading days between the earliest holding load date and yesterday that
+    have no price snapshot, then fetch historical closing prices from yfinance
+    and insert the missing rows.  Safe to call from any batch — it is a no-op
+    when history is already complete and only fetches for confirmed prior days.
+    """
+    from datetime import date as _date, timedelta
+    import yfinance as yf
+
+    holdings = get_holdings()
+    if not holdings:
+        return {"backfilled": 0, "missing_days": 0}
+
+    today = _date.today()
+    yesterday = today - timedelta(days=1)
+
+    # Earliest date we had any holding data — prefer as_of_date, fallback synced_at
+    date_strs = []
+    for h in holdings:
+        d = (h.get("as_of_date") or h.get("synced_at") or "")[:10]
+        if d:
+            date_strs.append(d)
+    if not date_strs:
+        return {"backfilled": 0, "missing_days": 0}
+
+    earliest = _date.fromisoformat(min(date_strs))
+    if earliest > yesterday:
+        return {"backfilled": 0, "missing_days": 0}
+
+    # Dates already covered in the DB
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT date FROM portfolio_price_history"
+        ).fetchall()
+    covered = {r["date"] for r in rows}
+
+    # Business days (Mon–Fri) between earliest and yesterday as a proxy for
+    # trading days; yfinance simply returns no row for market holidays, so we
+    # never write phantom data.
+    try:
+        import pandas as pd
+        bdays = [
+            d.date().isoformat()
+            for d in pd.bdate_range(start=earliest, end=yesterday)
+        ]
+    except Exception:
+        # Fallback: walk calendar days, skip weekends
+        bdays = []
+        cur = earliest
+        while cur <= yesterday:
+            if cur.weekday() < 5:
+                bdays.append(cur.isoformat())
+            cur += timedelta(days=1)
+
+    missing = [d for d in bdays if d not in covered]
+    if not missing:
+        return {"backfilled": 0, "missing_days": 0}
+
+    # Build a lookup: ticker → most-recent holding snapshot
+    holding_map: dict[str, dict] = {}
+    for h in holdings:
+        t = h.get("ticker")
+        if t:
+            holding_map[t] = h
+    tickers = list(holding_map)
+
+    # Fetch the full date range in one yfinance call per chunk
+    start_str = min(missing)
+    end_str   = (_date.fromisoformat(max(missing)) + timedelta(days=1)).isoformat()
+
+    prices_by_ticker_date: dict[str, dict[str, float]] = {t: {} for t in tickers}
+    try:
+        for chunk in [tickers[i:i+20] for i in range(0, len(tickers), 20)]:
+            data = yf.download(
+                " ".join(chunk),
+                start=start_str,
+                end=end_str,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                group_by="ticker",
+            )
+            for t in chunk:
+                try:
+                    close_col = data["Close"] if len(chunk) == 1 else data[t]["Close"]
+                    for idx, val in close_col.dropna().items():
+                        d_str = idx.date().isoformat() if hasattr(idx, "date") else str(idx)[:10]
+                        prices_by_ticker_date[t][d_str] = float(val)
+                except Exception:
+                    pass
+    except Exception as exc:
+        return {"backfilled": 0, "missing_days": len(missing), "error": str(exc)}
+
+    rows_to_insert = []
+    for d_str in missing:
+        for t, h in holding_map.items():
+            cp = prices_by_ticker_date.get(t, {}).get(d_str)
+            if cp is None:
+                continue  # market holiday or simply no data — skip
+            shares = h.get("shares")
+            mv = round(cp * shares, 2) if shares else None
+            cb = h.get("cost_basis_total")
+            rows_to_insert.append((
+                d_str, t,
+                round(cp, 4),
+                shares, mv, cb,
+                h.get("broker"), h.get("account_name"),
+            ))
+
+    if rows_to_insert:
+        with _db() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO portfolio_price_history
+                   (date, ticker, close_price, shares, market_value, cost_basis,
+                    broker, account_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows_to_insert,
+            )
+            conn.commit()
+
+    return {"backfilled": len(rows_to_insert), "missing_days": len(missing)}
 
 
 def sync_to_yaml(yaml_path: str) -> None:

@@ -25,15 +25,16 @@ def ensure_tables() -> None:
     with _get_conn() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_runs (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id        TEXT UNIQUE NOT NULL,
-                job_type      TEXT NOT NULL,
-                pid           INTEGER,
-                log_file      TEXT,
-                started_at    TEXT NOT NULL,
-                finished_at   TEXT,
-                status        TEXT DEFAULT 'running',
-                total_tickers INTEGER DEFAULT 0
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id         TEXT UNIQUE NOT NULL,
+                job_type       TEXT NOT NULL,
+                pid            INTEGER,
+                log_file       TEXT,
+                started_at     TEXT NOT NULL,
+                finished_at    TEXT,
+                status         TEXT DEFAULT 'running',
+                total_tickers  INTEGER DEFAULT 0,
+                trigger_source TEXT DEFAULT 'cli'
             );
             CREATE TABLE IF NOT EXISTS pipeline_phase_progress (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +52,11 @@ def ensure_tables() -> None:
                 UNIQUE(run_id, phase)
             );
         """)
+        # Migrate existing DB: add trigger_source if the column doesn't exist yet
+        try:
+            conn.execute("ALTER TABLE pipeline_runs ADD COLUMN trigger_source TEXT DEFAULT 'cli'")
+        except Exception:
+            pass
 
 
 class PipelineProgressTracker:
@@ -59,12 +65,13 @@ class PipelineProgressTracker:
     def __init__(self, run_id: str, job_type: str, pid: int = 0, log_file: str = "") -> None:
         ensure_tables()
         self.run_id = run_id
+        trigger_source = os.environ.get("PIPELINE_TRIGGER", "cli")
         with _get_conn() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO pipeline_runs
-                   (run_id, job_type, pid, log_file, started_at, status, total_tickers)
-                   VALUES (?, ?, ?, ?, ?, 'running', 0)""",
-                (run_id, job_type, pid or os.getpid(), log_file, _now()),
+                   (run_id, job_type, pid, log_file, started_at, status, total_tickers, trigger_source)
+                   VALUES (?, ?, ?, ?, ?, 'running', 0, ?)""",
+                (run_id, job_type, pid or os.getpid(), log_file, _now(), trigger_source),
             )
 
     def set_total(self, total: int) -> None:

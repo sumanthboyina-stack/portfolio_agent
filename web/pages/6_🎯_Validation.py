@@ -12,6 +12,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import yaml as _yaml
+
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
@@ -100,13 +102,26 @@ def _read_log(path) -> str:
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-def _load_metric_series() -> pd.DataFrame:
-    """Per-prediction brier_score + log_loss for evaluated rows."""
+def _load_metric_series(
+    segment: str = "All",
+    portfolio_tickers: list[str] | None = None,
+) -> pd.DataFrame:
+    """Per-prediction brier_score + log_loss for evaluated rows, optionally filtered by segment."""
     if not _DB.exists():
         return pd.DataFrame()
+
+    seg_clause = ""
+    seg_params: list = []
+    if segment == "Portfolio" and portfolio_tickers:
+        ph = ",".join("?" * len(portfolio_tickers))
+        seg_clause = f"AND ticker IN ({ph})"
+        seg_params = list(portfolio_tickers)
+    elif segment == "New Opportunities":
+        seg_clause = "AND trigger_type = 'trending_opportunity'"
+
     with sqlite3.connect(str(_DB)) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT as_of_date AS prediction_date, evaluated_at, ticker, horizon_days,
                    brier_score, log_loss,
                    actual_return, predicted_return_low, predicted_return_high,
@@ -117,8 +132,9 @@ def _load_metric_series() -> pd.DataFrame:
             FROM predictions
             WHERE evaluation_status = 'evaluated'
               AND brier_score IS NOT NULL
+              {seg_clause}
             ORDER BY as_of_date ASC
-        """).fetchall()
+        """, seg_params).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
         df["prediction_date"] = pd.to_datetime(df["prediction_date"])
@@ -126,6 +142,15 @@ def _load_metric_series() -> pd.DataFrame:
             lambda h: f"{h}d" if pd.notna(h) else "?"
         )
     return df
+
+
+def _load_portfolio_tickers() -> list[str]:
+    """Return unique portfolio ticker symbols from portfolio.yaml."""
+    try:
+        data = _yaml.safe_load((_ROOT / "config" / "portfolio.yaml").read_text()) or {}
+        return list({h["ticker"].upper() for h in data.get("holdings", []) if "ticker" in h})
+    except Exception:
+        return []
 
 
 def _get_model_names() -> list[str]:
@@ -141,19 +166,35 @@ def _get_model_names() -> list[str]:
     return [r[0] for r in rows]
 
 
-def _compute_filtered_metrics(model_names: list[str] | None, lookback: int) -> list[dict]:
+def _compute_filtered_metrics(
+    model_names: list[str] | None,
+    lookback: int,
+    segment: str = "All",
+    portfolio_tickers: list[str] | None = None,
+) -> list[dict]:
     """
     Recompute rolling metrics directly from the predictions table, optionally
-    filtered by model_name list.  Returns the same shape as get_rolling_metrics().
+    filtered by model_name list and/or prediction segment (Portfolio / New Opportunities).
     """
     if not _DB.exists():
         return []
     model_clause = ""
-    params: list = [lookback]
+    model_params: list = []
     if model_names:
         placeholders = ",".join("?" * len(model_names))
         model_clause = f"AND model_name IN ({placeholders})"
-        params = [lookback] + list(model_names)
+        model_params = list(model_names)
+
+    seg_clause = ""
+    seg_params: list = []
+    if segment == "Portfolio" and portfolio_tickers:
+        ph = ",".join("?" * len(portfolio_tickers))
+        seg_clause = f"AND ticker IN ({ph})"
+        seg_params = list(portfolio_tickers)
+    elif segment == "New Opportunities":
+        seg_clause = "AND trigger_type = 'trending_opportunity'"
+
+    params: list = [lookback] + model_params + seg_params
 
     sql = f"""
         SELECT
@@ -181,6 +222,7 @@ def _compute_filtered_metrics(model_names: list[str] | None, lookback: int) -> l
         WHERE evaluation_status = 'evaluated'
           AND as_of_date >= DATE('now', '-' || ? || ' days')
           {model_clause}
+          {seg_clause}
         GROUP BY horizon_days
     """
     with sqlite3.connect(str(_DB)) as conn:
@@ -300,15 +342,45 @@ with st.sidebar:
         _model_filter = [_model_sel]
         st.caption(f"🧠 Higher reasoning model")
 
+    st.divider()
+
+    # ── Prediction segment ───────────────────────────────────────────────────
+    st.markdown(
+        '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 8px">'
+        'Prediction segment</p>',
+        unsafe_allow_html=True,
+    )
+    _seg_sel = st.radio(
+        "segment",
+        ["All", "Portfolio", "New Opportunities"],
+        index=0,
+        label_visibility="collapsed",
+        key="val_segment",
+        help=(
+            "All: every prediction  ·  "
+            "Portfolio: your holdings only  ·  "
+            "New Opportunities: trending tickers discovered by the scanner"
+        ),
+    )
+
+# Load portfolio tickers once (used by segment filter throughout)
+_portfolio_tickers = _load_portfolio_tickers()
+
 # ── Page header ───────────────────────────────────────────────────────────────
 
 st.title("🎯 APEX Prediction Validation")
 st.caption(f"System version: `{CURRENT_SYSTEM_VERSION}` · Scores predictions after they mature")
 
+_active_filters: list[str] = []
 if _model_filter:
+    _active_filters.append(f"Model: {', '.join(f'`{m}`' for m in _model_filter)}")
+if _seg_sel != "All":
+    _seg_icon = "💼" if _seg_sel == "Portfolio" else "🌟"
+    _active_filters.append(f"Segment: **{_seg_icon} {_seg_sel}**")
+if _active_filters:
     st.info(
-        f"🔍 **Model filter active:** {', '.join(f'`{m}`' for m in _model_filter)}  ·  "
-        f"All metrics and tables recalculated for selected model(s) only.",
+        "🔍 **Active filters** — " + "  ·  ".join(_active_filters) +
+        "  ·  All metrics and tables recalculated for selected filter(s).",
         icon="🔍",
     )
 
@@ -609,7 +681,7 @@ def _render_scorecard_tiles(by_horizon: dict, all_horizons: list, horizon_labels
 # ── Tab 1: Scorecard ──────────────────────────────────────────────────────────
 
 with tabs[0]:
-    metrics = _compute_filtered_metrics(_model_filter, lookback)
+    metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers)
     if not metrics:
         st.info(
             "No evaluated predictions yet. "
@@ -663,7 +735,7 @@ with tabs[1]:
         "Populates after **▶ Run Evaluation** scores matured predictions."
     )
 
-    metric_df  = _load_metric_series()
+    metric_df  = _load_metric_series(_seg_sel, _portfolio_tickers)
     rolling_df = _load_rolling_metrics_series()
 
     # Apply model filter to per-prediction series
@@ -1353,12 +1425,22 @@ perfect = 0.0 · coin flip = 0.25 · worst = 1.0
 
 with tabs[4]:
     preds = get_recent_evaluated_predictions(limit=500, lookback_days=lookback)
-    # Apply global model filter first
+    # Apply global model filter
     if _model_filter and preds:
         preds = [p for p in preds if p.get("model_name") in _model_filter]
+    # Apply segment filter
+    if _seg_sel == "Portfolio" and _portfolio_tickers and preds:
+        _pt_set = set(_portfolio_tickers)
+        preds = [p for p in preds if p.get("ticker", "").upper() in _pt_set]
+    elif _seg_sel == "New Opportunities" and preds:
+        preds = [p for p in preds if p.get("trigger_type") == "trending_opportunity"]
     if not preds:
-        st.info("No evaluated predictions yet." if not _model_filter else
-                f"No evaluated predictions for model(s): {', '.join(_model_filter)}")
+        _no_pred_msg = "No evaluated predictions yet."
+        if _model_filter:
+            _no_pred_msg = f"No evaluated predictions for model(s): {', '.join(_model_filter)}"
+        if _seg_sel != "All":
+            _no_pred_msg += f" (segment: {_seg_sel})"
+        st.info(_no_pred_msg)
     else:
         f1, f2 = st.columns(2)
         with f1:

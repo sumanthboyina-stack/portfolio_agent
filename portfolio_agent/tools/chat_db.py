@@ -101,10 +101,17 @@ def touch_session(session_id: str, tickers: list[str] = None,
 
 
 def list_sessions(limit: int = 100) -> list[dict]:
-    """Return all sessions, newest first."""
+    """Return all sessions, newest first, with the first user question attached."""
     with _db() as c:
         rows = c.execute(
-            "SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?",
+            """
+            SELECT s.*,
+                   (SELECT content FROM chat_messages
+                    WHERE session_id = s.id AND role = 'user'
+                    ORDER BY created_at LIMIT 1) AS first_question
+            FROM chat_sessions s
+            ORDER BY s.updated_at DESC LIMIT ?
+            """,
             [limit],
         ).fetchall()
     result = []

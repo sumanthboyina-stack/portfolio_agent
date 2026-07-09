@@ -74,11 +74,173 @@ Rules:
 {ticker_blocks}
 """
 
+def _build_macro_section(macro: dict) -> str:
+    """
+    Render the enriched macro snapshot as a formatted, readable block for the Macro Analyst.
+    Falls back gracefully if any sub-block is missing.
+    """
+    if not macro:
+        return "(macro data unavailable)"
+
+    lines: list[str] = []
+
+    # ── Rates & Fed policy ────────────────────────────────────────────────────
+    fed = macro.get("fed") or {}
+    ff  = fed.get("current_fed_funds")
+    t10 = fed.get("yield_10y")
+    t2  = fed.get("yield_2y")
+    t3m = fed.get("yield_3m")
+    sp_10_2  = fed.get("spread_10y_2y")
+    inverted = fed.get("curve_inverted")
+    fomc_dt  = fed.get("next_fomc_date")
+    fomc_da  = fed.get("days_until_fomc")
+    fomc_det = fed.get("fomc_detail", "")
+    imp_move = fed.get("market_implied_move", "")
+    last_chg = fed.get("last_change_direction", "")
+
+    ff_str    = f"{ff:.2f}%" if ff else "n/a"
+    t10_str   = f"{t10:.2f}%" if t10 else "n/a"
+    t2_str    = f"{t2:.2f}%" if t2  else "n/a"
+    t3m_str   = f"{t3m:.2f}%" if t3m else "n/a"
+    sp_str    = (
+        f"{sp_10_2:+.2f}% {'(INVERTED ⚠)' if inverted else '(positive)'}"
+        if sp_10_2 is not None else "n/a"
+    )
+    fomc_str  = (
+        f"{fomc_dt} (in {fomc_da}d){' — ' + fomc_det if fomc_det else ''}"
+        if fomc_dt else "n/a"
+    )
+
+    lines.append("RATES & FED POLICY")
+    lines.append(
+        f"  Fed Funds: {ff_str}  |  Last move: {last_chg or 'hold'}  |  "
+        f"Next FOMC: {fomc_str}"
+    )
+    lines.append(f"  Yields: 10Y {t10_str} | 2Y {t2_str} | 3M {t3m_str}")
+    lines.append(f"  10Y-2Y Spread: {sp_str}  |  Market-implied next move: {imp_move or 'hold'}")
+    lines.append("")
+
+    # ── Inflation ─────────────────────────────────────────────────────────────
+    inf = macro.get("inflation") or {}
+    cpi  = inf.get("cpi_yoy")
+    core = inf.get("core_cpi_yoy")
+    pce  = inf.get("pce_yoy")
+    cpi_dt = inf.get("cpi_date", "")
+    trend  = inf.get("trend", "")
+
+    lines.append("INFLATION")
+    lines.append(
+        f"  CPI YoY: {f'{cpi:.1f}%' if cpi else 'n/a'} ({cpi_dt})  |  "
+        f"Core CPI: {f'{core:.1f}%' if core else 'n/a'}  |  "
+        f"PCE: {f'{pce:.1f}%' if pce else 'n/a'}  |  Trend: {trend or 'unknown'}"
+    )
+    lines.append("")
+
+    # ── Labor ─────────────────────────────────────────────────────────────────
+    lab = macro.get("labor") or {}
+    nfp    = lab.get("nfp_latest_mm")
+    nfp_dt = lab.get("nfp_date", "")
+    unemp  = lab.get("unemployment_rate")
+    claims = lab.get("jobless_claims_4wk")
+    l_trend = lab.get("trend", "")
+
+    lines.append("LABOR MARKET")
+    lines.append(
+        f"  NFP: {f'+{nfp:,.0f}' if nfp and nfp >= 0 else (f'{nfp:,.0f}' if nfp else 'n/a')} ({nfp_dt})  |  "
+        f"Unemployment: {f'{unemp:.1f}%' if unemp else 'n/a'}  |  "
+        f"Jobless claims (4-wk avg): {f'{claims:,.0f}' if claims else 'n/a'}  |  "
+        f"Trend: {l_trend or 'unknown'}"
+    )
+    lines.append("")
+
+    # ── Credit & risk ─────────────────────────────────────────────────────────
+    cred = macro.get("credit") or {}
+    hy      = cred.get("hy_spread_bps")
+    hy_chg  = cred.get("hy_30d_change_bps")
+    hy_reg  = cred.get("regime", "")
+    vix     = macro.get("vix")
+
+    lines.append("CREDIT & RISK")
+    lines.append(
+        f"  HY spread: {f'{hy:.0f}bps ({hy_reg})' if hy else 'n/a'}  |  "
+        f"30d change: {f'{hy_chg:+.0f}bps' if hy_chg is not None else 'n/a'}  |  "
+        f"VIX: {f'{vix:.1f}' if vix else 'n/a'}"
+    )
+    lines.append("")
+
+    # ── Currency ──────────────────────────────────────────────────────────────
+    cur = macro.get("currency") or {}
+    dxy      = cur.get("dxy")
+    dxy_pct  = cur.get("dxy_30d_chg_pct")
+    dxy_tr   = cur.get("trend", "")
+
+    lines.append("CURRENCY (USD)")
+    lines.append(
+        f"  DXY: {f'{dxy:.1f}' if dxy else 'n/a'}  |  "
+        f"30d change: {f'{dxy_pct:+.1f}%' if dxy_pct is not None else 'n/a'}  |  "
+        f"Trend: {dxy_tr or 'unknown'}"
+    )
+    lines.append("")
+
+    # ── Recent macro surprises ────────────────────────────────────────────────
+    surprises = macro.get("recent_surprises") or []
+    if surprises:
+        lines.append("RECENT MACRO SURPRISES (last 30 days)")
+        sev_label = {0: "no surprise", 1: "minor", 2: "moderate", 3: "major surprise ⚠"}
+        for s in surprises[:5]:
+            ev    = s.get("event", "?")
+            dt    = s.get("date", "")
+            per   = s.get("period") or ""
+            act   = s.get("actual")
+            prior = s.get("prior")
+            sev   = s.get("severity", 0)
+            yoy   = s.get("yoy_change")
+            label = sev_label.get(sev, str(sev))
+
+            act_str   = f"{act:,.2f}" if act is not None else "n/a"
+            prior_str = f"{prior:,.2f}" if prior is not None else "n/a"
+            yoy_str   = f"  YoY: {yoy:+.1f}%" if yoy is not None else ""
+            lines.append(
+                f"  • {ev} ({per or dt}): actual {act_str} vs prior {prior_str}{yoy_str}"
+                f"  [{label}]"
+            )
+        lines.append("")
+
+    # ── Upcoming events ───────────────────────────────────────────────────────
+    upcoming = macro.get("upcoming_events") or []
+    if upcoming:
+        lines.append("UPCOMING EVENTS (next 14 days)")
+        for e in upcoming[:5]:
+            ev  = e.get("event", "?")
+            dt  = e.get("date", "")
+            da  = e.get("days_away")
+            det = e.get("detail", "")
+            da_str = f"in {da}d" if da is not None else ""
+            lines.append(
+                f"  • {ev} — {dt} ({da_str}){('  [' + det + ']') if det else ''}"
+            )
+        lines.append("")
+
+    # ── Interpretation ────────────────────────────────────────────────────────
+    interp = macro.get("interpretation") or {}
+    if interp:
+        lines.append("MACRO INTERPRETATION (deterministic — no LLM)")
+        for key, text in interp.items():
+            label = key.replace("_", " ").title()
+            lines.append(f"  → {label}: {text}")
+
+    return "\n".join(lines)
+
+
 _APEX_PROMPT_TEMPLATE = """\
 You are APEX (Adaptive Portfolio EXpert), a multi-perspective investment reasoning system.
 
 Ticker  : {ticker}
 Question: Daily portfolio review — provide investment recommendation.
+
+=== MACRO ENVIRONMENT (Macro Analyst's domain) ===
+{macro_section}
+=== END MACRO ===
 
 === FULL ANALYSIS CONTEXT (pre-loaded) ===
 {ctx_json}
@@ -87,8 +249,8 @@ Question: Daily portfolio review — provide investment recommendation.
 Using the context above (fundamentals, research, news, macro, dynamic_weights, prediction_history):
 
 1. State the weight regime and signal summary (from dynamic_weights.regime and dynamic_weights.signal_strengths).
-2. Have each analyst score their domain 1-10: DR. CHEN (fundamentals), MARCUS WEBB (research),
-   ELENA VARGA (macro), JAMES PARK (news).
+2. Have each analyst score their domain 1-10: FUNDAMENTAL ANALYST, RESEARCH ANALYST,
+   MACRO ANALYST, NEWS ANALYST.
 3. Cross-examine if scores diverge > 3 pts.
 4. Compare to prior prediction if one exists.
 5. For EACH scheduled horizon, look up its weights from dynamic_weights.weights_by_horizon[horizon_days]
@@ -118,10 +280,10 @@ End your response with EXACTLY this JSON block (no text after):
   "weight_regime": "QUIET_DAY",
   "weights_used": {{"fundamentals": 0.35, "research": 0.30, "macro": 0.20, "news": 0.15}},
   "panel_summary": {{
-    "chen_verdict": "BULLISH (7/10) — one sentence",
-    "webb_verdict": "BULLISH (7/10) — one sentence",
-    "varga_verdict": "NEUTRAL (6/10) — one sentence",
-    "park_verdict":  "NEUTRAL (6/10) — one sentence",
+    "chen_verdict": "BULLISH (7/10) — Fundamental Analyst one sentence",
+    "webb_verdict": "BULLISH (7/10) — Research Analyst one sentence",
+    "varga_verdict": "NEUTRAL (6/10) — Macro Analyst one sentence",
+    "park_verdict":  "NEUTRAL (6/10) — News Analyst one sentence",
     "key_debate": "Panel consensus or main disagreement"
   }},
   "reasoning": "3-5 sentence narrative",

@@ -534,9 +534,10 @@ with tab3:
     try:
         with _conn() as c:
             rows = c.execute(
-                """SELECT ticker, as_of_date, consensus, consensus_mean,
-                           num_analysts, price_target_avg, price_target_high,
-                           price_target_low, current_price, upside_to_mean_pct,
+                """SELECT ticker, as_of_date, consensus, rec_trend, consensus_mean,
+                           num_analysts, price_target_avg, price_target_median,
+                           price_target_high, price_target_low,
+                           current_price, upside_to_mean_pct,
                            latest_upgrade_date, research_score,
                            highlights, summary, last_llm_run_date,
                            model_name, model_provider
@@ -563,25 +564,32 @@ with tab3:
         for c in ["price_target_avg","price_target_high","price_target_low","current_price"]:
             df[c] = df[c].round(2)
 
+        for col in ["rec_trend", "price_target_median"]:
+            if col not in df.columns:
+                df[col] = None
+        df["price_target_median"] = pd.to_numeric(df.get("price_target_median"), errors="coerce").round(2)
+
         grid_df = df[[
-            "as_of_date", "ticker", "consensus", "consensus_mean",
-            "num_analysts", "price_target_avg", "price_target_high", "price_target_low",
+            "as_of_date", "ticker", "consensus", "rec_trend", "consensus_mean",
+            "num_analysts", "price_target_avg", "price_target_median",
+            "price_target_high", "price_target_low",
             "current_price", "upside_to_mean_pct", "latest_upgrade_date",
-            "research_score", "last_llm_run_date", "model_name", "model_provider",
+            "research_score", "model_name", "model_provider",
         ]].rename(columns={
             "ticker":               "Ticker",
             "as_of_date":           "As Of Date",
             "consensus":            "Consensus",
+            "rec_trend":            "Rec Trend",
             "consensus_mean":       "Mean Rtg",
             "num_analysts":         "Analysts",
             "price_target_avg":     "Target Avg",
+            "price_target_median":  "Target Med",
             "price_target_high":    "Target High",
             "price_target_low":     "Target Low",
             "current_price":        "Price",
             "upside_to_mean_pct":   "Upside %",
             "latest_upgrade_date":  "Last Upgrade",
             "research_score":       "Score",
-            "last_llm_run_date":    "LLM Run",
             "model_name":           "Model",
             "model_provider":       "Provider",
         })
@@ -590,21 +598,22 @@ with tab3:
         st.caption("Inline filter row below each header · Click row for details")
 
         col_defs = [
-            {"field": "As Of Date",       "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",      "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Consensus",   "width": 110, "filter": "agTextColumnFilter"},
-            {"field": "Mean Rtg",    "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) : '—'"},
-            {"field": "Analysts",    "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? Math.round(value) : '—'"},
-            {"field": "Target Avg",  "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Target High", "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Target Low",  "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Price",       "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Upside %",    "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) + '%' : '—'"},
-            {"field": "Last Upgrade","width": 110, "filter": "agDateColumnFilter"},
-            {"field": "Score",       "width": 80,  "filter": "agNumberColumnFilter"},
-            {"field": "LLM Run",     "width": 110, "filter": "agDateColumnFilter"},
-            {"field": "Model",       "width": 160, "filter": "agTextColumnFilter"},
-            {"field": "Provider",    "width": 110, "filter": "agTextColumnFilter"},
+            {"field": "As Of Date",    "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
+            {"field": "Ticker",        "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
+            {"field": "Consensus",     "width": 110, "filter": "agTextColumnFilter"},
+            {"field": "Rec Trend",     "width": 105, "filter": "agTextColumnFilter"},
+            {"field": "Mean Rtg",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) : '—'"},
+            {"field": "Analysts",      "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? Math.round(value) : '—'"},
+            {"field": "Target Avg",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+            {"field": "Target Med",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+            {"field": "Target High",   "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+            {"field": "Target Low",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+            {"field": "Price",         "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+            {"field": "Upside %",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) + '%' : '—'"},
+            {"field": "Last Upgrade",  "width": 110, "filter": "agDateColumnFilter"},
+            {"field": "Score",         "width": 80,  "filter": "agNumberColumnFilter"},
+            {"field": "Model",         "width": 160, "filter": "agTextColumnFilter"},
+            {"field": "Provider",      "width": 110, "filter": "agTextColumnFilter"},
         ]
 
         selected = _aggrid(grid_df, col_defs, height=440, key="res_grid")
@@ -621,9 +630,11 @@ with tab3:
                 with dc1:
                     _detail_card("Broker Data", [
                         ("Consensus",    (row.get("consensus") or "—").upper().replace("_"," ")),
+                        ("Rec Trend",    str(row.get("rec_trend") or "—")),
                         ("Mean Rating",  f"{row.get('consensus_mean') or '—'}"),
                         ("# Analysts",   str(int(row.get("num_analysts") or 0) or "—")),
                         ("Target Avg",   f"${row.get('price_target_avg') or '—'}"),
+                        ("Target Median",f"${row.get('price_target_median') or '—'}"),
                         ("Target High",  f"${row.get('price_target_high') or '—'}"),
                         ("Target Low",   f"${row.get('price_target_low') or '—'}"),
                         ("Current",      f"${row.get('current_price') or '—'}"),
@@ -646,13 +657,12 @@ with tab3:
 with tab4:
     try:
         with _conn() as c:
-            existing_cols = {r[1] for r in c.execute("PRAGMA table_info(predictions)").fetchall()}
-            regime_col = ", weight_regime" if "weight_regime" in existing_cols else ", NULL as weight_regime"
             rows = c.execute(
-                f"""SELECT as_of_date, ticker, created_at, prediction, recommendation,
+                """SELECT as_of_date, ticker, created_at, prediction, recommendation,
                            confidence, composite_score,
-                           fundamental_score, research_score, macro_score, news_score
-                           {regime_col}, reasoning, panel_summary,
+                           fundamental_score, research_score, macro_score, news_score,
+                           horizon_days, trigger_type, trigger_event_id,
+                           reasoning, panel_summary,
                            changed_from_previous, previous_prediction, model_name
                    FROM predictions
                    WHERE DATE(as_of_date) BETWEEN ? AND ?
@@ -678,24 +688,29 @@ with tab4:
             lambda v: "Yes" if v else "No"
         )
 
+        for col in ["horizon_days", "trigger_type", "trigger_event_id"]:
+            if col not in df.columns:
+                df[col] = None
+
         grid_df = df[[
             "as_of_date", "ticker", "created_at", "recommendation", "prediction",
-            "confidence", "composite_score",
+            "horizon_days", "confidence", "composite_score",
             "fundamental_score", "research_score", "macro_score", "news_score",
-            "weight_regime", "changed_from_previous", "previous_prediction", "model_name",
+            "trigger_type", "changed_from_previous", "previous_prediction", "model_name",
         ]].rename(columns={
             "as_of_date":            "As Of Date",
             "ticker":                "Ticker",
             "created_at":            "Created",
             "recommendation":        "Rec",
             "prediction":            "Direction",
+            "horizon_days":          "Horizon",
             "confidence":            "Conf",
             "composite_score":       "Composite",
             "fundamental_score":     "Fund",
             "research_score":        "Research",
             "macro_score":           "Macro",
             "news_score":            "News",
-            "weight_regime":         "Regime",
+            "trigger_type":          "Trigger",
             "changed_from_previous": "Changed",
             "previous_prediction":   "Prev Rec",
             "model_name":            "Model",
@@ -705,21 +720,22 @@ with tab4:
         st.caption("Inline filter row below each header · Click row for details")
 
         col_defs = [
-            {"field": "As Of Date",     "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",    "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Created",   "width": 140, "filter": "agTextColumnFilter"},
-            {"field": "Rec",       "width": 120, "filter": "agTextColumnFilter"},
-            {"field": "Direction", "width": 100, "filter": "agTextColumnFilter"},
-            {"field": "Conf",      "width": 75,  "filter": "agNumberColumnFilter"},
-            {"field": "Composite", "width": 90,  "filter": "agNumberColumnFilter"},
-            {"field": "Fund",      "width": 70,  "filter": "agNumberColumnFilter"},
-            {"field": "Research",  "width": 85,  "filter": "agNumberColumnFilter"},
-            {"field": "Macro",     "width": 75,  "filter": "agNumberColumnFilter"},
-            {"field": "News",      "width": 70,  "filter": "agNumberColumnFilter"},
-            {"field": "Regime",    "width": 140, "filter": "agTextColumnFilter"},
-            {"field": "Changed",   "width": 85,  "filter": "agTextColumnFilter"},
-            {"field": "Prev Rec",  "width": 110, "filter": "agTextColumnFilter"},
-            {"field": "Model",     "width": 160, "filter": "agTextColumnFilter"},
+            {"field": "As Of Date",  "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
+            {"field": "Ticker",      "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
+            {"field": "Created",     "width": 140, "filter": "agTextColumnFilter"},
+            {"field": "Rec",         "width": 120, "filter": "agTextColumnFilter"},
+            {"field": "Direction",   "width": 100, "filter": "agTextColumnFilter"},
+            {"field": "Horizon",     "width": 75,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value + 'd' : '—'"},
+            {"field": "Conf",        "width": 65,  "filter": "agNumberColumnFilter"},
+            {"field": "Composite",   "width": 90,  "filter": "agNumberColumnFilter"},
+            {"field": "Fund",        "width": 65,  "filter": "agNumberColumnFilter"},
+            {"field": "Research",    "width": 80,  "filter": "agNumberColumnFilter"},
+            {"field": "Macro",       "width": 70,  "filter": "agNumberColumnFilter"},
+            {"field": "News",        "width": 65,  "filter": "agNumberColumnFilter"},
+            {"field": "Trigger",     "width": 170, "filter": "agTextColumnFilter"},
+            {"field": "Changed",     "width": 85,  "filter": "agTextColumnFilter"},
+            {"field": "Prev Rec",    "width": 110, "filter": "agTextColumnFilter"},
+            {"field": "Model",       "width": 160, "filter": "agTextColumnFilter"},
         ]
 
         selected = _aggrid(grid_df, col_defs, height=440, key="pred_grid")
@@ -752,9 +768,12 @@ with tab4:
                         ("News",         f"{_score_color(row.get('news_score'))} {row.get('news_score') or '—'}/10"),
                     ])
                 with xc2:
+                    trigger_raw = row.get("trigger_type") or "—"
+                    trigger_fmt = trigger_raw.replace("_", " ").title() if trigger_raw != "—" else "—"
                     _detail_card("Meta", [
                         ("Direction",  row.get("prediction", "—")),
-                        ("Regime",     row.get("weight_regime", "—") or "—"),
+                        ("Horizon",    f"{row.get('horizon_days') or '—'}d"),
+                        ("Trigger",    trigger_fmt),
                         ("Created",    (str(row.get("created_at") or ""))[:16]),
                         ("Model",      row.get("model_name", "—") or "—"),
                         ("Changed?",   "🔄 Yes" if row.get("changed_from_previous") else "No"),
@@ -766,10 +785,10 @@ with tab4:
                         if panel:
                             st.markdown("**Panel Verdicts**")
                             for k, name in [
-                                ("chen_verdict",  "🧮 Dr. Chen"),
-                                ("webb_verdict",  "📊 Marcus"),
-                                ("varga_verdict", "🌐 Elena"),
-                                ("park_verdict",  "📰 James"),
+                                ("chen_verdict",  "🧮 Fundamental Analyst"),
+                                ("webb_verdict",  "📊 Research Analyst"),
+                                ("varga_verdict", "🌐 Macro Analyst"),
+                                ("park_verdict",  "📰 News Analyst"),
                             ]:
                                 if panel.get(k):
                                     st.markdown(f"**{name}:** {panel[k]}")
@@ -1057,7 +1076,6 @@ with tab6:
 # TAB 7 — TRIGGER EVENTS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab7:
-    import pandas as _pd7
     try:
         with _conn() as c:
             _ev_cols = {r[1] for r in c.execute("PRAGMA table_info(trigger_events)").fetchall()}
@@ -1071,7 +1089,7 @@ with tab7:
                        ORDER BY detected_at DESC
                        LIMIT 500"""
                 ).fetchall()
-                ev_df = _pd7.DataFrame([dict(r) for r in _ev_rows]) if _ev_rows else _pd7.DataFrame()
+                ev_df = pd.DataFrame([dict(r) for r in _ev_rows]) if _ev_rows else pd.DataFrame()
 
                 if ev_df.empty:
                     st.info("No events detected yet. Events are populated by the morning batch.", icon="⚡")
@@ -1084,27 +1102,56 @@ with tab7:
                     m3.metric("Processed", f"{proc_pct:.0f}%")
                     m4.metric("Unique Tickers", ev_df["ticker"].nunique())
 
-                    st.caption("Showing latest 500 events — sorted newest first.")
-                    ev_display = ev_df.rename(columns={
-                        "id": "ID", "detected_at": "Detected At", "ticker": "Ticker",
-                        "event_type": "Event Type", "severity": "Severity",
-                        "source": "Source", "summary": "Summary",
-                        "processed": "Processed", "processed_at": "Processed At",
+                    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+                    section_title("Events", badge_text=f"{len(ev_df)} rows", badge_color=PRIMARY)
+                    st.caption("Showing latest 500 events · Click row for details")
+
+                    ev_df["processed"] = ev_df["processed"].apply(lambda v: "Yes" if v else "No")
+                    ev_df["detected_at"] = ev_df["detected_at"].apply(
+                        lambda v: str(v)[:19].replace("T", " ") if isinstance(v, str) else ""
+                    )
+                    ev_df["processed_at"] = ev_df["processed_at"].apply(
+                        lambda v: str(v)[:19].replace("T", " ") if isinstance(v, str) else ""
+                    )
+
+                    grid_ev = ev_df.rename(columns={
+                        "id":            "ID",
+                        "detected_at":   "Detected At",
+                        "ticker":        "Ticker",
+                        "event_type":    "Event Type",
+                        "severity":      "Severity",
+                        "source":        "Source",
+                        "summary":       "Summary",
+                        "processed":     "Processed",
+                        "processed_at":  "Processed At",
                         "prediction_id": "Pred ID",
                     })
-                    st.dataframe(ev_display, use_container_width=True, hide_index=True)
+                    ev_col_defs = [
+                        {"field": "Detected At",  "width": 155, "filter": "agTextColumnFilter",   "pinned": "left"},
+                        {"field": "Ticker",        "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                        {"field": "Severity",      "width": 85,  "filter": "agNumberColumnFilter"},
+                        {"field": "Event Type",    "width": 160, "filter": "agTextColumnFilter"},
+                        {"field": "Source",        "width": 120, "filter": "agTextColumnFilter"},
+                        {"field": "Summary",       "width": 320, "filter": "agTextColumnFilter"},
+                        {"field": "Processed",     "width": 95,  "filter": "agTextColumnFilter"},
+                        {"field": "Processed At",  "width": 155, "filter": "agTextColumnFilter"},
+                        {"field": "Pred ID",       "width": 80,  "filter": "agNumberColumnFilter"},
+                        {"field": "ID",            "width": 65,  "filter": "agNumberColumnFilter"},
+                    ]
+                    _aggrid(grid_ev, ev_col_defs, height=440, key="events_grid")
 
-                    st.subheader("Trigger-type breakdown (last 7 days)")
+                    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+                    section_title("Trigger Breakdown (last 7 days)", badge_color=PRIMARY)
                     try:
                         breakdown = c.execute(
-                            """SELECT trigger_type, COUNT(*) AS cnt
+                            """SELECT COALESCE(trigger_type, 'none') as trigger_type, COUNT(*) AS cnt
                                FROM predictions
                                WHERE as_of_date >= date('now', '-7 days')
                                GROUP BY trigger_type
                                ORDER BY cnt DESC"""
                         ).fetchall()
                         if breakdown:
-                            br_df = _pd7.DataFrame([dict(r) for r in breakdown])
+                            br_df = pd.DataFrame([dict(r) for r in breakdown])
                             br_df.columns = ["Trigger Type", "Count"]
                             st.dataframe(br_df, use_container_width=True, hide_index=True)
                         else:

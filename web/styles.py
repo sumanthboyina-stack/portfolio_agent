@@ -147,31 +147,34 @@ def inject_global_css() -> None:
     /* Sidebar generic buttons */
     [data-testid="stSidebar"] .stButton > button {
         width: 100%;
-        background: rgba(255,255,255,0.05) !important;
-        border: 1px solid rgba(255,255,255,0.08) !important;
-        color: #D1D5DB !important;
+        background: rgba(255,255,255,0.08) !important;
+        border: 1px solid rgba(255,255,255,0.22) !important;
+        color: #E5E7EB !important;
         border-radius: 8px !important;
-        font-weight: 500 !important;
-        text-align: left !important;
+        font-weight: 600 !important;
+        text-align: center !important;
         padding: 8px 13px !important;
         font-size: 0.83rem !important;
         transition: all 0.15s ease !important;
+        box-shadow: none !important;
     }
     [data-testid="stSidebar"] .stButton > button:hover {
-        background: rgba(37,99,235,0.2) !important;
-        border-color: rgba(37,99,235,0.4) !important;
-        color: #F9FAFB !important;
+        background: rgba(255,255,255,0.18) !important;
+        border-color: rgba(255,255,255,0.4) !important;
+        color: #FFFFFF !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
     }
     [data-testid="stSidebar"] .stButton > button[kind="primary"] {
-        background: #2563EB !important;
-        border-color: #2563EB !important;
-        color: white !important;
+        background: rgba(37,99,235,0.25) !important;
+        border-color: rgba(37,99,235,0.55) !important;
+        color: #93C5FD !important;
         font-weight: 600 !important;
     }
     [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-        background: #1D4ED8 !important;
-        border-color: #1D4ED8 !important;
-        box-shadow: 0 0 0 3px rgba(37,99,235,0.25) !important;
+        background: rgba(37,99,235,0.45) !important;
+        border-color: rgba(37,99,235,0.75) !important;
+        color: #FFFFFF !important;
+        box-shadow: 0 2px 8px rgba(37,99,235,0.35) !important;
     }
     [data-testid="stSidebar"] .stSelectbox > div > div,
     [data-testid="stSidebar"] .stTextInput > div > div > input {
@@ -185,18 +188,28 @@ def inject_global_css() -> None:
     [data-testid="stSidebar"] [data-testid="stButton"] button {
         text-align: left !important;
         white-space: pre-line !important;
-        line-height: 1.4 !important;
-        font-size: 0.8rem !important;
-        color: #D1D5DB !important;
-        background: rgba(255,255,255,0.04) !important;
-        border: 1px solid rgba(255,255,255,0.07) !important;
-        border-radius: 8px !important;
-        padding: 7px 10px !important;
+        line-height: 1.35 !important;
+        font-size: 0.72rem !important;
+        color: rgba(255,255,255,0.9) !important;
+        background: rgba(255,255,255,0.05) !important;
+        border: 1px solid rgba(255,255,255,0.1) !important;
+        border-radius: 7px !important;
+        padding: 6px 9px !important;
+    }
+    /* Override sidebar p-tag rule that grays out button text */
+    [data-testid="stSidebar"] [data-testid="stButton"] button p,
+    [data-testid="stSidebar"] [data-testid="stButton"] button span {
+        color: rgba(255,255,255,0.9) !important;
+        font-size: 0.72rem !important;
     }
     [data-testid="stSidebar"] [data-testid="stButton"] button:hover {
-        background: rgba(37,99,235,0.18) !important;
-        border-color: rgba(37,99,235,0.35) !important;
-        color: #F9FAFB !important;
+        background: rgba(255,255,255,0.12) !important;
+        border-color: rgba(255,255,255,0.25) !important;
+        color: rgba(255,255,255,0.9) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] button:hover p,
+    [data-testid="stSidebar"] [data-testid="stButton"] button:hover span {
+        color: #FFFFFF !important;
     }
     /* Delete button in chat history */
     [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div:last-child [data-testid="stButton"] button {
@@ -215,57 +228,61 @@ def inject_global_css() -> None:
     }
 
     /* ── Main buttons ────────────────────────────────────────── */
-    .stButton > button {
+    .stButton > button,
+    .stFormSubmitButton > button {
         border-radius: 8px !important;
-        font-weight: 500 !important;
+        font-weight: 600 !important;
         font-size: 0.85rem !important;
         padding: 9px 18px !important;
         transition: all 0.15s ease !important;
-        border: 1px solid #E5E7EB !important;
-        color: #374151 !important;
-        background: #FFFFFF !important;
+        border: 1px solid #2563EB !important;
+        color: white !important;
+        background: #2563EB !important;
         letter-spacing: -0.01em !important;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
+        box-shadow: 0 1px 3px rgba(37,99,235,0.3) !important;
     }
-    .stButton > button:hover {
-        border-color: #D1D5DB !important;
-        background: #F9FAFB !important;
-        color: #111827 !important;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.08) !important;
+    .stButton > button:hover,
+    .stFormSubmitButton > button:hover {
+        border-color: #1D4ED8 !important;
+        background: #1D4ED8 !important;
+        color: white !important;
+        box-shadow: 0 4px 14px rgba(37,99,235,0.35) !important;
+        transform: translateY(-1px) !important;
     }
-    .stButton > button[kind="primary"] {
+    .stButton > button[kind="primary"],
+    .stFormSubmitButton > button[kind="primary"] {
         background: #2563EB !important;
         border-color: #2563EB !important;
         color: white !important;
         font-weight: 600 !important;
         box-shadow: 0 1px 3px rgba(37,99,235,0.3) !important;
     }
-    .stButton > button[kind="primary"]:hover {
+    .stButton > button[kind="primary"]:hover,
+    .stFormSubmitButton > button[kind="primary"]:hover {
         background: #1D4ED8 !important;
         border-color: #1D4ED8 !important;
         box-shadow: 0 4px 14px rgba(37,99,235,0.35) !important;
         transform: translateY(-1px) !important;
     }
 
-    /* Hero prompt buttons in main area */
+    /* Buttons in main area — blue/white consistent */
     [data-testid="stMain"] [data-testid="stButton"] button {
-        background: #F9FAFB !important;
-        border: 1px solid #E5E7EB !important;
-        color: #374151 !important;
-        font-weight: 500 !important;
-        font-size: 0.83rem !important;
-        text-align: left !important;
-        border-radius: 10px !important;
-        padding: 10px 14px !important;
+        background: #2563EB !important;
+        border: 1px solid #2563EB !important;
+        color: white !important;
+        font-weight: 600 !important;
+        font-size: 0.85rem !important;
+        border-radius: 8px !important;
+        padding: 9px 18px !important;
         transition: all 0.15s ease !important;
-        box-shadow: none !important;
+        box-shadow: 0 1px 3px rgba(37,99,235,0.3) !important;
     }
     [data-testid="stMain"] [data-testid="stButton"] button:hover {
-        background: #EFF6FF !important;
-        border-color: #93C5FD !important;
-        color: #1D4ED8 !important;
+        background: #1D4ED8 !important;
+        border-color: #1D4ED8 !important;
+        color: white !important;
         transform: translateY(-1px) !important;
-        box-shadow: 0 4px 12px rgba(37,99,235,0.1) !important;
+        box-shadow: 0 4px 14px rgba(37,99,235,0.35) !important;
     }
     [data-testid="stMain"] [data-testid="stButton"] button[kind="primary"] {
         background: #2563EB !important;

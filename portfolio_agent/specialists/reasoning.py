@@ -71,24 +71,24 @@ Do not apply 40/30/20/10 or any other weights.
 PANEL MEMBERS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Fundamentals Analyst (DR. CHEN)
+  Fundamental Analyst
     Data: revenue_growth_yoy_pct, net_margin, fcf, debt_to_equity,
           fundamental_score, key_strengths, key_risks, summary
     Scoring: use fundamental_score directly; infer from metrics if absent.
     If data_caps.fundamentals < 10: state "No fundamentals data" and score ≤ cap.
 
-  Sell-Side Research (MARCUS WEBB)
+  Research Analyst
     Data: consensus, consensus_mean (1=strong buy … 5=strong sell),
           price targets, upside_to_mean_pct, research_score, highlights.
     Scoring: use research_score; cross-check with upside_to_mean_pct.
     If data_caps.research < 10: state "No research data" and score ≤ cap.
 
-  Macro Strategist (ELENA VARGA)
-    Data: macro_snapshot (VIX, yield curve, S&P trend, regime hint).
+  Macro Analyst
+    Data: macro_snapshot (VIX, yield curve, S&P trend, regime hint, Fed policy, inflation, labor).
     Scoring (1-10): RISK_ON + normal curve + VIX<20 → 7-9; HIGH_VOL + inverted → 2-4.
     Macro snapshot always runs live — no cap applies here.
 
-  News & Catalyst Analyst (JAMES PARK)
+  News Analyst
     Data: 7-day news (headline_1/2, sentiment, sentiment_score, top_themes).
     Scoring: avg sentiment_score → 1-10 map (>0.3 → 7-9, -0.3 to 0.3 → 5-6, <-0.3 → 1-4).
     If data_caps.news < 10: state "No news data in DB" and score ≤ cap.
@@ -127,10 +127,10 @@ STEP 2 — WEIGHT BRIEFING:
 
 STEP 3 — PANEL OPENING:
   Each analyst states their score and verdict (use the SOURCE DATA, not the weights):
-  "[DR. CHEN]   fundamental_score=X/10  BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
-  "[MARCUS]     research_score=X/10     BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
-  "[ELENA]      macro_score=X/10        BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
-  "[JAMES]      news_score=X/10         BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
+  "[FUNDAMENTAL ANALYST]  fundamental_score=X/10  BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
+  "[RESEARCH ANALYST]     research_score=X/10     BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
+  "[MACRO ANALYST]        macro_score=X/10        BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
+  "[NEWS ANALYST]         news_score=X/10         BULLISH/BEARISH/NEUTRAL — <1-2 sentences>"
 
 STEP 4 — CROSS-EXAMINATION:
   If any two analysts diverge by > 3 points, they debate.
@@ -186,10 +186,10 @@ OUTPUT — end with EXACTLY this JSON (no text after)
     "news": <float>
   },
   "panel_summary": {
-    "chen_verdict":  "<BULLISH|BEARISH|NEUTRAL> (X/10) — one sentence",
-    "webb_verdict":  "<BULLISH|BEARISH|NEUTRAL> (X/10) — one sentence",
-    "varga_verdict": "<BULLISH|BEARISH|NEUTRAL> (X/10) — one sentence",
-    "park_verdict":  "<BULLISH|BEARISH|NEUTRAL> (X/10) — one sentence",
+    "chen_verdict":  "<BULLISH|BEARISH|NEUTRAL> (X/10) — Fundamental Analyst one sentence",
+    "webb_verdict":  "<BULLISH|BEARISH|NEUTRAL> (X/10) — Research Analyst one sentence",
+    "varga_verdict": "<BULLISH|BEARISH|NEUTRAL> (X/10) — Macro Analyst one sentence",
+    "park_verdict":  "<BULLISH|BEARISH|NEUTRAL> (X/10) — News Analyst one sentence",
     "key_debate":    "<main disagreement, or 'Panel consensus'>"
   },
   "weight_rationale": {

@@ -810,6 +810,75 @@ _CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_latest_opportunities",
+            "description": (
+                "Query the local database for the latest trending/new investment opportunities "
+                "discovered by the pipeline. These are tickers analyzed as 'trending_opportunity' "
+                "with BUY or STRONG_BUY signals. Use this FIRST when the user asks about: "
+                "new opportunities, trending stocks, what stocks look good, latest discoveries, "
+                "what should I invest in, top picks, opportunity stocks, trending investments."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_confidence": {
+                        "type": "integer",
+                        "description": "Minimum confidence score (1-10, default 6)",
+                        "default": 6,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default 10)",
+                        "default": 10,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_portfolio_summary",
+            "description": (
+                "Get current portfolio holdings from the local database: tickers, shares, "
+                "current value, cost basis, weight%, and latest APEX recommendation for each. "
+                "Use when user asks about their portfolio, what they own, their holdings, "
+                "portfolio performance, or portfolio composition."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_predictions_summary",
+            "description": (
+                "Get the latest APEX predictions for all tickers in the database — both portfolio "
+                "holdings and any trending tickers analyzed today. Returns recommendation, "
+                "confidence, composite score, and scores breakdown per ticker. "
+                "Use when user asks: what are today's predictions, latest signals, "
+                "what does APEX say, summary of all recommendations, or any broad question "
+                "about the system's current views."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "segment": {
+                        "type": "string",
+                        "description": "Filter: 'all' (default), 'portfolio', or 'opportunities'",
+                        "default": "all",
+                    },
+                    "recommendation": {
+                        "type": "string",
+                        "description": "Optional filter: 'BUY', 'SELL', 'HOLD', 'STRONG_BUY', 'STRONG_SELL'",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_price_history",
             "description": "Get price performance for a specific stock: latest close, period change %, 52-week high/low, average volume.",
             "parameters": {
@@ -1030,6 +1099,178 @@ def _chat_tool_search_ticker(company_name: str) -> dict:
             "note": "Could not find a ticker for this company. Ask the user to provide the ticker symbol."}
 
 
+def _chat_tool_get_latest_opportunities(min_confidence: int = 6, limit: int = 10) -> dict:
+    """Query DB for trending_opportunity predictions with BUY/STRONG_BUY."""
+    import sqlite3
+    db_path = _ROOT / "data" / "portfolio.db"
+    if not db_path.exists():
+        return {"note": "Database not found. Run the pipeline first to populate data."}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
+                   p.news_score, p.research_score, p.fundamental_score,
+                   p.reasoning, p.created_at
+            FROM predictions p
+            JOIN (
+                SELECT ticker, MAX(created_at) dt
+                FROM predictions WHERE trigger_type='trending_opportunity'
+                GROUP BY ticker
+            ) x ON p.ticker=x.ticker AND p.created_at=x.dt
+            WHERE p.trigger_type='trending_opportunity'
+              AND p.recommendation IN ('BUY','STRONG_BUY')
+              AND COALESCE(p.confidence, 0) >= ?
+            ORDER BY p.composite_score DESC NULLS LAST
+            LIMIT ?
+        """, [min_confidence, limit]).fetchall()
+        conn.close()
+        opportunities = [dict(r) for r in rows]
+        if not opportunities:
+            # Fall back to ANY trending_opportunity regardless of recommendation
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
+                       p.news_score, p.research_score, p.fundamental_score,
+                       p.reasoning, p.created_at
+                FROM predictions p
+                JOIN (
+                    SELECT ticker, MAX(created_at) dt
+                    FROM predictions WHERE trigger_type='trending_opportunity'
+                    GROUP BY ticker
+                ) x ON p.ticker=x.ticker AND p.created_at=x.dt
+                WHERE p.trigger_type='trending_opportunity'
+                ORDER BY p.created_at DESC, p.composite_score DESC NULLS LAST
+                LIMIT ?
+            """, [limit]).fetchall()
+            conn.close()
+            opportunities = [dict(r) for r in rows]
+            if not opportunities:
+                return {
+                    "source": "db",
+                    "count": 0,
+                    "note": "No trending opportunity predictions found in the database yet. "
+                            "The pipeline discovers trending tickers during intraday and morning "
+                            "batch runs. Check back after the next scheduled run.",
+                }
+        return {
+            "source": "db",
+            "count": len(opportunities),
+            "as_of": opportunities[0]["created_at"][:10] if opportunities else None,
+            "opportunities": opportunities,
+        }
+    except Exception as exc:
+        return {"note": f"DB query failed: {exc}"}
+
+
+def _chat_tool_get_portfolio_summary() -> dict:
+    """Query DB for current portfolio holdings + latest APEX rec per ticker."""
+    import sqlite3
+    db_path = _ROOT / "data" / "portfolio.db"
+    if not db_path.exists():
+        return {"note": "Database not found. Run the pipeline first."}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        holdings = [dict(r) for r in conn.execute("""
+            SELECT ticker,
+                   SUM(shares) shares,
+                   SUM(COALESCE(current_value,0)) current_value,
+                   SUM(COALESCE(cost_basis_total, shares*avg_cost, 0)) cost_basis
+            FROM holdings GROUP BY ticker ORDER BY current_value DESC
+        """).fetchall()]
+        tv = sum(h["current_value"] for h in holdings)
+        tc = sum(h["cost_basis"] for h in holdings)
+        for h in holdings:
+            h["weight_pct"] = round(h["current_value"] / tv * 100, 1) if tv else 0
+            h["unrealized_pct"] = (
+                round((h["current_value"] - h["cost_basis"]) / h["cost_basis"] * 100, 1)
+                if h["cost_basis"] else None
+            )
+        # Latest recommendation per holding
+        ht = [h["ticker"] for h in holdings]
+        if ht:
+            ph = ",".join("?" * len(ht))
+            preds = {r[0]: {"recommendation": r[1], "confidence": r[2], "composite_score": r[3]}
+                     for r in conn.execute(f"""
+                SELECT p.ticker, p.recommendation, p.confidence, p.composite_score
+                FROM predictions p
+                JOIN (SELECT ticker, MAX(created_at) dt FROM predictions
+                      WHERE ticker IN ({ph}) GROUP BY ticker) x
+                  ON p.ticker=x.ticker AND p.created_at=x.dt
+            """, ht).fetchall()}
+            for h in holdings:
+                h["apex"] = preds.get(h["ticker"])
+        conn.close()
+        return {
+            "source": "db",
+            "total_value": round(tv, 2),
+            "total_cost": round(tc, 2),
+            "unrealized_pct": round((tv - tc) / tc * 100, 1) if tc else None,
+            "holdings": holdings,
+        }
+    except Exception as exc:
+        return {"note": f"DB query failed: {exc}"}
+
+
+def _chat_tool_get_predictions_summary(segment: str = "all",
+                                        recommendation: str | None = None) -> dict:
+    """Query DB for latest APEX prediction per ticker."""
+    import sqlite3
+    db_path = _ROOT / "data" / "portfolio.db"
+    if not db_path.exists():
+        return {"note": "Database not found."}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        # Build segment filter
+        seg_clause = ""
+        seg_params: list = []
+        if segment == "portfolio":
+            # Load portfolio tickers from yaml
+            try:
+                import yaml as _yaml
+                pdata = _yaml.safe_load((_ROOT / "config" / "portfolio.yaml").read_text()) or {}
+                ptickers = [h["ticker"].upper() for h in pdata.get("holdings", []) if "ticker" in h]
+                if ptickers:
+                    ph = ",".join("?" * len(ptickers))
+                    seg_clause = f"AND p.ticker IN ({ph})"
+                    seg_params = ptickers
+            except Exception:
+                pass
+        elif segment == "opportunities":
+            seg_clause = "AND p.trigger_type='trending_opportunity'"
+
+        rec_clause = ""
+        rec_params: list = []
+        if recommendation:
+            rec_clause = "AND p.recommendation=?"
+            rec_params = [recommendation.upper()]
+
+        rows = conn.execute(f"""
+            SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
+                   p.fundamental_score, p.research_score, p.news_score,
+                   p.trigger_type, p.created_at
+            FROM predictions p
+            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions GROUP BY ticker) x
+              ON p.ticker=x.ticker AND p.created_at=x.dt
+            WHERE 1=1 {seg_clause} {rec_clause}
+            ORDER BY p.composite_score DESC NULLS LAST
+            LIMIT 30
+        """, seg_params + rec_params).fetchall()
+        conn.close()
+        preds = [dict(r) for r in rows]
+        return {
+            "source": "db",
+            "segment": segment,
+            "count": len(preds),
+            "predictions": preds,
+        }
+    except Exception as exc:
+        return {"note": f"DB query failed: {exc}"}
+
+
 def _execute_chat_tool(name: str, args: dict) -> str:
     try:
         if name == "web_search":
@@ -1055,6 +1296,18 @@ def _execute_chat_tool(name: str, args: dict) -> str:
         elif name == "get_price_history":
             result = _chat_tool_get_price_history(
                 args.get("ticker", ""), args.get("period", "3mo")
+            )
+        elif name == "get_latest_opportunities":
+            result = _chat_tool_get_latest_opportunities(
+                min_confidence=args.get("min_confidence", 6),
+                limit=args.get("limit", 10),
+            )
+        elif name == "get_portfolio_summary":
+            result = _chat_tool_get_portfolio_summary()
+        elif name == "get_predictions_summary":
+            result = _chat_tool_get_predictions_summary(
+                segment=args.get("segment", "all"),
+                recommendation=args.get("recommendation"),
             )
         else:
             result = {"error": f"Unknown tool: {name}"}
@@ -1086,38 +1339,69 @@ def _build_chat_history(messages: list[dict], limit: int = 12) -> list[dict]:
 
 
 _CHAT_SYSTEM = """\
-You are APEX Chat, an AI financial assistant with access to live market data, news, \
-fundamental research tools, and web search.
+You are APEX Chat, an AI financial assistant with access to a local investment database \
+(holdings, predictions, opportunities) plus live market data, news, and web search.
 
 You can answer questions about:
 - **Individual stocks** -- fundamentals, broker research, price history, news, APEX predictions
+- **Portfolio** -- current holdings, weights, P&L, APEX recommendations
+- **New opportunities** -- trending stocks discovered and analyzed by the pipeline
+- **Today's predictions** -- latest APEX signals across all tickers
 - **Market news** -- latest financial headlines from Reuters, CNBC, Yahoo Finance, MarketWatch
 - **Economy & macro** -- VIX, interest rates, yield curve, Fed policy, inflation, GDP trends
 - **IPOs & listings** -- recent IPOs, company debut details, upcoming listings
 - **Sectors & indices** -- sector ETF performance, S&P 500, Nasdaq, Dow Jones, Russell 2000
 - **General finance** -- bonds, currencies, commodities, crypto market trends, regulatory issues
-- **Current events** -- breaking news, recent earnings, policy changes, live market moves
 
-## Tool Priority (IMPORTANT -- follow this order)
+## Tool Priority (CRITICAL -- follow this exact order)
 
-1. **Internal tools first**: Always try the most relevant internal tool before web search.
-   - Stock data → get_ticker_news, get_fundamentals, get_research, get_price_history
-   - Market/macro → get_market_news, get_macro_snapshot, get_sector_performance
-   - IPOs → get_ipo_info
-   - Unknown company name → search_ticker
+### 1. LOCAL DATABASE FIRST (always try these before anything else)
+These query the local portfolio database and return real pipeline results:
 
-2. **Web search as fallback**: Use `web_search` ONLY when:
-   - Internal tools returned empty, "unavailable", or clearly stale data
-   - The question is about a very recent event (last 1-3 days) likely not yet in the DB
-   - The question asks for something no internal tool covers (e.g. regulatory filing details, \
-     specific earnings call quotes, analyst price target changes from today)
+| Question type | Tool to call FIRST |
+|---|---|
+| "latest opportunities", "trending stocks", "what looks good", "new discoveries", "top picks" | `get_latest_opportunities` |
+| "my portfolio", "what do I own", "holdings", "portfolio performance" | `get_portfolio_summary` |
+| "today's predictions", "latest signals", "what does APEX say", "all recommendations" | `get_predictions_summary` |
+| Specific ticker prediction history | `get_prediction_history` |
+| Specific ticker fundamentals | `get_fundamentals` |
+| Specific ticker broker research | `get_research` |
+| Specific ticker news | `get_ticker_news` |
+| Specific ticker price | `get_price_history` |
 
-3. **Never fabricate**: If both internal tools and web search return nothing useful, say so \
-   clearly rather than inventing data.
+### 2. LIVE MARKET DATA (when DB doesn't have what's needed)
+- Market headlines → `get_market_news`
+- Macro snapshot → `get_macro_snapshot`
+- Sector performance → `get_sector_performance`
+- IPO info → `get_ipo_info`
+- Unknown company → `search_ticker`
+
+### 3. WEB SEARCH (last resort only)
+Use `web_search` ONLY when:
+- DB and live tools returned empty / "unavailable" / clearly stale data
+- Question is about a very recent event (last 1-2 days) not yet in the DB
+- Question asks for something no internal tool covers (e.g. regulatory filing details, \
+  specific earnings call quotes from today)
+
+**Never fabricate**: If both DB and web search return nothing useful, say so clearly.
+
+## Response discipline (IMPORTANT)
+- You have **at most 6 tool calls** per response. Budget them wisely.
+- For opportunity/portfolio/prediction questions: call the DB tool, then answer immediately.
+- For stock analysis: call 2–3 tools max then answer -- do not over-chain.
+- Do not call the same tool twice for the same ticker in one response.
+- If `get_latest_opportunities` returns data, present it directly -- do not also call web search.
+
+## Presenting opportunities
+When showing results from `get_latest_opportunities` or `get_predictions_summary`:
+- Lead with the ticker, recommendation, and composite score
+- Include news/research/fundamental sub-scores when available
+- Add a 1-sentence reasoning summary if the DB returned one
+- Suggest "Type **Analyze [TICKER]** for the full 4-analyst APEX panel" for any ticker of interest
 
 ## Format rules
 - Use **bold** for key figures, bullet lists for multi-point summaries.
-- Cite your source when using web search results (tool name or URL).
+- Cite your source: "(from local DB)" or "(web search)" or "(yfinance)".
 - For full stock investment analysis, suggest: "Type **Analyze [TICKER]** for the full \
   4-analyst APEX panel."
 """
@@ -1175,7 +1459,7 @@ def _run_chat_agent_thread(
         for model_id, provider, label in chat_chain:
             q.put(("info", f"💬 {label} ({provider})"))
             try:
-                for _round in range(5):   # max 5 tool-call rounds
+                for _round in range(8):   # max 8 tool-call rounds
                     resp = await litellm.acompletion(
                         model=model_id,
                         messages=messages,
@@ -1374,7 +1658,7 @@ Using the context above (fundamentals, research, news, macro, dynamic_weights, p
 
 1. State the weight regime and dynamic weights (from dynamic_weights in context).
 2. Have each analyst score their domain -- respect any SCORE CAPS above: if the domain has no data the analyst must state "No <domain> data available" and assign a score ≤ that cap.
-   DR. CHEN (fundamentals), MARCUS WEBB (research), ELENA VARGA (macro), JAMES PARK (news).
+   FUNDAMENTAL ANALYST, RESEARCH ANALYST, MACRO ANALYST, NEWS ANALYST.
 3. Cross-examine if scores diverge > 3 pts.
 4. Compare to prior prediction if one exists.
 5. Compute composite = fund_w×fund_score + res_w×res_score + mac_w×mac_score + news_w×news_score.
@@ -1400,10 +1684,10 @@ End your response with EXACTLY this JSON block (no text after):
   "weight_regime": "QUIET_DAY",
   "weights_used": {{"fundamentals": 0.35, "research": 0.30, "macro": 0.20, "news": 0.15}},
   "panel_summary": {{
-    "chen_verdict": "BULLISH (7/10) -- one sentence",
-    "webb_verdict": "BULLISH (7/10) -- one sentence",
-    "varga_verdict": "NEUTRAL (6/10) -- one sentence",
-    "park_verdict":  "NEUTRAL (6/10) -- one sentence",
+    "chen_verdict": "BULLISH (7/10) -- Fundamental Analyst one sentence",
+    "webb_verdict": "BULLISH (7/10) -- Research Analyst one sentence",
+    "varga_verdict": "NEUTRAL (6/10) -- Macro Analyst one sentence",
+    "park_verdict":  "NEUTRAL (6/10) -- News Analyst one sentence",
     "key_debate": "Panel consensus or main disagreement"
   }},
   "weight_rationale": {{
@@ -1585,7 +1869,9 @@ with st.sidebar:
             last_rec  = s.get("last_rec", "")
             rec_chip  = f' · {last_rec.replace("_"," ")}' if last_rec else ""
 
-            label = f'{s["title"][:28]}{"…" if len(s["title"]) > 28 else ""}'
+            # Prefer the first user question over the auto-title
+            raw_label = s.get("first_question") or s.get("title") or "New conversation"
+            label = raw_label[:38] + ("…" if len(raw_label) > 38 else "")
             meta  = ", ".join(tickers[:3]) + rec_chip if (tickers or last_rec) else \
                     s.get("updated_at","")[:16].replace("T"," ")
 
@@ -1595,7 +1881,7 @@ with st.sidebar:
                     f"{'▸ ' if is_active else ''}{label}\n{meta}",
                     key=f"sess_{s['id']}",
                     use_container_width=True,
-                    help=s["title"],
+                    help=raw_label,
                 ):
                     _load_chat(s["id"])
                     st.rerun()

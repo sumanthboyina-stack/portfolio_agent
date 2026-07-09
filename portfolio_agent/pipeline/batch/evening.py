@@ -54,4 +54,15 @@ async def run_batch_evening(
     r2 = recompute_rolling_metrics()
     log.info(f"  L2: {r2.get('metrics_written', 0)} metric rows written", event_type="summary")
 
+    log.info("\n── Layer 3: Portfolio Price Snapshot ───────────────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.tools.holdings_db import snapshot_portfolio_prices
+        r3 = snapshot_portfolio_prices(today_date.isoformat())
+        log.info(
+            f"  L3: {r3.get('snapped', 0)} holdings snapped for {r3.get('date')}",
+            event_type="summary",
+        )
+    except Exception as e:
+        log.warning(f"  L3: Portfolio snapshot failed — {e}", event_type="warning")
+
     log.info("\nEvening batch complete.", event_type="phase_end")

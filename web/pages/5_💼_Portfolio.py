@@ -12,11 +12,11 @@ Upload flow (ad-hoc, user-initiated):
 
 from __future__ import annotations
 
-import json
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
+import plotly.graph_objects as go
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -40,7 +40,7 @@ inject_global_css()
 top_nav("portfolio")
 
 with st.sidebar:
-    st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Portfolio</p>', unsafe_allow_html=True)
+    st.markdown('<p style="font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6B7280;margin:0 0 10px">Portfolio</p>', unsafe_allow_html=True)
 
 page_header(
     "Portfolio Manager",
@@ -51,7 +51,7 @@ page_header(
 # ── Imports ───────────────────────────────────────────────────────────────────
 from portfolio_agent.tools.holdings_db import (
     upsert_holdings, get_holdings, get_holdings_summary,
-    delete_broker_holdings, sync_to_yaml,
+    delete_broker_holdings, sync_to_yaml, get_price_history,
 )
 from portfolio_agent.tools.holdings_parser import parse_csv
 
@@ -170,6 +170,284 @@ col4.metric(
     "Last Synced",
     (summary.get("last_synced_at") or "Never")[:16].replace("T", " "),
 )
+
+st.divider()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PORTFOLIO TREND CHART
+# ══════════════════════════════════════════════════════════════════════════════
+
+history_rows = get_price_history()
+
+if not history_rows:
+    st.info(
+        "📈 **Portfolio trend chart** — no history yet. "
+        "The evening pipeline snapshots closing prices daily. "
+        "Data will appear here after the first evening run.",
+        icon="📊",
+    )
+else:
+    from collections import defaultdict
+
+    section_title("Portfolio Trend", badge_text="closing prices · daily snapshots")
+
+    # ── Security-type classification from holdings descriptions ──────────────
+    _FUND_KW = ("ETF", " FUND", "INDEX FUND", "TRUST SHARES", "TRUST ETF")
+    ticker_type: dict[str, str] = {}
+    for h in all_holdings:
+        desc = (h.get("description") or "").upper()
+        ticker_type[h["ticker"]] = "Fund" if any(kw in desc for kw in _FUND_KW) else "Stock"
+
+    # ── Sidebar filters ───────────────────────────────────────────────────────
+    all_brokers = sorted({r["broker"] or "manual" for r in history_rows})
+    with st.sidebar:
+        st.markdown(
+            '<p style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+            'letter-spacing:0.08em;color:#6B7280;margin:16px 0 6px">Chart Filters</p>',
+            unsafe_allow_html=True,
+        )
+        sel_broker = st.selectbox(
+            "Broker", ["All"] + all_brokers, key="trend_broker",
+            label_visibility="collapsed",
+        )
+        sel_type = st.radio(
+            "Security type", ["All", "Stocks only", "Funds only"],
+            key="trend_type",
+        )
+
+    def _type_ok(ticker: str) -> bool:
+        if sel_type == "All":
+            return True
+        t = ticker_type.get(ticker, "Stock")
+        return (sel_type == "Stocks only" and t == "Stock") or \
+               (sel_type == "Funds only"  and t == "Fund")
+
+    filtered = [
+        r for r in history_rows
+        if (sel_broker == "All" or (r["broker"] or "manual") == sel_broker)
+        and _type_ok(r["ticker"])
+    ]
+
+    # ── Total portfolio series ────────────────────────────────────────────────
+    day_mv: dict[str, float] = defaultdict(float)
+    day_cb: dict[str, float] = defaultdict(float)
+    for r in filtered:
+        if r["market_value"]:
+            day_mv[r["date"]] += r["market_value"]
+        if r["cost_basis"]:
+            day_cb[r["date"]] += r["cost_basis"]
+
+    total_dates = sorted(day_mv)
+    total_mv    = [day_mv[d] for d in total_dates]
+    total_cb    = [day_cb.get(d, 0) for d in total_dates]
+    gain_abs    = [mv - cb for mv, cb in zip(total_mv, total_cb)]
+    gain_pct_s  = [g / cb * 100 if cb else 0 for g, cb in zip(gain_abs, total_cb)]
+
+    # ── Per-ticker series (normalized to % change from first date) ────────────
+    PALETTE = [
+        "#2563EB", "#059669", "#D97706", "#7C3AED",
+        "#0891B2", "#DB2777", "#DC2626", "#65A30D", "#EA580C", "#6366F1",
+    ]
+    ticker_day: dict[str, dict[str, float]] = defaultdict(dict)
+    for r in filtered:
+        if r["market_value"]:
+            t = r["ticker"]
+            ticker_day[t][r["date"]] = ticker_day[t].get(r["date"], 0) + r["market_value"]
+
+    ticker_list = sorted(ticker_day.keys())
+
+    # ── Build figure with all traces pre-loaded ───────────────────────────────
+    fig = go.Figure()
+
+    # Trace 0 — portfolio market value area
+    has_cb = any(v > 0 for v in total_cb)
+    fig.add_trace(go.Scatter(
+        x=total_dates, y=total_mv,
+        name="Portfolio Value",
+        mode="lines",
+        line=dict(color="#2563EB", width=2.5, shape="spline", smoothing=0.4),
+        fill="tozeroy",
+        fillcolor="rgba(37,99,235,0.07)",
+        customdata=list(zip(total_cb, gain_abs, gain_pct_s)),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Value: <b>$%{y:,.0f}</b><br>"
+            "Cost:  $%{customdata[0]:,.0f}<br>"
+            "P&L:   <b>$%{customdata[1]:+,.0f}  (%{customdata[2]:+.1f}%)</b>"
+            "<extra></extra>"
+        ),
+        visible=True,
+    ))
+
+    # Trace 1 — cost basis reference (dotted)
+    if has_cb:
+        fig.add_trace(go.Scatter(
+            x=total_dates, y=total_cb,
+            name="Cost Basis",
+            mode="lines",
+            line=dict(color="#D1D5DB", width=1.5, dash="dot"),
+            hoverinfo="skip",
+            visible=True,
+        ))
+    n_total = 2 if has_cb else 1
+
+    # Traces 2+ — per-ticker normalized % change
+    for i, ticker in enumerate(ticker_list):
+        day_map = ticker_day[ticker]
+        dates = sorted(day_map)
+        abs_vals = [day_map[d] for d in dates]
+        base = abs_vals[0] if abs_vals else 1
+        pct_vals = [(v - base) / base * 100 if base else 0 for v in abs_vals]
+        fig.add_trace(go.Scatter(
+            x=dates, y=pct_vals,
+            name=ticker,
+            mode="lines",
+            line=dict(color=PALETTE[i % len(PALETTE)], width=2, shape="spline", smoothing=0.4),
+            customdata=abs_vals,
+            hovertemplate=(
+                f"<b>{ticker}</b>  %{{x}}<br>"
+                "%{y:+.1f}%  ·  <b>$%{customdata:,.0f}</b>"
+                "<extra></extra>"
+            ),
+            visible=False,
+        ))
+
+    n_ticker = len(ticker_list)
+    vis_total  = [True]  * n_total + [False] * n_ticker
+    vis_ticker = [False] * n_total + [True]  * n_ticker
+
+    # ── Layout with in-chart controls ─────────────────────────────────────────
+    fig.update_layout(
+        height=440,
+        margin=dict(l=0, r=0, t=52, b=0),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(family="Inter, -apple-system, sans-serif", size=12),
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor="white",
+            bordercolor="#E5E7EB",
+            font=dict(size=12, color="#111827", family="Inter, sans-serif"),
+            namelength=-1,
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="top", y=-0.08,
+            xanchor="left", x=0,
+            font=dict(size=11, color="#374151"),
+            bgcolor="rgba(0,0,0,0)",
+            itemclick="toggle",
+            itemdoubleclick="toggleothers",
+        ),
+        # In-chart toggle: Total Portfolio / Per Ticker
+        updatemenus=[dict(
+            type="buttons",
+            direction="right",
+            x=0, y=1.0,
+            xanchor="left", yanchor="bottom",
+            pad=dict(r=0, t=0, b=10),
+            buttons=[
+                dict(
+                    label="Total Portfolio",
+                    method="update",
+                    args=[
+                        {"visible": vis_total},
+                        {
+                            "yaxis.tickprefix": "$",
+                            "yaxis.ticksuffix": "",
+                            "yaxis.tickformat": ",.0f",
+                            "yaxis.zeroline": False,
+                            "hovermode": "x unified",
+                        },
+                    ],
+                ),
+                dict(
+                    label="Per Ticker  (%)",
+                    method="update",
+                    args=[
+                        {"visible": vis_ticker},
+                        {
+                            "yaxis.tickprefix": "",
+                            "yaxis.ticksuffix": "%",
+                            "yaxis.tickformat": "+.0f",
+                            "yaxis.zeroline": True,
+                            "hovermode": "closest",
+                        },
+                    ],
+                ),
+            ],
+            bgcolor="#F9FAFB",
+            bordercolor="#E5E7EB",
+            borderwidth=1,
+            font=dict(size=12, color="#374151"),
+            showactive=True,
+            active=0,
+        )],
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            tickfont=dict(size=11, color="#9CA3AF"),
+            tickformat="%b %d, %Y",
+            # Range selector top-right
+            rangeselector=dict(
+                buttons=[
+                    dict(count=7,  label="1W", step="day",   stepmode="backward"),
+                    dict(count=1,  label="1M", step="month", stepmode="backward"),
+                    dict(count=3,  label="3M", step="month", stepmode="backward"),
+                    dict(count=6,  label="6M", step="month", stepmode="backward"),
+                    dict(step="all", label="All"),
+                ],
+                x=1, xanchor="right",
+                y=1.0, yanchor="bottom",
+                bgcolor="#F9FAFB",
+                bordercolor="#E5E7EB",
+                borderwidth=1,
+                activecolor="#2563EB",
+                font=dict(size=11, color="#374151"),
+            ),
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            gridwidth=1,
+            zeroline=False,
+            zerolinecolor="#E5E7EB",
+            zerolinewidth=1,
+            tickprefix="$",
+            tickfont=dict(size=11, color="#9CA3AF"),
+            tickformat=",.0f",
+            side="right",
+        ),
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Stats strip below chart ───────────────────────────────────────────────
+    if filtered and total_dates:
+        last_date  = total_dates[-1]
+        first_date = total_dates[0]
+        last_mv    = total_mv[-1]
+        last_cb_v  = total_cb[-1]
+        gain       = last_mv - last_cb_v
+        gain_pct   = gain / last_cb_v * 100 if last_cb_v else 0
+        gain_col   = SUCCESS if gain >= 0 else DANGER
+        sign       = "+" if gain >= 0 else ""
+        days_tracked = (datetime.fromisoformat(last_date) - datetime.fromisoformat(first_date)).days
+
+        st.markdown(
+            f'<div style="display:flex;flex-wrap:wrap;gap:24px 40px;padding:8px 2px 16px;'
+            f'font-size:0.82rem;border-top:1px solid #F3F4F6;margin-top:-4px">'
+            f'<span style="color:#9CA3AF">Period&nbsp;&nbsp;'
+            f'<b style="color:#374151">{first_date} → {last_date}</b>'
+            f'<span style="color:#D1D5DB"> · {days_tracked}d</span></span>'
+            f'<span style="color:#9CA3AF">Value&nbsp;&nbsp;'
+            f'<b style="color:#111827">${last_mv:,.0f}</b></span>'
+            f'<span style="color:#9CA3AF">Unrealized&nbsp;&nbsp;'
+            f'<b style="color:{gain_col}">{sign}${gain:,.0f}&nbsp;({sign}{gain_pct:.1f}%)</b></span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 st.divider()
 
@@ -312,110 +590,109 @@ with st.expander("➕ Add holding manually"):
 # ══════════════════════════════════════════════════════════════════════════════
 
 if all_holdings:
-    section_title("Current Holdings", badge_text=f"{holding_count} positions")
+    with st.expander(f"Current Holdings — {holding_count} positions", expanded=False):
+        # Broker filter
+        filter_broker = st.selectbox(
+            "Filter by broker", ["All"] + sorted(brokers_connected),
+            key="hld_broker_filter",
+            label_visibility="collapsed",
+        )
+        display_holdings = (
+            [h for h in all_holdings if h.get("broker") == filter_broker]
+            if filter_broker != "All" else all_holdings
+        )
 
-    # Broker filter
-    filter_broker = st.selectbox(
-        "Filter by broker", ["All"] + sorted(brokers_connected),
-        key="hld_broker_filter",
-        label_visibility="collapsed",
-    )
-    display_holdings = (
-        [h for h in all_holdings if h.get("broker") == filter_broker]
-        if filter_broker != "All" else all_holdings
-    )
+        # Table header
+        st.markdown(
+            '<div style="display:grid;grid-template-columns:100px 220px 90px 100px 100px 110px 130px 90px;'
+            'gap:8px;padding:6px 12px;background:#F1F5F9;border-radius:8px;'
+            'font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;'
+            'color:#475569;margin-bottom:4px">'
+            '<span>Ticker</span><span>Description</span><span>Shares</span>'
+            '<span>Avg Cost</span><span>Price</span><span>Value</span>'
+            '<span>P&amp;L</span><span>Broker</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
-    # Table header
-    st.markdown(
-        '<div style="display:grid;grid-template-columns:100px 220px 90px 100px 100px 110px 130px 90px;'
-        'gap:8px;padding:6px 12px;background:#F1F5F9;border-radius:8px;'
-        'font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;'
-        'color:#475569;margin-bottom:4px">'
-        '<span>Ticker</span><span>Description</span><span>Shares</span>'
-        '<span>Avg Cost</span><span>Price</span><span>Value</span>'
-        '<span>P&amp;L</span><span>Broker</span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+        for h in display_holdings:
+            pnl = _pnl_html(h.get("cost_basis_total"), h.get("current_value"))
+            broker_label = (h.get("broker") or "manual").title()
+            acct_type = h.get("account_type") or ""
 
-    for h in display_holdings:
-        pnl = _pnl_html(h.get("cost_basis_total"), h.get("current_value"))
-        broker_label = (h.get("broker") or "manual").title()
-        acct_type = h.get("account_type") or ""
+            st.markdown(
+                f'<div style="display:grid;grid-template-columns:100px 220px 90px 100px 100px 110px 130px 90px;'
+                f'gap:8px;padding:10px 12px;background:white;border:1px solid #F1F5F9;'
+                f'border-radius:8px;margin-bottom:3px;font-size:0.85rem;align-items:center">'
+                f'<span style="font-weight:800;color:#0F172A">{h["ticker"]}</span>'
+                f'<span style="color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+                f'{(h.get("description") or "")[:28]}</span>'
+                f'<span>{_fmt_shares(h.get("shares"))}</span>'
+                f'<span>{_fmt_dollars(h.get("avg_cost"))}</span>'
+                f'<span>{_fmt_dollars(h.get("current_price"))}</span>'
+                f'<span style="font-weight:600">{_fmt_dollars(h.get("current_value"))}</span>'
+                f'<span>{pnl}</span>'
+                f'<span style="font-size:0.75rem;color:#64748B">{broker_label}<br>'
+                f'<span style="color:#94A3B8">{acct_type}</span></span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
+        # Totals row
+        total_cost = sum(h.get("cost_basis_total") or 0 for h in display_holdings)
+        total_mkt  = sum(h.get("current_value") or 0 for h in display_holdings)
+        total_pnl  = _pnl_html(total_cost, total_mkt) if total_cost and total_mkt else "—"
         st.markdown(
             f'<div style="display:grid;grid-template-columns:100px 220px 90px 100px 100px 110px 130px 90px;'
-            f'gap:8px;padding:10px 12px;background:white;border:1px solid #F1F5F9;'
-            f'border-radius:8px;margin-bottom:3px;font-size:0.85rem;align-items:center">'
-            f'<span style="font-weight:800;color:#0F172A">{h["ticker"]}</span>'
-            f'<span style="color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
-            f'{(h.get("description") or "")[:28]}</span>'
-            f'<span>{_fmt_shares(h.get("shares"))}</span>'
-            f'<span>{_fmt_dollars(h.get("avg_cost"))}</span>'
-            f'<span>{_fmt_dollars(h.get("current_price"))}</span>'
-            f'<span style="font-weight:600">{_fmt_dollars(h.get("current_value"))}</span>'
-            f'<span>{pnl}</span>'
-            f'<span style="font-size:0.75rem;color:#64748B">{broker_label}<br>'
-            f'<span style="color:#94A3B8">{acct_type}</span></span>'
+            f'gap:8px;padding:10px 12px;background:#F8FAFC;border:1px solid #E2E8F0;'
+            f'border-radius:8px;margin-top:4px;font-size:0.85rem;font-weight:700;align-items:center">'
+            f'<span style="color:#0F172A">Total</span><span></span><span></span>'
+            f'<span>{_fmt_dollars(total_cost) if total_cost else "—"}</span>'
+            f'<span></span>'
+            f'<span style="color:#0F172A">{_fmt_dollars(total_mkt) if total_mkt else "—"}</span>'
+            f'<span>{total_pnl}</span><span></span>'
             f'</div>',
             unsafe_allow_html=True,
         )
 
-    # Totals row
-    total_cost = sum(h.get("cost_basis_total") or 0 for h in display_holdings)
-    total_mkt  = sum(h.get("current_value") or 0 for h in display_holdings)
-    total_pnl  = _pnl_html(total_cost, total_mkt) if total_cost and total_mkt else "—"
-    st.markdown(
-        f'<div style="display:grid;grid-template-columns:100px 220px 90px 100px 100px 110px 130px 90px;'
-        f'gap:8px;padding:10px 12px;background:#F8FAFC;border:1px solid #E2E8F0;'
-        f'border-radius:8px;margin-top:4px;font-size:0.85rem;font-weight:700;align-items:center">'
-        f'<span style="color:#0F172A">Total</span><span></span><span></span>'
-        f'<span>{_fmt_dollars(total_cost) if total_cost else "—"}</span>'
-        f'<span></span>'
-        f'<span style="color:#0F172A">{_fmt_dollars(total_mkt) if total_mkt else "—"}</span>'
-        f'<span>{total_pnl}</span><span></span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+        # ── Sector breakdown ──────────────────────────────────────────────────────
+        by_sector = summary.get("by_sector", {})
+        if by_sector and total_val > 0:
+            section_title("Sector Allocation")
+            sector_cols = st.columns(min(len(by_sector), 4))
+            sorted_sectors = sorted(by_sector.items(), key=lambda x: x[1], reverse=True)
+            for i, (sector, val) in enumerate(sorted_sectors):
+                pct = val / total_val * 100 if total_val else 0
+                with sector_cols[i % len(sector_cols)]:
+                    st.markdown(
+                        f'<div style="background:white;border:1px solid #E2E8F0;border-radius:10px;'
+                        f'padding:12px 14px;margin-bottom:8px">'
+                        f'<div style="font-size:0.78rem;font-weight:600;color:#64748B">{sector or "Unknown"}</div>'
+                        f'<div style="font-size:1rem;font-weight:800;color:#0F172A;margin-top:2px">'
+                        f'{_fmt_dollars(val)}</div>'
+                        f'<div style="background:#E2E8F0;border-radius:4px;height:4px;margin-top:6px">'
+                        f'<div style="background:{PRIMARY};border-radius:4px;height:4px;'
+                        f'width:{min(pct, 100):.0f}%"></div></div>'
+                        f'<div style="font-size:0.72rem;color:#94A3B8;margin-top:3px">'
+                        f'{pct:.1f}% of portfolio</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
 
-    # ── Sector breakdown ──────────────────────────────────────────────────────
-    by_sector = summary.get("by_sector", {})
-    if by_sector and total_val > 0:
-        section_title("Sector Allocation")
-        sector_cols = st.columns(min(len(by_sector), 4))
-        sorted_sectors = sorted(by_sector.items(), key=lambda x: x[1], reverse=True)
-        for i, (sector, val) in enumerate(sorted_sectors):
-            pct = val / total_val * 100 if total_val else 0
-            with sector_cols[i % len(sector_cols)]:
-                st.markdown(
-                    f'<div style="background:white;border:1px solid #E2E8F0;border-radius:10px;'
-                    f'padding:12px 14px;margin-bottom:8px">'
-                    f'<div style="font-size:0.78rem;font-weight:600;color:#64748B">{sector or "Unknown"}</div>'
-                    f'<div style="font-size:1rem;font-weight:800;color:#0F172A;margin-top:2px">'
-                    f'{_fmt_dollars(val)}</div>'
-                    f'<div style="background:#E2E8F0;border-radius:4px;height:4px;margin-top:6px">'
-                    f'<div style="background:{PRIMARY};border-radius:4px;height:4px;'
-                    f'width:{min(pct, 100):.0f}%"></div></div>'
-                    f'<div style="font-size:0.72rem;color:#94A3B8;margin-top:3px">'
-                    f'{pct:.1f}% of portfolio</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-    # ── Sync button ───────────────────────────────────────────────────────────
-    st.divider()
-    c1, c2 = st.columns([2, 6])
-    with c1:
-        if st.button("💾 Sync to portfolio.yaml", type="primary", use_container_width=True):
-            sync_to_yaml(_YAML_PATH)
-            st.success("✅ portfolio.yaml updated with current holdings.")
-    with c2:
-        st.caption(
-            "portfolio.yaml is used by the daily pipeline to prioritise your holdings for analysis. "
-            "Sync after any import or manual change."
-        )
+        # ── Sync button ───────────────────────────────────────────────────────────
+        st.divider()
+        c1, c2 = st.columns([2, 6])
+        with c1:
+            if st.button("💾 Sync to portfolio.yaml", type="primary", use_container_width=True):
+                sync_to_yaml(_YAML_PATH)
+                st.success("✅ portfolio.yaml updated with current holdings.")
+        with c2:
+            st.caption(
+                "portfolio.yaml is used by the daily pipeline to prioritise your holdings for analysis. "
+                "Sync after any import or manual change."
+            )
 
 else:
     st.info(

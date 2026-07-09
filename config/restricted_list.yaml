@@ -31,8 +31,11 @@ pipeline_skip:
     phases: [research, fundamentals]
     reason: "ETF — quoteSummary 404 (no fundamentals or broker data)"
   GRFXY:
-    phases: [research]
+    phases: [all]
     reason: "Foreign ADR — quoteSummary 404 (no broker data available)"
+  RIVN:
+    phases: [all]
+    reason: "Removed from daily run"
   SQ:
     phases: [research]
     reason: "quoteSummary 404 (Symbol not found / renamed)"

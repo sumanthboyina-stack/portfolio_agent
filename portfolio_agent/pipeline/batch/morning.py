@@ -94,15 +94,32 @@ async def run_batch_morning(
     log.info("\n── Phase 4: APEX Predictions ───────────────────────────────────", event_type="phase_start")
 
     if force_all:
-        # Legacy behaviour: all portfolio tickers, all scheduled horizons
+        # Legacy behaviour: all portfolio tickers + trending, all scheduled horizons
         log.info("  [force-all] Bypassing event-driven cadence.", event_type="info")
-        await _run_daily_apex(portfolio_tickers, tracker=tracker)
+        all_apex = list(dict.fromkeys(portfolio_tickers + trending))
+        await _run_daily_apex(all_apex, tracker=tracker)
     else:
         await _run_morning_apex_event_driven(
-            portfolio_tickers, all_tickers, tracker, log,
+            portfolio_tickers, all_tickers, trending, tracker, log,
         )
 
     GEMINI_COUNTER.print_stats(prefix=" (end of morning batch)")
+
+    log.info("\n── Price History Backfill ──────────────────────────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.tools.holdings_db import backfill_missing_price_snapshots
+        rb = backfill_missing_price_snapshots()
+        if rb.get("backfilled", 0) > 0:
+            log.info(
+                f"  Backfilled {rb['backfilled']} price rows across "
+                f"{rb['missing_days']} missing day(s)",
+                event_type="summary",
+            )
+        else:
+            log.info("  Price history up to date — nothing to backfill.", event_type="info")
+    except Exception as e:
+        log.warning(f"  Price backfill failed — {e}", event_type="warning")
+
     if tracker:
         tracker.finish_run("completed")
     log.info("\nMorning batch complete.", event_type="phase_end")
@@ -111,6 +128,7 @@ async def run_batch_morning(
 async def _run_morning_apex_event_driven(
     portfolio_tickers: list[str],
     all_tickers: list[str],
+    trending_tickers: list[str],
     tracker,
     log,
 ) -> None:
@@ -182,6 +200,24 @@ async def _run_morning_apex_event_driven(
             tickers_to_run.append(ticker)
             needed_horizons.update(ticker_horizons)
             trigger_map[ticker] = (ticker_trigger, ticker_ev_id)
+
+    # Trending tickers — opportunity discovery on scheduled days
+    if scheduled_horizons:
+        existing_run_set = set(tickers_to_run)
+        portfolio_set = set(portfolio_tickers)
+        trending_to_add = [
+            t for t in dict.fromkeys(trending_tickers)
+            if t not in portfolio_set and t not in existing_run_set
+        ]
+        for ticker in trending_to_add:
+            tickers_to_run.append(ticker)
+            needed_horizons.update(scheduled_horizons)
+            trigger_map[ticker] = ("trending_opportunity", None)
+        if trending_to_add:
+            log.info(
+                f"  {len(trending_to_add)} trending ticker(s) added for opportunity discovery",
+                event_type="info",
+            )
 
     if not tickers_to_run:
         log.info(

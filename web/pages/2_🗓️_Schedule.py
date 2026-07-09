@@ -38,6 +38,33 @@ st.set_page_config(
 inject_global_css()
 top_nav("schedule")
 
+# Sidebar button styling — must be injected into the page head, not inside the sidebar block
+st.markdown("""
+<style>
+[data-testid="stSidebar"] button,
+[data-testid="stSidebar"] button:focus {
+    background-color: rgba(255,255,255,0.08) !important;
+    color: #E5E7EB !important;
+    border: 1px solid rgba(255,255,255,0.22) !important;
+    font-weight: 600 !important;
+    box-shadow: none !important;
+}
+[data-testid="stSidebar"] button:hover,
+[data-testid="stSidebar"] button:active {
+    background-color: rgba(255,255,255,0.18) !important;
+    color: #FFFFFF !important;
+    border: 1px solid rgba(255,255,255,0.4) !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+}
+[data-testid="stSidebar"] button:disabled {
+    background-color: rgba(255,255,255,0.03) !important;
+    color: #6B7280 !important;
+    border: 1px solid rgba(255,255,255,0.08) !important;
+    opacity: 1 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -139,7 +166,7 @@ def _start_job(flag: str) -> tuple[int, Path, str]:
     run_id    = f"{ts}_{job_label}"
     log_path  = _LOGS / f"{run_id}.log"
     log_file  = open(log_path, "w", buffering=1)   # line-buffered
-    env       = {**os.environ, "PIPELINE_RUN_ID": run_id}
+    env       = {**os.environ, "PIPELINE_RUN_ID": run_id, "PIPELINE_TRIGGER": "web"}
     # Split compound flags like "--batch intraday" into separate argv elements
     flag_args = shlex.split(flag)
     proc = subprocess.Popen(
@@ -271,10 +298,13 @@ def _db_status_label(s: str, log_file: str = "", job_type: str = "daily") -> str
             txt = Path(log_file).read_text(errors="replace").lower()
             job = job_type.lower()
             done = (
-                "daily pipeline complete" in txt if job == "daily"
-                else f"{job} phase done" in txt if job in ("news", "research", "fundamentals")
-                else "validation complete." in txt if job == "validation"
-                else "pipeline complete" in txt
+                ("daily pipeline complete" in txt or "morning batch complete" in txt) if job == "daily"
+                else "morning batch complete" in txt   if job == "morning"
+                else "intraday batch complete" in txt  if job == "intraday"
+                else "evening batch complete" in txt   if job == "evening"
+                else f"{job} phase done" in txt        if job in ("news", "research", "fundamentals")
+                else "validation complete." in txt     if job == "validation"
+                else "batch complete" in txt or "pipeline complete" in txt
             )
             if done:
                 return "✅ Completed"
@@ -507,17 +537,14 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
 
     # Determine which phases are relevant for this job type
     phase_keys = {
-        "daily":        ["news", "research", "fundamentals", "apex"],
-        "morning":      ["news", "research", "fundamentals", "apex"],
-        "intraday":     ["apex"],
-        "evening":      [],
-        "fundamentals": ["fundamentals"],
-        "research":     ["research"],
-        "news":         ["news"],
-        "validation":   [],
+        "daily":      ["news", "research", "fundamentals", "apex"],
+        "morning":    ["news", "research", "fundamentals", "apex"],
+        "intraday":   ["news", "research", "fundamentals", "apex"],
+        "evening":    ["validation_score"],
+        "validation": ["validation_score"],
     }.get(job_type, ["news", "research", "fundamentals", "apex"])
 
-    if job_type == "validation":
+    if job_type in ("validation", "evening"):
         st.caption("✅ Scoring matured predictions & recomputing rolling metrics…")
         return
 
@@ -527,10 +554,10 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         return
 
     PHASE_META = {
-        "news":         ("📰", "News",              "Phase 1"),
-        "research":     ("🔬", "Research",          "Phase 2"),
-        "fundamentals": ("📄", "Fundamentals",      "Phase 3"),
-        "apex":         ("🤖", "APEX Predictions",  "Phase 4"),
+        "news":         ("📰", "News",         "1 ·"),
+        "research":     ("🔬", "Research",     "2 ·"),
+        "fundamentals": ("📄", "Fundamentals", "3 ·"),
+        "apex":         ("🤖", "APEX",         "4 ·"),
     }
     STATUS_COLOR = {
         "pending":   "#475569",
@@ -567,12 +594,18 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
             f'</div>'
         )
 
-    total_label = f"— {total} tickers" if total else ""
+    batch_label = {
+        "morning":  "MORNING BATCH",
+        "intraday": "INTRADAY BATCH",
+        "daily":    "FULL DAILY",
+    }.get(job_type, job_type.upper())
+    total_label = f"· {total} tickers" if total else ""
     st.markdown(
         f'<div style="background:#1E293B;border:1px solid #334155;border-radius:10px;'
         f'padding:16px 20px;margin-bottom:12px">'
-        f'<div style="font-size:0.85rem;font-weight:600;color:#94A3B8;margin-bottom:14px">'
-        f'PIPELINE PROGRESS {total_label}</div>'
+        f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.08em;color:#64748B;margin-bottom:14px">'
+        f'{batch_label} {total_label}</div>'
         f'<div style="display:flex;align-items:center;gap:0;padding:0 8px">{dot_html}</div>'
         f'</div>',
         unsafe_allow_html=True,
@@ -654,7 +687,13 @@ if st.session_state.active_pid:
         _log_txt = Path(st.session_state.active_log).read_text(errors="replace").lower()
         job = st.session_state.active_job or "daily"
         if job == "daily":
-            log_done = "daily pipeline complete" in _log_txt
+            log_done = "daily pipeline complete" in _log_txt or "morning batch complete" in _log_txt
+        elif job == "morning":
+            log_done = "morning batch complete" in _log_txt
+        elif job == "intraday":
+            log_done = "intraday batch complete" in _log_txt
+        elif job == "evening":
+            log_done = "evening batch complete" in _log_txt
         elif job == "fundamentals":
             log_done = "fundamentals phase done" in _log_txt
         elif job == "research":
@@ -664,7 +703,7 @@ if st.session_state.active_pid:
         elif job == "validation":
             log_done = "validation complete." in _log_txt
         else:
-            log_done = "pipeline complete" in _log_txt
+            log_done = "pipeline complete" in _log_txt or "batch complete" in _log_txt
     if pid_done or db_done or log_done:
         st.session_state.active_pid = None  # keep active_log for display
 
@@ -687,14 +726,11 @@ with st.sidebar:
         st.session_state.active_pid = None
 
     _JOB_DEFS = [
-        ("--batch morning",      "🌅  Morning",      "morning",      "Event detection + scheduled/event APEX predictions"),
-        ("--batch intraday",     "⚡  Intraday",     "intraday",     "Severity-3 event check + APEX if triggered"),
-        ("--batch evening",      "🌆  Evening",      "evening",      "Validate matured predictions + recompute metrics"),
-        ("--daily --force-all",  "▶  Full Daily",   "daily",        "Legacy: News + Research + Fundamentals + APEX (all tickers)"),
-        ("--daily-news",         "📰  News Only",    "news",         "News triage + news agent only"),
-        ("--daily-research",     "🔬  Research Only","research",     "Broker data fetch + LLM research summary"),
-        ("--daily-fundamentals", "📄  Fundamentals", "fundamentals", "EDGAR check + batch fundamentals LLM"),
-        ("--validate",           "✅  Validate",     "validation",   "Score matured predictions + recompute metrics"),
+        ("--batch morning",      "🌅  Morning",    "morning",    "Event detection + scheduled/event APEX predictions"),
+        ("--batch intraday",     "⚡  Intraday",   "intraday",   "Event check + News/Research/Fundamentals/APEX for trending tickers"),
+        ("--batch evening",      "🌆  Evening",    "evening",    "Validate matured predictions + recompute metrics"),
+        ("--daily --force-all",  "▶  Full Daily", "daily",      "News + Research + Fundamentals + APEX (all tickers)"),
+        ("--validate",           "✅  Validate",   "validation", "Score matured predictions + recompute metrics"),
     ]
 
     for flag, run_label, job_key, help_text in _JOB_DEFS:
@@ -756,80 +792,119 @@ page_header(
     icon="🗓️",
 )
 
-# ── Status banner ─────────────────────────────────────────────────────────────
+# ── Schedule Overview ─────────────────────────────────────────────────────────
+
+_SCHEDULE_DEF = [
+    ("morning",    "🌅 Morning",  "Mon–Fri  06:30 CST",                       "News + Research + Fundamentals + APEX predictions"),
+    ("intraday",   "⚡ Intraday", "Mon–Fri  11:00 / 13:00 / 15:00 CST",       "Event check + full pipeline (News/Research/Fundamentals/APEX 5d) for trending tickers"),
+    ("evening",    "🌆 Evening",  "Mon–Fri  17:30 CST",                        "Validate matured predictions + recompute metrics"),
+    ("validation", "✅ Validate", "Mon–Fri  17:30 CST (part of evening batch)", "Rolling accuracy, Brier, log-loss"),
+    ("daily",      "▶ Full Daily","Manual trigger only",                        "Force-all: all phases for all tickers"),
+]
+
+# Last run per job_type
+_last_per_job: dict = {}
+try:
+    from portfolio_agent.tools.db import db_conn as _dbc2
+    with _dbc2(_DB) as _c2:
+        _jrows = _c2.execute("""
+            SELECT p.job_type, p.started_at, p.finished_at, p.status
+            FROM pipeline_runs p
+            JOIN (SELECT job_type, MAX(started_at) mx FROM pipeline_runs GROUP BY job_type) m
+              ON p.job_type=m.job_type AND p.started_at=m.mx
+        """).fetchall()
+        for _r in _jrows:
+            _last_per_job[_r[0]] = dict(_r)
+except Exception:
+    pass
+
+# Find the single most-recently-run job_type across all batches
+_latest_jt = None
+_latest_ts  = ""
+for _jt2, _lr2 in _last_per_job.items():
+    _ts2 = _lr2.get("started_at", "") or ""
+    if _ts2 > _latest_ts:
+        _latest_ts = _ts2
+        _latest_jt = _jt2
+
+def _sched_card(job_type, icon, label, timing, desc):
+    lr        = _last_per_job.get(job_type)
+    is_latest = (job_type == _latest_jt) and not job_is_alive
+
+    if lr:
+        _ts  = _to_local(lr.get("started_at", ""))[:16]
+        _st  = lr.get("status", "")
+        _lf  = lr.get("log_file", "")
+        _resolved = _db_status_label(_st, _lf, job_type)
+        completed = _resolved == "✅ Completed"
+        errored   = _st == "error"
+        _ico = "✅" if completed else ("❌" if errored else "🔵")
+        _col = "#059669" if completed else ("#DC2626" if errored else "#D97706")
+        last = f'<div style="font-size:0.72rem;font-weight:700;color:{_col}">{_ico} {_ts}</div>'
+    else:
+        completed = errored = False
+        last = '<div style="font-size:0.72rem;color:#9CA3AF">never run</div>'
+
+    # Card highlight based on latest-run status
+    if is_latest and completed:
+        bg, border, title_col = "#F0FDF4", "#86EFAC", "#065F46"
+        badge = '<span style="font-size:0.65rem;font-weight:700;background:#BBF7D0;color:#065F46;padding:2px 7px;border-radius:4px;margin-left:6px">LATEST</span>'
+    elif is_latest and errored:
+        bg, border, title_col = "#FEF2F2", "#FECACA", "#991B1B"
+        badge = '<span style="font-size:0.65rem;font-weight:700;background:#FECACA;color:#991B1B;padding:2px 7px;border-radius:4px;margin-left:6px">FAILED</span>'
+    elif is_latest:
+        bg, border, title_col = "#FFFBEB", "#FDE68A", "#92400E"
+        badge = '<span style="font-size:0.65rem;font-weight:700;background:#FDE68A;color:#92400E;padding:2px 7px;border-radius:4px;margin-left:6px">LATEST</span>'
+    else:
+        bg, border, title_col = "#fff", "#E5E7EB", "#111827"
+        badge = ""
+
+    return (
+        f'<div style="background:{bg};border:2px solid {border};border-radius:12px;'
+        f'padding:14px 16px;flex:1;min-width:0">'
+        f'<div style="font-size:1.1rem;margin-bottom:4px">{icon}</div>'
+        f'<div style="display:flex;align-items:center;margin-bottom:2px">'
+        f'<span style="font-size:0.88rem;font-weight:800;color:{title_col}">{label}</span>'
+        f'{badge}</div>'
+        f'<div style="font-size:0.7rem;font-weight:600;color:#6B7280;margin-bottom:8px">🕐 {timing}</div>'
+        f'<div style="font-size:0.75rem;color:#374151;line-height:1.4;margin-bottom:10px">{desc}</div>'
+        f'<div style="border-top:1px solid {border};padding-top:8px">'
+        f'<div style="font-size:0.63rem;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:3px">Last Run</div>'
+        f'{last}</div>'
+        f'</div>'
+    )
+
+_cards_html = '<div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">'
+for _jt, _lb, _ti, _de in _SCHEDULE_DEF:
+    _ico  = _lb.split()[0]
+    _name = " ".join(_lb.split()[1:])
+    _cards_html += _sched_card(_jt, _ico, _name, _ti, _de)
+_cards_html += '</div>'
+
+st.markdown(_cards_html, unsafe_allow_html=True)
+
+# ── Running banner (only shown when a job is actively running) ────────────────
 
 if job_is_alive:
     job_label = {
-        "daily":        "Full Daily",
-        "morning":      "Morning Batch",
-        "intraday":     "Intraday Batch",
-        "evening":      "Evening Batch",
-        "fundamentals": "Fundamentals-Only",
-        "research":     "Research-Only",
-        "news":         "News-Only",
-        "validation":   "Validation",
+        "daily":      "Full Daily",
+        "morning":    "Morning Batch",
+        "intraday":   "Intraday Batch",
+        "evening":    "Evening Batch",
+        "validation": "Validation",
     }.get(st.session_state.active_job or "", "Pipeline")
     st.markdown(
         f'<div style="background:#DBEAFE;border:1px solid #93C5FD;border-radius:10px;'
         f'padding:14px 20px;display:flex;align-items:center;gap:12px;margin-bottom:16px">'
         f'<span style="font-size:1.4rem">🔄</span>'
-        f'<div>'
-        f'<strong style="color:#1E40AF">{job_label} pipeline is running</strong>'
+        f'<div><strong style="color:#1E40AF">{job_label} pipeline is running</strong>'
         f'<p style="margin:2px 0 0;font-size:0.85rem;color:#3B82F6">'
         f'PID {st.session_state.active_pid} · Log: '
         f'{Path(st.session_state.active_log).name}</p>'
         f'</div></div>',
         unsafe_allow_html=True,
     )
-else:
-    _db_latest = (_load_db_runs(limit=1) or [None])[0]
-    if _db_latest:
-        _s = _db_latest.get("status", "")
-        _ts = _to_local(_db_latest.get("started_at", ""))
-        _jt = _db_latest.get("job_type", "").upper()
-        _fin = _db_latest.get("finished_at", "")
-        _lf = _db_latest.get("log_file", "")
-        # Override "running" if the log file shows completion
-        _status_lbl = _db_status_label(_s, _lf, _db_latest.get("job_type", "daily"))
-        if _status_lbl == "✅ Completed":
-            bg, border, fg, icon = "#D1FAE5", "#6EE7B7", "#065F46", "✅"
-            _status_text = "Completed"
-        elif _s == "error":
-            bg, border, fg, icon = "#FEE2E2", "#FCA5A5", "#991B1B", "❌"
-            _status_text = "Errored"
-        else:
-            bg, border, fg, icon = "#FEF3C7", "#FDE68A", "#92400E", "🔵"
-            _status_text = "Incomplete"
-        _detail = f"Finished {_to_local(_fin)}" if _fin else f"Started {_ts}"
-        st.markdown(
-            f'<div style="background:{bg};border:1px solid {border};border-radius:10px;'
-            f'padding:14px 20px;display:flex;align-items:center;gap:12px;margin-bottom:16px">'
-            f'<span style="font-size:1.2rem">{icon}</span>'
-            f'<div><strong style="color:{fg}">Last run: {_ts} ({_jt})</strong>'
-            f'<p style="margin:2px 0 0;font-size:0.85rem;color:{fg}">'
-            f'{_status_text} · {_detail}</p></div></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        _log_runs = _scan_logs()
-        if _log_runs:
-            latest = _log_runs[0]
-            bg, border, fg, icon = (
-                ("#D1FAE5", "#6EE7B7", "#065F46", "✅") if "Completed" in latest["status"] and not latest["has_error"]
-                else (("#FEE2E2", "#FCA5A5", "#991B1B", "❌") if latest["has_error"]
-                      else ("#FEF3C7", "#FDE68A", "#92400E", "🔵"))
-            )
-            st.markdown(
-                f'<div style="background:{bg};border:1px solid {border};border-radius:10px;'
-                f'padding:14px 20px;display:flex;align-items:center;gap:12px;margin-bottom:16px">'
-                f'<span style="font-size:1.2rem">{icon}</span>'
-                f'<div><strong style="color:{fg}">Last run: {latest["date_label"]} ({latest["job_type"]})</strong>'
-                f'<p style="margin:2px 0 0;font-size:0.85rem;color:{fg}">'
-                f'{latest["status"]} · {latest["lines"]:,} log lines</p></div></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info("No pipeline runs found yet.", icon="ℹ️")
 
 # ── Live log viewer ───────────────────────────────────────────────────────────
 
@@ -889,111 +964,217 @@ if active_log_path and active_log_path.exists():
 if _CP.exists():
     try:
         cp = json.loads(_CP.read_text())
-        section_title("🔖 Saved Checkpoint", badge_text="Pending tickers", badge_color=WARNING)
-        st.caption(f"Saved at: {cp.get('saved_at','')} · Run date: {cp.get('run_date','')}")
-        for phase in ["fundamentals", "news", "research"]:
-            pd_data = cp.get(phase, {})
-            pending = pd_data.get("pending", [])
-            if pending:
-                st.markdown(
-                    f'<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;'
-                    f'padding:10px 14px;margin-bottom:8px">'
-                    f'<strong style="color:#92400E">{phase.title()}</strong>: '
-                    f'{len(pending)} tickers pending — '
-                    f'{", ".join(pending[:10])}{"…" if len(pending) > 10 else ""}'
-                    f'<br><span style="font-size:0.8rem;color:#B45309">'
-                    f'Error: {pd_data.get("error","")[:120]}</span></div>',
-                    unsafe_allow_html=True,
-                )
-        st.divider()
+        _cp_phases = [
+            (phase, cp.get(phase, {}).get("pending", []))
+            for phase in ["fundamentals", "news", "research"]
+        ]
+        _cp_any = any(pending for _, pending in _cp_phases)
+        if _cp_any:
+            section_title("🔖 Saved Checkpoint", badge_text="Pending tickers", badge_color=WARNING)
+            st.caption(f"Saved at: {cp.get('saved_at','')} · Run date: {cp.get('run_date','')}")
+            for phase, pending in _cp_phases:
+                if pending:
+                    pd_data = cp.get(phase, {})
+                    st.markdown(
+                        f'<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;'
+                        f'padding:10px 14px;margin-bottom:8px">'
+                        f'<strong style="color:#92400E">{phase.title()}</strong>: '
+                        f'{len(pending)} tickers pending — '
+                        f'{", ".join(pending[:10])}{"…" if len(pending) > 10 else ""}'
+                        f'<br><span style="font-size:0.8rem;color:#B45309">'
+                        f'Error: {pd_data.get("error","")[:120]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+            st.divider()
     except Exception:
         pass
 
 # ── Historical runs ───────────────────────────────────────────────────────────
 
-def _db_phase_counts(db_run: dict, job_type: str) -> dict:
-    phases = db_run.get("phases", {})
-    def _fmt(key: str) -> str:
-        p = phases.get(key)
-        if not p:
-            return "—"
-        done, tot, fail = p.get("completed", 0), p.get("total", 0), p.get("failed", 0)
-        if done == 0 and tot == 0:
-            return "—"
-        base = f"{done}/{tot}" if tot else str(done)
-        return base + (f" ({fail}✗)" if fail else "")
+_BATCH_LABEL = {
+    "morning":      "🌅 Morning",
+    "intraday":     "⚡ Intraday",
+    "evening":      "🌆 Evening",
+    "validation":   "✅ Validation",
+    "daily":        "▶ Full Daily",
+    "news":         "📰 News",
+    "research":     "🔬 Research",
+    "fundamentals": "📄 Fundamentals",
+}
+
+# Pre-fetch metrics_rolling: metric_date → {horizon_days: num_predictions}
+_metrics_by_date: dict = {}
+try:
+    with _dbc2(_DB) as _mc:
+        _mrows = _mc.execute("""
+            SELECT metric_date, horizon_days, num_predictions
+            FROM metrics_rolling WHERE lookback_days=90
+        """).fetchall()
+        for _mr in _mrows:
+            _d = _mr[0]
+            _metrics_by_date.setdefault(_d, {})[_mr[1]] = _mr[2]
+except Exception:
+    pass
+
+def _run_summary(phases: dict, job_type: str,
+                 log_phase_counts: dict | None = None,
+                 finished_at: str = "") -> str:
+    """Build a single summary string for a run based on job type and phase data."""
     jt = job_type.lower()
-    if jt == "validation":
-        return {"News": "—", "Research": "—", "Fundamentals": "—", "Predictions": "—"}
-    if jt in ("news", "research", "fundamentals"):
-        return {
-            "News":         _fmt("news")         if jt == "news"         else "—",
-            "Research":     _fmt("research")     if jt == "research"     else "—",
-            "Fundamentals": _fmt("fundamentals") if jt == "fundamentals" else "—",
-            "Predictions":  "—",
-        }
-    return {"News": _fmt("news"), "Research": _fmt("research"),
-            "Fundamentals": _fmt("fundamentals"), "Predictions": _fmt("apex")}
+
+    def _p(key):
+        p = phases.get(key) or {}
+        done = p.get("completed", 0)
+        tot  = p.get("total", 0)
+        fail = p.get("failed", 0)
+        if done == 0 and tot == 0:
+            return None
+        s = f"{done}/{tot}" if tot else str(done)
+        return s + (f"({fail}✗)" if fail else "")
+
+    def _lp(key):
+        if not log_phase_counts:
+            return None
+        v = log_phase_counts.get(key, "—")
+        return None if v == "—" else v
+
+    if jt in ("morning", "daily"):
+        parts = []
+        for key, label in [("news","News"), ("research","Res"),
+                            ("fundamentals","Fund"), ("apex","APEX")]:
+            v = _p(key) or _lp(key)
+            if v:
+                parts.append(f"{label} {v}")
+        return "  ·  ".join(parts) if parts else "Phases recorded"
+
+    if jt == "intraday":
+        apex = _p("apex") or _lp("Predictions")
+        return f"APEX triggered — {apex} predictions" if apex else "Event check — no triggers"
+
+    if jt in ("evening", "validation"):
+        # Use the run's finished_at date to look up per-horizon scored counts
+        run_date = (finished_at or "")[:10]
+        horizon_data = _metrics_by_date.get(run_date, {})
+        if horizon_data:
+            _HZ = {5: "5d", 21: "21d", 63: "63d", 250: "1y"}
+            parts = [
+                f"{_HZ.get(h, f'{h}d')}: {n}"
+                for h, n in sorted(horizon_data.items())
+                if n > 0
+            ]
+            return "Scored — " + "  ·  ".join(parts) if parts else "Scored matured predictions"
+        return "Scored matured predictions"
+
+    if jt == "news":
+        v = _p("news") or _lp("News")
+        return f"News scored — {v} tickers" if v else "News phase"
+
+    if jt == "research":
+        v = _p("research") or _lp("Research")
+        return f"Research updated — {v} tickers" if v else "Research phase"
+
+    if jt == "fundamentals":
+        v = _p("fundamentals") or _lp("Fundamentals")
+        return f"Fundamentals updated — {v} tickers" if v else "Fundamentals phase"
+
+    return "—"
+
+
+def _run_duration(started: str, finished: str) -> str:
+    if not started or not finished:
+        return "—"
+    try:
+        from datetime import datetime as _dt
+        s = _dt.fromisoformat(started[:19])
+        f = _dt.fromisoformat(finished[:19])
+        secs = int((f - s).total_seconds())
+        if secs < 0:
+            return "—"
+        if secs < 60:
+            return f"{secs}s"
+        return f"{secs // 60}m {secs % 60:02d}s"
+    except Exception:
+        return "—"
+
 
 # DB runs — primary source
 _db_all = _load_db_runs(limit=40)
 _db_run_ids = {r["run_id"] for r in _db_all}
 
 # Legacy log runs — only include those NOT already in DB
-_log_runs   = _scan_logs()
-_legacy     = [r for r in _log_runs if r["log_path"].stem not in _db_run_ids]
+_log_runs = _scan_logs()
+_legacy   = [r for r in _log_runs if r["log_path"].stem not in _db_run_ids]
 
-# Build unified display list: DB entries first (sorted newest first), then legacy
+# Build unified display list
 _active_run_id_for_log = st.session_state.get("active_run_id", "")
 _all_display: list[dict] = []
+
 for r in _db_all:
     ts_raw = _to_local(r.get("started_at", ""))
     log_f  = r.get("log_file", "")
-    # DB doesn't store the log path — use session_state path for the active run
     if not log_f and r["run_id"] == _active_run_id_for_log and st.session_state.get("active_log"):
         log_f = st.session_state.active_log
+    jt  = r.get("job_type", "daily")
+    ph  = r.get("phases", {})
     _all_display.append({
         "_source":   "db",
         "_run_id":   r["run_id"],
         "_log_file": log_f,
-        "_db_run":   {"run": r, "phases": r.get("phases", {})},
-        "_job_type": r.get("job_type", "daily"),
-        "Job":       r.get("job_type", "").upper(),
-        "Status":    _db_status_label(r.get("status", ""), log_f, r.get("job_type", "daily")),
+        "_db_run":   {"run": r, "phases": ph},
+        "_job_type": jt,
+        "Batch":     _BATCH_LABEL.get(jt, jt.title()),
         "Started":   ts_raw,
-        "Source":    "DB",
-        **_db_phase_counts(r, r.get("job_type", "daily")),
+        "Duration":  _run_duration(r.get("started_at",""), r.get("finished_at","")),
+        "Summary":   _run_summary(ph, jt, finished_at=r.get("finished_at","")),
+        "Status":    _db_status_label(r.get("status",""), log_f, jt),
     })
+
 for r in _legacy:
+    jt = r["job_type"].lower()
     _all_display.append({
         "_source":   "log",
         "_run_id":   r["log_path"].stem,
         "_log_file": str(r["log_path"]),
         "_db_run":   None,
-        "_job_type": r["job_type"].lower(),
-        "Job":       r["job_type"],
-        "Status":    r["status"],
+        "_job_type": jt,
+        "Batch":     _BATCH_LABEL.get(jt, r["job_type"].title()),
         "Started":   r["date_label"],
-        "Source":    "log",
-        **r["phase_counts"],
+        "Duration":  "—",
+        "Summary":   _run_summary({}, jt, r.get("phase_counts")),
+        "Status":    r["status"],
     })
 
 total_runs = len(_all_display)
 section_title("📋 Historical Runs", badge_text=f"{total_runs} runs")
 
 if _all_display:
-    _table_cols = ["Job", "Status", "Started", "Source", "News", "Research", "Fundamentals", "Predictions"]
+    import pandas as pd
+    _table_cols = ["Batch", "Started", "Duration", "Summary", "Status"]
+    _df = pd.DataFrame([{c: row[c] for c in _table_cols} for row in _all_display])
+
+    def _style_runs(row):
+        if row.name == 0:
+            return ["background-color:#D1FAE5;color:#065F46;font-weight:700"] * len(row)
+        return [""] * len(row)
+
     st.dataframe(
-        [{c: row[c] for c in _table_cols} for row in _all_display],
+        _df.style.apply(_style_runs, axis=1),
         hide_index=True,
         use_container_width=True,
+        column_config={
+            "Batch":    st.column_config.TextColumn("Batch",    width="small"),
+            "Started":  st.column_config.TextColumn("Started",  width="medium"),
+            "Duration": st.column_config.TextColumn("Duration", width="small"),
+            "Summary":  st.column_config.TextColumn("Summary",  width="large"),
+            "Status":   st.column_config.TextColumn("Status",   width="small"),
+        },
     )
 
     st.markdown("**View a past run:**")
     sel = st.selectbox(
         "Select run",
         options=range(len(_all_display)),
-        format_func=lambda i: f"{_all_display[i]['Started']}  [{_all_display[i]['Job']}]  {_all_display[i]['Status']}",
+        format_func=lambda i: f"{_all_display[i]['Started']}  [{_all_display[i]['Batch']}]  {_all_display[i]['Status']}",
         key="hist_sel",
         label_visibility="collapsed",
     )

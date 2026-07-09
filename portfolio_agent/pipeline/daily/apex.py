@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from datetime import date
 
 from portfolio_agent.log import get_logger as _get_logger
-from portfolio_agent.pipeline.prompt_templates import _APEX_PROMPT_TEMPLATE
+from portfolio_agent.pipeline.prompt_templates import _APEX_PROMPT_TEMPLATE, _build_macro_section
 
 
 def _build_horizons_instruction(horizons: list[int]) -> str:
@@ -167,9 +167,18 @@ async def _run_daily_apex(
             batch=ticker_num, total_batches=len(has_ctx),
         )
 
+        # Extract macro snapshot from pre-fetched context for the formatted section
+        _ctx_parsed: dict = {}
+        try:
+            _ctx_parsed = json.loads(ctx_map[ticker])
+        except Exception:
+            pass
+        _macro_snap = _ctx_parsed.get("macro_snapshot") or {}
+
         prompt = _APEX_PROMPT_TEMPLATE.format(
             ticker=ticker,
             ctx_json=ctx_map[ticker],
+            macro_section=_build_macro_section(_macro_snap),
             horizons_instruction=horizons_instr,
         )
 

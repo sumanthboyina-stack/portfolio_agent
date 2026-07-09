@@ -595,9 +595,9 @@ def render_action_item_card(row: dict, card_key: str) -> None:
                 st.rerun()
 
 
-def render_action_items(df: pd.DataFrame) -> None:
+def render_action_items(df: pd.DataFrame, title: str = "Today's Action Items") -> None:
     """Piece 3: Section 1 — Today's Action Items (STRONG_BUY + STRONG_SELL, conv >= 7)."""
-    section_title("Today's Action Items", badge_text="High Conviction", badge_color=PRIMARY)
+    section_title(title, badge_text="High Conviction", badge_color=PRIMARY)
 
     action_df = df[
         df["recommendation"].isin(["STRONG_BUY", "STRONG_SELL"]) &
@@ -820,9 +820,9 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
                 st.rerun()
 
 
-def render_all_predictions(df: pd.DataFrame) -> None:
+def render_all_predictions(df: pd.DataFrame, title: str = "All Predictions by Recommendation") -> None:
     """Piece 4: Section 2 — All Predictions grouped by recommendation in accordion."""
-    section_title("All Predictions by Recommendation")
+    section_title(title)
 
     rec_order = ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"]
     rec_labels = {
@@ -1277,13 +1277,34 @@ if hide_no_edge and not df_today.empty:
 # ── Piece 1: System Strip ─────────────────────────────────────────────────────
 render_system_strip(df_all, selected_date)
 
-# ── Section 1: Action Items ───────────────────────────────────────────────────
-render_action_items(df_today)
+# ── Split portfolio vs new opportunities ────────────────────────────────────
+if not df_today.empty and "trigger_type" in df_today.columns:
+    _opp_mask    = df_today["trigger_type"].fillna("") == "trending_opportunity"
+    df_portfolio = df_today[~_opp_mask].reset_index(drop=True)
+    df_opps      = df_today[_opp_mask].reset_index(drop=True)
+else:
+    df_portfolio = df_today
+    df_opps      = pd.DataFrame()
+
+# ── Section 1: Action Items (portfolio) ───────────────────────────────────────
+render_action_items(df_portfolio)
 
 st.markdown("---")
 
-# ── Section 2: All Predictions ────────────────────────────────────────────────
-render_all_predictions(df_today)
+# ── Section 2: All Portfolio Predictions ──────────────────────────────────────
+render_all_predictions(df_portfolio)
+
+# ── Section 3: New Opportunities ──────────────────────────────────────────────
+if not df_opps.empty:
+    st.markdown("---")
+    section_title("🌟 New Opportunities", badge_text="Trending Discovery", badge_color=PURPLE)
+    n_opp_tickers = len(df_opps["ticker"].unique())
+    st.caption(
+        f"{n_opp_tickers} trending ticker{'s' if n_opp_tickers != 1 else ''} analyzed today — "
+        "same full pipeline as portfolio: News · Research · Fundamentals · APEX predictions"
+    )
+    render_action_items(df_opps, title="High-Conviction Opportunities")
+    render_all_predictions(df_opps, title="All Opportunities by Recommendation")
 
 # ── Piece 5: Drill-down ───────────────────────────────────────────────────────
 drill_ticker = st.session_state.get("drill_ticker")
