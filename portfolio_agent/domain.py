@@ -192,6 +192,9 @@ class FundamentalsSnapshot(_DictCompat):
     model_name: str | None = None
     model_provider: str | None = None
     updated_at: str | None = None
+    guidance_text: str | None = None
+    guidance_date: str | None = None
+    guidance_direction: str | None = None  # raised | maintained | lowered | withdrawn | none
 
     def __post_init__(self) -> None:
         self.ticker = self.ticker.upper()
@@ -216,6 +219,9 @@ class FundamentalsSnapshot(_DictCompat):
             model_name=row.get("model_name"),
             model_provider=row.get("model_provider"),
             updated_at=row.get("updated_at"),
+            guidance_text=row.get("guidance_text"),
+            guidance_date=row.get("guidance_date"),
+            guidance_direction=row.get("guidance_direction"),
         )
 
     def to_dict(self) -> dict:
@@ -237,6 +243,9 @@ class FundamentalsSnapshot(_DictCompat):
             "model_name": self.model_name,
             "model_provider": self.model_provider,
             "updated_at": self.updated_at,
+            "guidance_text": self.guidance_text,
+            "guidance_date": self.guidance_date,
+            "guidance_direction": self.guidance_direction,
         }
 
 
@@ -490,9 +499,6 @@ class Prediction(_DictCompat):
     pt_num_analysts: int | None = None
     pt_current_price: float | None = None
     distribution: HorizonDistribution = field(default_factory=HorizonDistribution)
-    is_ensemble: bool = False
-    agreement_score: float | None = None
-    is_single_model: bool = False
     used_fallback: bool = False
     actual_return: float | None = None
     actual_direction: str | None = None
@@ -569,9 +575,6 @@ class Prediction(_DictCompat):
             pt_num_analysts=_safe_int(row.get("pt_num_analysts")),
             pt_current_price=_safe_float(row.get("pt_current_price")),
             distribution=HorizonDistribution.from_row(row),
-            is_ensemble=bool(row.get("is_ensemble")),
-            agreement_score=_safe_float(row.get("agreement_score")),
-            is_single_model=bool(row.get("is_single_model")),
             used_fallback=bool(row.get("used_fallback")),
             actual_return=_safe_float(row.get("actual_return")),
             actual_direction=row.get("actual_direction"),
@@ -635,9 +638,6 @@ class Prediction(_DictCompat):
             "pt_num_analysts": self.pt_num_analysts,
             "pt_current_price": self.pt_current_price,
             "distribution": self.distribution.to_dict(),
-            "is_ensemble": self.is_ensemble,
-            "agreement_score": self.agreement_score,
-            "is_single_model": self.is_single_model,
             "used_fallback": self.used_fallback,
             "actual_return": self.actual_return,
             "actual_direction": self.actual_direction,

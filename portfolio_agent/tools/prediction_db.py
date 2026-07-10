@@ -349,10 +349,7 @@ def insert_prediction(
     p_flat: Optional[float] = None,
     p_moderate_up: Optional[float] = None,
     p_strong_up: Optional[float] = None,
-    # Ensemble / dual-run metadata
-    is_ensemble: bool = False,
-    agreement_score: Optional[float] = None,
-    is_single_model: bool = False,
+    # Model selection metadata
     used_fallback: bool = False,
     parent_merged_id: Optional[int] = None,
     # Event-driven metadata
@@ -409,13 +406,12 @@ def insert_prediction(
                         snapshot_research_score, snapshot_macro_score,
                         snapshot_news_headlines, start_price,
                         p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                        is_ensemble, agreement_score, is_single_model,
                         used_fallback, parent_merged_id,
                         trigger_type, trigger_event_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -434,7 +430,6 @@ def insert_prediction(
                     json.dumps(snapshot_news_headlines or []),
                     start_price,
                     p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                    int(is_ensemble), agreement_score, int(is_single_model),
                     int(used_fallback), parent_merged_id,
                     trigger_type, trigger_event_id,
                 ],

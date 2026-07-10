@@ -76,20 +76,7 @@ def _to_local(utc_str: str) -> str:
         return (utc_str or "")[:19].replace("T", " ")
 
 
-def _is_pid_alive(pid: int) -> bool:
-    try:
-        # waitpid with WNOHANG reaps zombie processes; returns (0,0) if still running
-        done, _ = os.waitpid(pid, os.WNOHANG)
-        return done == 0
-    except ChildProcessError:
-        # Not a direct child — fall back to kill -0
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-    except OSError:
-        return False
+from web.lib import pid_alive as _is_pid_alive
 
 
 def _db_conn() -> sqlite3.Connection | None:

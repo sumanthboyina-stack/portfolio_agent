@@ -42,7 +42,7 @@ async def _run_daily_apex(
         is_trading_day, get_scheduled_horizons, get_today_horizons,
     )
     from portfolio_agent.tools.yfinance_tools import get_close as _get_close
-    from portfolio_agent.tools.apex_dual_run import run_apex_dual as _run_apex_dual
+    from portfolio_agent.tools.apex_dual_run import run_apex as _run_apex
 
     if trigger_map is None:
         trigger_map = {}
@@ -182,7 +182,7 @@ async def _run_daily_apex(
             horizons_instruction=horizons_instr,
         )
 
-        result = await _run_apex_dual(ticker, prompt)
+        result = await _run_apex(ticker, prompt)
 
         if result is None:
             log.error(
@@ -196,10 +196,7 @@ async def _run_daily_apex(
 
         data             = result.merged
         model_label_used = "+".join(result.model_sources)
-        model_prov_used  = (
-            "ensemble" if not result.is_single_model
-            else result.model_sources[0].split("-")[0].lower()
-        )
+        model_prov_used  = result.model_sources[0].split("-")[0].lower()
 
         try:
             _ctx_res = {}
@@ -229,9 +226,6 @@ async def _run_daily_apex(
                 pt_low=_ctx_res.get("price_target_low"),
                 pt_num_analysts=_ctx_res.get("num_analysts"),
                 pt_current_price=_ctx_res.get("current_price"),
-                is_ensemble=not result.is_single_model,
-                agreement_score=result.agreement_score,
-                is_single_model=result.is_single_model,
                 used_fallback=result.used_fallback,
             )
 
@@ -276,12 +270,9 @@ async def _run_daily_apex(
 
             rec  = data.get("recommendation", "?")
             conf = data.get("confidence", "?")
-            agr  = (
-                f"agr={result.agreement_score:.2f}"
-                if not result.is_single_model else "single-model"
-            )
+            run_tag = "fallback" if result.used_fallback else "primary"
             log.info(
-                f"  [{model_label_used}] APEX: {ticker} → {rec} (conf={conf}, {agr}) "
+                f"  [{model_label_used}] APEX: {ticker} → {rec} (conf={conf}, {run_tag}) "
                 f"· {saved_count}/{len(horizons_needed)} horizon row(s) saved",
                 event_type="db_write", ticker=ticker, action=rec, model=model_label_used,
             )

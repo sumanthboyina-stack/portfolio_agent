@@ -32,10 +32,13 @@ def _db():
 
 def _migrate(conn: sqlite3.Connection) -> None:
     migrate_columns(conn, "fundamentals", [
-        ("summary",        "TEXT"),
-        ("updated_at",     "TEXT DEFAULT (datetime('now'))"),
-        ("model_name",     "TEXT"),
-        ("model_provider", "TEXT"),
+        ("summary",            "TEXT"),
+        ("updated_at",         "TEXT DEFAULT (datetime('now'))"),
+        ("model_name",         "TEXT"),
+        ("model_provider",     "TEXT"),
+        ("guidance_text",      "TEXT"),
+        ("guidance_date",      "TEXT"),
+        ("guidance_direction", "TEXT"),
     ])
 
 
@@ -137,6 +140,9 @@ def upsert_fundamentals(
     raw_filing_ref: str = "",
     model_name: Optional[str] = None,
     model_provider: Optional[str] = None,
+    guidance_text: Optional[str] = None,
+    guidance_date: Optional[str] = None,
+    guidance_direction: Optional[str] = None,
 ) -> dict:
     """
     Insert or update a fundamentals row.
@@ -176,12 +182,17 @@ def upsert_fundamentals(
                            raw_filing_ref         = ?,
                            model_name             = COALESCE(?, model_name),
                            model_provider         = COALESCE(?, model_provider),
+                           guidance_text          = COALESCE(?, guidance_text),
+                           guidance_date          = COALESCE(?, guidance_date),
+                           guidance_direction     = COALESCE(?, guidance_direction),
                            updated_at             = datetime('now')
                        WHERE id = ?""",
                     [as_of_date, filing_type,
                      _f(revenue_growth_yoy_pct), _f(net_margin), _f(fcf), _f(debt_to_equity),
                      fundamental_score, strengths_str, risks_str, summary, raw_filing_ref,
-                     model_name, model_provider, existing["id"]],
+                     model_name, model_provider,
+                     guidance_text, guidance_date, guidance_direction,
+                     existing["id"]],
                 )
                 action = "updated"
             else:
@@ -190,12 +201,16 @@ def upsert_fundamentals(
                            (ticker, as_of_date, filing_type, filing_date,
                             revenue_growth_yoy_pct, net_margin, fcf, debt_to_equity,
                             fundamental_score, key_strengths, key_risks,
-                            summary, raw_filing_ref, model_name, model_provider, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                            summary, raw_filing_ref, model_name, model_provider,
+                            guidance_text, guidance_date, guidance_direction,
+                            updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, datetime('now'))""",
                     [ticker, as_of_date, filing_type, filing_date_key,
                      _f(revenue_growth_yoy_pct), _f(net_margin), _f(fcf), _f(debt_to_equity),
                      fundamental_score, strengths_str, risks_str, summary, raw_filing_ref,
-                     model_name, model_provider],
+                     model_name, model_provider,
+                     guidance_text, guidance_date, guidance_direction],
                 )
                 action = "inserted"
 

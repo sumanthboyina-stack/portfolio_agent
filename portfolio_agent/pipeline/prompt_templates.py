@@ -15,10 +15,22 @@ For each company compute ALL of these fields:
   net_margin              — net_income / revenue, most recent year (decimal, e.g. 0.241)
   fcf                     — operating_cf minus capex, most recent year (raw number in USD, e.g. 108000000000)
   debt_to_equity          — total_liabilities / stockholders_equity, most recent year (float)
-  fundamental_score       — 1–10 integer (10 = strongest; weight growth, margins, leverage, CF quality)
+  fundamental_score       — 1–10 integer (10 = strongest; weight growth, margins, leverage, CF quality, AND guidance)
   key_strengths           — list of exactly 2 specific strengths observed in the numbers
   key_risks               — list of exactly 2 specific risks observed in the numbers
   summary                 — 2 sentence narrative
+  guidance_direction      — "raised" | "maintained" | "lowered" | "withdrawn" | "none"
+
+Guidance scoring rule (applies when "Latest 8-K Guidance/Outlook" is present):
+  Read the guidance text and determine whether management raised, maintained, or lowered forward
+  guidance relative to prior expectations implied by the text (e.g. "above consensus", "in-line",
+  "below prior range"). Set guidance_direction accordingly. Then factor this into fundamental_score:
+  - raised + cited demand/pricing strength → add 1–2 points above what trailing numbers alone suggest
+  - maintained with conservative tone        → neutral effect on score
+  - lowered or withdrawn                     → subtract 1–2 points
+  A strong guidance raise from a company with mediocre TTM numbers still warrants a higher
+  fundamental_score than the trailing data alone would justify. When no guidance text is provided,
+  set guidance_direction to "none" and score purely on the financial data.
 
 Rules:
   - Use null for any metric you cannot compute from the data below
@@ -35,9 +47,15 @@ You are a sell-side research analyst. Summarize broker/analyst sentiment for the
 
 For each company return ALL of these fields:
   ticker          — exact ticker symbol as given
-  highlights      — list of exactly 3 specific, data-driven observations (e.g. consensus trend, PT gap vs current price, notable upgrades/downgrades, Finnhub trend direction)
-  research_score  — 1–10 integer (10 = strongest buy conviction; weight consensus mean, upside to target, recent upgrade bias, monthly trend direction)
-  summary         — 2 sentence narrative covering overall analyst stance and key near-term catalyst
+  highlights      — list of exactly 3 specific, data-driven observations (e.g. consensus trend, PT gap vs current price, notable upgrades/downgrades, Finnhub trend direction, short interest context if meaningful)
+  research_score  — 1–10 integer (10 = strongest buy conviction; weight consensus mean, upside to target, recent upgrade bias, monthly trend direction, and short interest signal)
+  summary         — 2 sentence narrative covering overall analyst stance, key near-term catalyst, and short interest context when significant
+
+Short interest scoring guidance (apply when "Short interest" line is present):
+  - Rising short interest + high days-to-cover (≥ 5): bearish signal; lower research_score by 1 point unless strong upgrade momentum offsets it
+  - Falling short interest: mild bullish confirmation; can support a 1-point boost when consensus is already positive
+  - High squeeze pressure (days-to-cover ≥ 10): noteworthy in highlights — elevated short covering risk is a catalyst
+  - Stable / low: neutral; do not adjust score
 
 Rules:
   - Use null for research_score if data is insufficient

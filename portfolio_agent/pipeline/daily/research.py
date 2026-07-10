@@ -20,6 +20,32 @@ from portfolio_agent.pipeline.json_parsing import _extract_json_array
 from portfolio_agent.pipeline.prompt_templates import _BATCH_SIZE, _BATCH_RESEARCH_PROMPT
 
 
+def _get_short_interest_line(ticker: str) -> str | None:
+    """Return a compact short-interest summary line, or None if unavailable."""
+    try:
+        from portfolio_agent.tools.short_interest_db import compute_trend
+        si = compute_trend(ticker)
+        if not si.get("available"):
+            return None
+        dtc    = si.get("days_to_cover")
+        shares = si.get("current_shares")
+        trend  = si.get("trend", "unknown")
+        pct    = si.get("pct_change")
+        settle = si.get("settlement_date", "")
+        src    = "(yfinance)" if si.get("source") == "yfinance" else f"({settle})"
+        dtc_str    = f"{dtc:.1f}d cover" if dtc is not None else "n/a"
+        shares_str = f"{shares/1e6:.1f}M shares" if shares else "n/a"
+        pct_str    = f"{pct:+.1f}% vs prior" if pct is not None else ""
+        squeeze    = si.get("squeeze_pressure", "")
+        squeeze_str = f"  [{squeeze} squeeze pressure]" if squeeze not in ("low", "unknown", "") else ""
+        return (
+            f"Short interest {src}: {shares_str}  |  {dtc_str}  |  "
+            f"trend: {trend}{' ' + pct_str if pct_str else ''}{squeeze_str}"
+        )
+    except Exception:
+        return None
+
+
 def _format_research_block(data: dict) -> str:
     """Format one ticker's raw broker data as a compact text block for the batch research prompt."""
     ticker = data.get("ticker", "?")
@@ -83,6 +109,9 @@ def _format_research_block(data: dict) -> str:
             f"high ${fpt.get('target_high','n/a')} / low ${fpt.get('target_low','n/a')}"
             + (f"  (as of {fpt['last_updated']})" if fpt.get("last_updated") else "")
         )
+    si_line = _get_short_interest_line(ticker)
+    if si_line:
+        lines.append(si_line)
     return "\n".join(lines)
 
 

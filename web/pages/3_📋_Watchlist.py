@@ -95,6 +95,9 @@ categories = wl_data.get("categories", {})
 cat_counts: dict[str, int] = {}
 if categories:
     for cat, tlist in categories.items():
+        # Support both old format (list) and new format ({tier, tickers: [...]})
+        if isinstance(tlist, dict):
+            tlist = tlist.get("tickers", [])
         cat_counts[cat] = len([t for t in tlist if str(t).upper() in all_tickers])
 
 # ── Top action bar ────────────────────────────────────────────────────────────

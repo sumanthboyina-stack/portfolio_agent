@@ -170,14 +170,37 @@ async def run_batch_intraday(
             scheduled_horizons_override=[5],
         )
 
-    # ── Track B: Trending tickers → news + research ──────────────────────────
-    # Include a trending ticker if:
-    #   (a) it has a severity-3 event today, OR
-    #   (b) it has not been analyzed yet today (new discovery)
+    # ── Track B: Trending tickers + math-screen promoted → news + research ──────
+    # Include a ticker if:
+    #   (a) it has a severity-3 event today (trending), OR
+    #   (b) it has not been analyzed yet today (new trending discovery), OR
+    #   (c) it was promoted from the morning batch math screen (universe_db signals)
     already_done = _analyzed_today(trending_new, today)
     trending_with_events = [t for t in trending_new if t in event_by_ticker]
     trending_unanalyzed  = [t for t in trending_new if t not in already_done]
-    research_tickers = list(dict.fromkeys(trending_with_events + trending_unanalyzed))
+
+    # Math-screen promoted candidates (from Phase 5 of morning batch)
+    _screen_promoted: list[str] = []
+    try:
+        from portfolio_agent.tools.universe_db import get_signals as _get_signals
+        _screen_today = [
+            s["ticker"] for s in _get_signals(today, min_score=2)
+            if s["ticker"] not in portfolio_set
+        ]
+        if _screen_today:
+            _screen_done = _analyzed_today(_screen_today, today)
+            _screen_promoted = [t for t in _screen_today if t not in _screen_done]
+            if _screen_promoted:
+                log.info(
+                    f"  [Track B] +{len(_screen_promoted)} from morning math screen",
+                    event_type="info",
+                )
+    except Exception:
+        pass
+
+    research_tickers = list(dict.fromkeys(
+        trending_with_events + trending_unanalyzed + _screen_promoted
+    ))
 
     if not research_tickers:
         log.info(

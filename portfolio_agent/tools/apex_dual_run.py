@@ -4,7 +4,7 @@ APEX single-run prediction module.
 Architecture:
   1. Randomly select Claude-Sonnet or GPT-4o for the prediction.
   2. If the selected model times out (90 s) or errors, retry with the other model.
-  3. On both-fail → return None; caller skips, never writes a placeholder.
+  3. Both-fail → return None; caller skips, never writes a placeholder.
 """
 from __future__ import annotations
 
@@ -51,20 +51,18 @@ class SinglePrediction:
 
 
 @dataclass
-class EnsembleResult:
-    """Prediction result — always single-model."""
-    merged:          dict[str, Any]
-    individuals:     list[SinglePrediction]
-    model_sources:   list[str]
-    agreement_score: float      # always 1.0 (single model)
-    is_single_model: bool       # always True
-    used_fallback:   bool       # True when the first-choice model failed/timed out
-    fallback_model:  str = ""
+class ModelResult:
+    """Prediction result from a single randomly-selected model (with optional fallback)."""
+    merged:        dict[str, Any]
+    individuals:   list[SinglePrediction]   # all attempted calls (primary + fallback if tried)
+    model_sources: list[str]                # display name(s) of the model(s) that succeeded
+    used_fallback: bool                     # True when the first-choice model failed/timed out
+    fallback_model: str = ""
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
 
-async def run_apex_dual(ticker: str, prompt: str) -> EnsembleResult | None:
+async def run_apex(ticker: str, prompt: str) -> ModelResult | None:
     """
     Run a single randomly-selected model (Sonnet or GPT-4o) for *ticker*.
 
@@ -91,10 +89,10 @@ async def run_apex_dual(ticker: str, prompt: str) -> EnsembleResult | None:
             f"  ✓ [apex] {ticker} — {result.display_name} ✓ ({result.latency_ms}ms)",
             event_type="apex_complete", ticker=ticker, model=result.display_name,
         )
-        return EnsembleResult(
+        return ModelResult(
             merged=result.data, individuals=[result],
             model_sources=[result.display_name],
-            agreement_score=1.0, is_single_model=True, used_fallback=False,
+            used_fallback=False,
         )
 
     # ── Step 2: retry with the other model ────────────────────────────────────
@@ -115,10 +113,10 @@ async def run_apex_dual(ticker: str, prompt: str) -> EnsembleResult | None:
             event_type="apex_complete", ticker=ticker,
             model=fb.display_name, used_fallback=True,
         )
-        return EnsembleResult(
+        return ModelResult(
             merged=fb.data, individuals=[result, fb],
             model_sources=[fb.display_name],
-            agreement_score=1.0, is_single_model=True, used_fallback=True,
+            used_fallback=True,
             fallback_model=fb.display_name,
         )
 

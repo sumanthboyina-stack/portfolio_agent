@@ -54,6 +54,13 @@ def _format_data_block(data: dict) -> str:
     lines.append(_series_rows(bal))
     lines.append("Cash Flow:")
     lines.append(_series_rows(cf))
+
+    guidance_text = data.get("guidance_text")
+    guidance_date = data.get("guidance_date")
+    if guidance_text:
+        lines.append(f"Latest 8-K Guidance/Outlook ({guidance_date or 'date unknown'}):")
+        lines.append(f"  {guidance_text[:2500]}")
+
     return "\n".join(lines)
 
 
@@ -308,6 +315,7 @@ def _persist_fundamentals(
     flash_chain: list,
     model_idx: int,
     info_map: dict,
+    prefetch: dict,
     log,
 ) -> tuple[list[str], list[str]]:
     """Parse LLM analyses and upsert each ticker's fundamentals into the DB.
@@ -348,6 +356,7 @@ def _persist_fundamentals(
                 failed.append(ticker)
                 continue
             try:
+                bundle = prefetch.get(ticker, {})
                 result = upsert_fundamentals(
                     ticker=ticker,
                     as_of_date=info.get("period_of_report") or date.today().isoformat(),
@@ -364,6 +373,9 @@ def _persist_fundamentals(
                     raw_filing_ref=info.get("raw_filing_ref", ""),
                     model_name=label,
                     model_provider=provider,
+                    guidance_text=bundle.get("guidance_text"),
+                    guidance_date=bundle.get("guidance_date"),
+                    guidance_direction=data.get("guidance_direction"),
                 )
                 log.info(
                     f"  DB: fundamentals {result.get('action','?')} for {ticker} [{label}]",
@@ -453,6 +465,7 @@ async def _run_daily_fundamentals(
         flash_chain=flash_chain,
         model_idx=model_idx,
         info_map=info_map,
+        prefetch=prefetch,
         log=log,
     )
 

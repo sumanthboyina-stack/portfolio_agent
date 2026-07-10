@@ -61,20 +61,7 @@ for _k, _v in [
         st.session_state[_k] = _v
 
 
-def _pid_alive(pid) -> bool:
-    if not pid:
-        return False
-    try:
-        done, _ = os.waitpid(pid, os.WNOHANG)
-        return done == 0
-    except ChildProcessError:
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-    except OSError:
-        return False
+from web.lib import pid_alive as _pid_alive
 
 
 def _start_subprocess(flag: str, label: str) -> tuple[int, Path]:

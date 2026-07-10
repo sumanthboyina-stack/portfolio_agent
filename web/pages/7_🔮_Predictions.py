@@ -33,10 +33,7 @@ top_nav("predictions")
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(str(_DB))
-    c.row_factory = sqlite3.Row
-    return c
+from web.lib import db_conn as _conn
 
 
 def _load_predictions(

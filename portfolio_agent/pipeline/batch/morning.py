@@ -77,6 +77,18 @@ async def run_batch_morning(
             tracker.finish_run("error")
         return
 
+    # Short interest refresh — cheap no-op when settlement date hasn't changed;
+    # fires one paginated FINRA pull (~twice per month) when new data is due.
+    log.info("\n── Short Interest Check ────────────────────────────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.tools.finra import maybe_refresh_short_interest
+        maybe_refresh_short_interest(all_tickers, log=log)
+    except Exception as _si_exc:
+        log.warning(
+            f"  [short_interest] Refresh skipped — {_si_exc}",
+            event_type="warning",
+        )
+
     log.info("\n── Phase 2: Research ───────────────────────────────────────────", event_type="phase_start")
     if not await _run_daily_research(all_tickers, always_run, tracker=tracker):
         log.info("\n  ⛔ Research phase exhausted all models — stopping.", event_type="phase_end")
@@ -104,6 +116,40 @@ async def run_batch_morning(
         )
 
     GEMINI_COUNTER.print_stats(prefix=" (end of morning batch)")
+
+    # Universe screen — pure math (no LLM). Quarterly refresh of index membership
+    # fires automatically when due; daily screen finds breakout candidates in
+    # the extended/broad tiers and writes them to screening_signals so the
+    # intraday Track B can triage them with news+research later in the day.
+    log.info("\n── Phase 5: Universe Screen (math only) ────────────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.tools.universe_db import needs_refresh as _universe_needs_refresh
+        from portfolio_agent.tools.screener import screen_universe as _screen_universe
+        from portfolio_agent.tools.universe import refresh_universe as _refresh_universe
+
+        # Quarterly refresh of index membership (cheap no-op when fresh)
+        if _universe_needs_refresh("sp500") or _universe_needs_refresh("nasdaq_listed"):
+            log.info("  [universe] Quarterly refresh due — fetching S&P + Nasdaq constituents…", event_type="fetch_start")
+            _refresh_universe(log=log)
+
+        core_set = set(all_tickers)
+
+        promoted_ext = _screen_universe(tier="extended", exclude=core_set, log=log)
+        promoted_broad = _screen_universe(
+            tier="broad", exclude=core_set | set(promoted_ext), log=log
+        )
+        total = len(promoted_ext) + len(promoted_broad)
+        if total:
+            log.info(
+                f"  [universe] {total} candidate(s) flagged "
+                f"({len(promoted_ext)} extended, {len(promoted_broad)} broad) "
+                f"— intraday checks will triage these.",
+                event_type="summary",
+            )
+        else:
+            log.info("  [universe] No signals today.", event_type="info")
+    except Exception as _univ_exc:
+        log.warning(f"  [universe] Screen skipped — {_univ_exc}", event_type="warning")
 
     log.info("\n── Price History Backfill ──────────────────────────────────────", event_type="phase_start")
     try:

@@ -19,6 +19,7 @@ from web.styles import (
     inject_global_css, top_nav, section_title,
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, PURPLE,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
+    freshness_color, accuracy_color, brier_color,
 )
 
 _DB = _ROOT / "data" / "portfolio.db"
@@ -369,16 +370,6 @@ def _fmt_val(v):
     if v >= 1_000:     return f"${v:,.0f}"
     return f"${v:.2f}"
 
-def _freshness(date_str, warn_days=3):
-    if not date_str: return "missing", DANGER
-    try:
-        n = (datetime.now() - datetime.fromisoformat(date_str[:10])).days
-    except Exception:
-        return date_str, NEUTRAL
-    if n == 0:          return "today", SUCCESS
-    if n <= warn_days:  return f"{n}d ago", WARNING
-    return f"{n}d ago", DANGER
-
 PRIORITY_STYLE = {
     "critical":    (DANGER,  "🔴", "CRITICAL"),
     "watch":       (WARNING, "🟡", "WATCH"),
@@ -595,56 +586,45 @@ with left:
 # ══════════════════════════════════════════════════════════
 
 with right:
-    holdings_sorted = sorted(d.get("holdings", []), key=lambda h: h["weight_pct"], reverse=True)
-    hp = d.get("hpreds", {})
+    # ── Compact health strip (replaces full portfolio + validation panels) ─────
+    v5   = d.get("validation", {}).get(5, {})
+    acc5 = v5.get("directional_accuracy")
+    br5  = v5.get("brier_score")
+    n5   = v5.get("num_predictions", 0)
 
-    # ── Portfolio concentration bars ──────────────────────────────────────────
-    risk_rows = ""
-    for h in holdings_sorted[:5]:
-        w    = h["weight_pct"]
-        bar  = min(100, w * 4)
-        col  = DANGER if w > 20 else (WARNING if w > 15 else PRIMARY)
-        pred = hp.get(h["ticker"])
-        rec  = pred.get("recommendation", "") if pred else ""
-        dot  = {"STRONG_BUY":"🟢","BUY":"🟢","HOLD":"🟡","SELL":"🔴","STRONG_SELL":"🔴"}.get(rec, "")
-        risk_rows += (
-            f'<div style="margin-bottom:8px">'
-            f'<div style="display:flex;justify-content:space-between;margin-bottom:2px">'
-            f'<span style="font-size:0.8rem;font-weight:700;color:#111827">{dot} {h["ticker"]}</span>'
-            f'<span style="font-size:0.8rem;font-weight:800;color:{col}">{w:.1f}%</span>'
-            f'</div>'
-            f'<div style="height:4px;background:#F3F4F6;border-radius:99px">'
-            f'<div style="width:{bar:.0f}%;height:100%;background:{col};border-radius:99px"></div>'
-            f'</div></div>'
-        )
-
-    # ── Validation panel ──────────────────────────────────────────────────────
-    v5    = d.get("validation", {}).get(5, {})
-    acc5  = v5.get("directional_accuracy")
-    br5   = v5.get("brier_score")
-    n5    = v5.get("num_predictions", 0)
     if acc5 is not None:
-        acc_pct = acc5 * 100
-        acc_col = SUCCESS if acc_pct > 55 else (WARNING if acc_pct > 45 else DANGER)
-        br_col  = SUCCESS if (br5 or 1) < 0.22 else (WARNING if (br5 or 1) < 0.25 else DANGER)
-        warn    = ("⚠ Below coin-flip. Use as research, not signals."
-                   if acc_pct < 50 else "Limited edge — verify fundamentals first.")
-        val_html = (
-            f'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">'
-            f'<div style="text-align:center">'
-            f'<div style="font-size:1.15rem;font-weight:800;color:{acc_col}">{acc_pct:.0f}%</div>'
-            f'<div style="font-size:0.63rem;color:#9CA3AF">5d Accuracy</div></div>'
-            f'<div style="text-align:center">'
-            f'<div style="font-size:1.15rem;font-weight:800;color:{br_col}">{br5:.3f}</div>'
+        _acc_col = accuracy_color(acc5 * 100)
+        _br_col  = brier_color(br5 or 1.0)
+        _health_strip = (
+            f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
+            f'padding:12px 16px;margin-bottom:12px">'
+            f'<div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:8px">System Health</div>'
+            f'<div style="display:flex;gap:20px">'
+            f'<div><div style="font-size:1.05rem;font-weight:800;color:{_acc_col}">'
+            f'{acc5*100:.0f}%</div>'
+            f'<div style="font-size:0.63rem;color:#9CA3AF">5d accuracy</div></div>'
+            f'<div><div style="font-size:1.05rem;font-weight:800;color:{_br_col}">'
+            f'{br5:.3f}</div>'
             f'<div style="font-size:0.63rem;color:#9CA3AF">Brier</div></div>'
-            f'<div style="text-align:center">'
-            f'<div style="font-size:1.15rem;font-weight:800;color:#374151">{n5}</div>'
+            f'<div><div style="font-size:1.05rem;font-weight:800;color:#374151">{n5}</div>'
             f'<div style="font-size:0.63rem;color:#9CA3AF">Evaluated</div></div>'
             f'</div>'
-            f'<div style="font-size:0.72rem;color:#991B1B">{warn}</div>'
+            f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
+            f'→ <a href="/\U0001f3af Validation" target="_self">Full validation report</a></div>'
+            f'</div>'
         )
     else:
-        val_html = '<div style="font-size:0.8rem;color:#9CA3AF">No validation data yet.</div>'
+        _health_strip = (
+            f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
+            f'padding:12px 16px;margin-bottom:12px">'
+            f'<div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:6px">System Health</div>'
+            f'<div style="font-size:0.8rem;color:#9CA3AF">No validation data yet.</div>'
+            f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
+            f'→ <a href="/\U0001f3af Validation" target="_self">Full validation report</a></div>'
+            f'</div>'
+        )
 
     # ── Freshness rows ────────────────────────────────────────────────────────
     fresh_rows = ""
@@ -654,7 +634,7 @@ with right:
         ("Fundamentals", d.get("fund_latest"),  7),
         ("Holdings",     d.get("sync_date"),    7),
     ]:
-        ftxt, fcol = _freshness(date_str or "", warn_days)
+        ftxt, fcol = freshness_color(date_str or "", warn_days)
         dot = "✅" if fcol == SUCCESS else ("⚠️" if fcol == WARNING else "❌")
         fresh_rows += (
             f'<div style="display:flex;justify-content:space-between;padding:5px 0;'
@@ -744,27 +724,6 @@ with right:
         )
 
     # ── Render all as sticky block ────────────────────────────────────────────
-    _portfolio_panel = (
-        f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
-        f'padding:14px 16px;margin-bottom:12px">'
-        f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:0.08em;color:#2563EB;margin-bottom:10px">'
-        f'💼 Portfolio Concentration</div>'
-        f'{risk_rows}'
-        f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-        f'→ <a href="/Portfolio" target="_self">Full portfolio breakdown</a></div>'
-        f'</div>'
-    )
-    _val_panel = (
-        f'<div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:12px;'
-        f'padding:14px 16px;margin-bottom:12px">'
-        f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:0.08em;color:#991B1B;margin-bottom:10px">Prediction Reliability</div>'
-        f'{val_html}'
-        f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-        f'→ <a href="/Validation" target="_self">Full validation report</a></div>'
-        f'</div>'
-    )
     _fresh_panel = (
         f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
         f'padding:14px 16px;margin-bottom:12px">'
@@ -784,9 +743,8 @@ with right:
     )
     st.markdown(
         '<div style="position:sticky;top:62px">'
-        + _portfolio_panel
+        + _health_strip
         + opp_panel
-        + _val_panel
         + _fresh_panel
         + _macro_panel
         + '</div>',

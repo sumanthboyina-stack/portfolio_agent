@@ -1,17 +1,19 @@
 # Portfolio Agent
 
-A personal investment research assistant that runs a structured multi-analyst pipeline on your portfolio holdings and watchlist tickers. It pulls financial data from multiple public sources, runs a panel of four AI specialists through a weighted deliberation, stores predictions in a local SQLite database, and measures its own accuracy over time.
+A personal investment research assistant that runs a structured multi-analyst pipeline on your portfolio holdings and watchlist tickers. It pulls financial data from multiple public sources, runs a four-role AI analyst panel through a weighted deliberation, stores predictions in a local SQLite database, and measures its own accuracy over time.
 
 ---
 
 ## What it does
 
-- **Daily pipeline** — fetches fundamentals (EDGAR filings), sell-side research (Finnhub consensus), news (RSS + Finnhub), and macroeconomic data (FRED) for every ticker in your portfolio and watchlist
-- **APEX predictions** — four analyst roles (Fundamental, Research, Macro, News) score their domain 1–10; a dynamic weight engine blends the scores into a composite recommendation across multiple time horizons (5d, 21d, 63d, 250d)
-- **Event-driven triggers** — severity-3 events (earnings releases, SEC 8-K filings, major rating changes, material news) fire intraday predictions outside the normal batch schedule
+- **Daily pipeline** — fetches fundamentals (EDGAR XBRL + 8-K guidance), sell-side research (Finnhub consensus), news (RSS + Finnhub), short interest (FINRA, twice-monthly refresh), and macroeconomic data (FRED) for every ticker in your portfolio and watchlist
+- **APEX predictions** — four analyst roles (Fundamental, Research, Macro, News) each score their domain 1–10; a dynamic weight engine blends the scores into a composite recommendation across multiple time horizons (5d, 21d, 63d, 250d)
+- **Event-driven triggers** — material news (severity ≥ 3, detected from the news filter log) fires intraday predictions outside the normal batch schedule. Earnings, SEC 8-K, rating-change, and macro-event detectors are wired into the pipeline but not yet implemented (they return empty lists today)
+- **8-K guidance extraction** — each fundamentals run fetches the latest EX-99.1 exhibit from SEC EDGAR, extracts the forward guidance/outlook section, and passes it into the Fundamental analyst's prompt. LLM outputs a `guidance_direction` (raised / maintained / lowered / withdrawn / none); text and direction are stored in the `fundamentals` table
+- **Short interest (FINRA)** — settlement dates are computed deterministically (mid-month + end-of-month, with an 8-business-day publication lag). When new data is due, one paginated FINRA API call fetches the full file; rows are filtered to your ticker universe and stored in `short_interest`. Trend direction and days-to-cover are computed in Python and injected into the Research prompt
 - **Prediction history** — every recommendation is written to SQLite with the start price; outcome is evaluated when the horizon matures using actual closing prices
 - **Validation layer** — nightly job computes directional accuracy, high/low conviction accuracy, Brier score, and log-loss; results are broken down by horizon, ticker, and model
-- **Streamlit dashboard** — browser UI for browsing all database tables, reading predictions, viewing the run schedule, chatting with the agent, and monitoring validation metrics
+- **Streamlit dashboard** — seven-page browser UI covering database tables, predictions, run schedule, portfolio view, validation metrics, and an AI chat interface
 
 ## What it does NOT do
 
@@ -44,13 +46,14 @@ Copy `.env.example` to `.env` and fill in the values you want to use. Keys marke
 | Variable | Required | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | **Yes** | Claude models (Sonnet) for APEX predictions |
-| `OPENAI_API_KEY` | Recommended | GPT-4o fallback if Claude times out; APEX randomly selects between the two |
+| `OPENAI_API_KEY` | Recommended | GPT-4o for APEX predictions; APEX randomly selects between Claude Sonnet and GPT-4o each run |
 | `FRED_API_KEY` | Recommended | Macroeconomic data (rates, inflation, labor, credit). Free at [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 | `FINNHUB_API_KEY` | Recommended | Sell-side consensus, price targets, news, SEC filings. Free tier available at [finnhub.io](https://finnhub.io) |
+| `FINRA_API_KEY` | Recommended | Short interest data (FINRA Datasets API). Bearer token; twice-monthly pulls |
 | `EDGAR_USER_AGENT` | Optional | SEC EDGAR filing pull (`Firstname Lastname email@domain.com` format) |
-| `GROQ_API_KEY` | Optional | Additional model provider via LiteLLM |
-| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Optional | Gemini models via LiteLLM |
-| `CEREBRAS_API_KEY` | Optional | Additional model provider via LiteLLM |
+| `GROQ_API_KEY` | Optional | Additional model provider in the multi-model failover chain |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Optional | Gemini models; first in the failover chain |
+| `CEREBRAS_API_KEY` | Optional | Additional model provider in the failover chain |
 | `OPENROUTER_API_KEY` | Optional | Multi-provider routing via LiteLLM |
 
 ### Configure your portfolio and watchlist
@@ -78,7 +81,7 @@ Edit `config/watchlist.yaml` to add tickers you want tracked but don't hold. Gro
 ### Run the daily pipeline manually
 
 ```bash
-./run_daily.sh          # full pipeline: EDGAR check + fundamentals + research + news + APEX
+./run_daily.sh          # full morning batch
 python main.py --daily  # same, inline
 ```
 
@@ -99,12 +102,13 @@ The web UI Schedule page can also trigger manual runs directly from the browser.
 
 | Source | What it provides | Notes |
 |---|---|---|
-| **Yahoo Finance** (`yfinance`) | VIX, S&P 500, real-time/delayed quotes, historical prices for validation | 15–20 min delayed during market hours |
+| **Yahoo Finance** (`yfinance`) | VIX, S&P 500, real-time/delayed quotes, historical prices for validation, short interest fallback (`sharesShort`, `shortRatio`) | 15–20 min delayed during market hours |
 | **FRED** (St. Louis Fed) | Fed funds rate, Treasury yields (10Y/2Y/3M), CPI, Core CPI, PCE, PPI, NFP, unemployment, jobless claims, HY credit spread (ICE BofA), DXY | 1-hour in-process cache; free API key required |
-| **Finnhub** | Sell-side consensus ratings (1=Strong Buy … 5=Strong Sell), analyst price targets, SEC 8-K/10-K/10-Q filings, news headlines, economic calendar | Free tier has rate limits; some features require paid plan |
-| **EDGAR** (SEC.gov) | 10-K and 10-Q filing detection and financial data extraction | Requires `EDGAR_USER_AGENT` in `.env` |
+| **Finnhub** | Sell-side consensus ratings (1=Strong Buy … 5=Strong Sell), analyst price targets, news headlines, economic calendar | Free tier has rate limits; some features require paid plan |
+| **EDGAR** (SEC.gov) | 10-K / 10-Q XBRL financial data; latest 8-K EX-99.1 exhibit for forward guidance extraction | Requires `EDGAR_USER_AGENT` in `.env` |
+| **FINRA Datasets API** | Short interest by settlement date: shares short, previous shares, % change, avg daily volume, days-to-cover | Bearer token (`FINRA_API_KEY`); ~twice-monthly refresh; yfinance used as fallback |
 | **RSS feeds** | Supplemental news headlines per ticker | No API key required |
-| **Computed / hard-coded** | FOMC meeting dates (2026), NFP/CPI/PCE estimated release dates | Deterministic; updated manually each year |
+| **Computed / hard-coded** | FOMC meeting dates (2026), NFP/CPI/PCE estimated release dates, FINRA settlement date calendar | Deterministic; updated manually each year |
 
 All data is stored locally in `data/portfolio.db` (SQLite). Nothing is sent to external servers except the API calls listed above.
 
@@ -112,13 +116,15 @@ All data is stored locally in `data/portfolio.db` (SQLite). Nothing is sent to e
 
 ## Pipeline phases
 
-Each daily run executes in sequence:
+Each morning run executes in sequence:
 
-1. **EDGAR check** — detects new 10-K/10-Q filings; triggers a fundamentals refresh if a new filing is found
-2. **Fundamentals** — extracts revenue, net margin, FCF, debt/equity from the latest filing; stores in `fundamentals` table
-3. **Research** — fetches Finnhub analyst consensus, price targets, and recent rating changes; stores in `research` table
-4. **News** — pulls and triages headlines from RSS + Finnhub; runs an LLM news-scoring pass on material items; stores in `news_daily` table
-5. **APEX** — runs the 4-analyst panel for each portfolio ticker on today's scheduled horizons; stores recommendations in `predictions` table
+1. **News** — pulls and triages headlines from RSS + Finnhub; runs a batched LLM news-scoring pass on material items; stores in `news_daily` table
+2. **Short Interest Check** — computes the current FINRA settlement date (deterministic, no network); if new data is due, pulls it in one paginated batch and writes to `short_interest` table; otherwise skips (cheap single DB query)
+3. **Research** — fetches Finnhub analyst consensus, price targets, and recent rating changes; injects pre-computed short interest trend summary per ticker; stores in `research` table
+4. **Fundamentals** — extracts revenue, net margin, FCF, debt/equity from the latest EDGAR filing; fetches the latest 8-K EX-99.1 exhibit and extracts the guidance/outlook section; passes guidance text and financial data together to the LLM, which outputs `guidance_direction`; stores in `fundamentals` table
+5. **APEX** — runs the 4-analyst panel for each portfolio ticker on today's scheduled horizons; reads macro snapshot live at prediction time; stores recommendations in `predictions` table
+
+**Event detection** runs at the start of the APEX phase. `detect_material_news` reads the news filter log and fires event-driven predictions for high-severity items. `detect_earnings`, `detect_sec_8k`, `detect_rating_changes`, and `detect_macro_events` are implemented as stubs and return no events today.
 
 The **Macro snapshot** is pulled live at APEX time (not cached to disk) and injected into each ticker's context alongside the stored fundamentals/research/news.
 
@@ -135,7 +141,7 @@ Predictions are generated on a cadence keyed to the horizon length, not every da
 | 63 days | ~1 quarter | First trading day of each month |
 | 250 days | ~1 year | First trading day of each quarter |
 
-**Event-driven overrides** — severity-3 events (major earnings beat/miss, material 8-K, significant rating change, macro surprise) fire an immediate intraday APEX run regardless of the schedule. Watchlist tickers are promoted to portfolio treatment for that run.
+**Event-driven overrides** — material news events above the severity threshold fire an immediate intraday APEX run regardless of the schedule. Watchlist tickers are promoted to portfolio treatment for that run.
 
 Batch times (CST): Morning 06:30 · Intraday checks 11:00, 13:00, 15:00 · Evening 17:30.
 
@@ -143,15 +149,51 @@ Batch times (CST): Morning 06:30 · Intraday checks 11:00, 13:00, 15:00 · Eveni
 
 ## Model providers
 
-APEX predictions use a randomly selected primary model with automatic fallback:
+### APEX predictions
+
+APEX selects a primary model randomly each run and falls back to the other on timeout (90 s) or error. If both fail, the ticker is skipped — no placeholder is written to the database.
 
 | Role | Primary | Fallback |
 |---|---|---|
 | APEX prediction | Claude Sonnet (Anthropic) | GPT-4o (OpenAI) |
 
-Selection is random per run; if the chosen model times out (90 s) or errors, the other model is tried. If both fail, the ticker is skipped for that run — no placeholder is written to the database.
+### Batch pipeline phases (fundamentals, research, news)
 
-Other pipeline phases (fundamentals scoring, news scoring, research summarization) use lighter models configured via `.env`. The macro snapshot, weight computation, and validation are fully deterministic — no LLM is involved.
+These phases use a multi-model failover chain. Models are tried in order until one succeeds:
+
+**Gemini → Groq → Cerebras → OpenRouter → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet**
+
+Keys for unused providers can be omitted; those models are skipped. The macro snapshot, dynamic weight computation, short interest trend computation, and validation are fully deterministic — no LLM is involved.
+
+---
+
+## Short interest (FINRA)
+
+FINRA publishes settlement-date short interest data twice per month: approximately the 15th and the last business day of each month. Data is available ~8 business days after the settlement date.
+
+**How it works:**
+
+1. At the start of each pipeline run, `_latest_settlement_date()` computes the most recently published settlement date using only calendar math — no network call
+2. If that date is already in the local DB (`short_interest_meta`), the step is skipped in milliseconds
+3. If new data is due, one paginated FINRA API call downloads the full file (~8,000 rows); rows are filtered to your ticker universe in Python and written to `short_interest`
+4. Trend direction (rising / stable / falling) and squeeze pressure (high / elevated / low) are computed from the last 2–3 settlement records entirely in Python — no LLM arithmetic
+5. The compact summary is injected into each ticker's Research prompt block; the Research analyst scores short interest as a signal alongside consensus and price targets
+6. **Fallback**: if the DB has no history for a ticker (e.g. first run before a refresh cycle fires), `yfinance` `Ticker.info` provides `sharesShort`, `shortRatio`, and `shortPercentOfFloat` with no new dependencies
+
+---
+
+## 8-K guidance extraction (EDGAR)
+
+Each fundamentals run calls `get_earnings_guidance(ticker)` in `tools/edgar.py`:
+
+1. Fetches the latest 8-K accession number from `data.sec.gov/submissions/{CIK}.json`
+2. Parses the filing folder HTML at `www.sec.gov/Archives/edgar/data/` to find the EX-99.1 exhibit filename
+3. Downloads the exhibit, strips HTML tags, decodes entities, and extracts the forward guidance/outlook section using priority-ordered regex patterns (most specific phrases matched first)
+4. The guidance text (capped at 2,500 characters) is appended to the fundamentals data block and passed to the LLM
+5. The LLM outputs `guidance_direction`: `"raised"` / `"maintained"` / `"lowered"` / `"withdrawn"` / `"none"`. A raise can add 1–2 points to `fundamental_score`; a lowered/withdrawn guidance subtracts 1–2 points from what trailing numbers alone would justify
+6. `guidance_text`, `guidance_date`, and `guidance_direction` are stored in the `fundamentals` table
+
+Note: some companies (e.g. Apple since 2020) do not provide quantitative quarterly guidance. In those cases the LLM sets `guidance_direction: "none"` and scores purely on trailing financials.
 
 ---
 

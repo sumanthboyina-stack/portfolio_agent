@@ -1,64 +1,68 @@
 categories:
   nasdaq_tech:
-  - NVDA
-  - MSFT
-  - AAPL
-  - AMD
-  - INTC
-  - ASML
-  - MU
-  - AMAT
-  - KLAC
-  - LRCX
-  - MRVL
-  - PANW
-  - CRWD
-  - FTNT
-  - ZS
-  - NET
-  - SNPS
-  - CDNS
-  - MCHP
-  - NXPI
-  - 'ON'
-  - MPWR
-  - ARM
-  - WDAY
-  - ADBE
-  - CRM
-  - ORCL
-  - NOW
-  - INTU
-  - QCOM
+    tier: core
+    tickers:
+    - NVDA
+    - MSFT
+    - AAPL
+    - AMD
+    - INTC
+    - ASML
+    - MU
+    - AMAT
+    - KLAC
+    - LRCX
+    - MRVL
+    - PANW
+    - CRWD
+    - FTNT
+    - ZS
+    - NET
+    - SNPS
+    - CDNS
+    - MCHP
+    - NXPI
+    - 'ON'
+    - MPWR
+    - ARM
+    - WDAY
+    - ADBE
+    - CRM
+    - ORCL
+    - NOW
+    - INTU
+    - QCOM
   growth:
-  - SHOP
-  - SQ
-  - PYPL
-  - ABNB
-  - UBER
-  - DDOG
-  - SNOW
-  - PLTR
-  - COIN
-  - RBLX
-  - HOOD
-  - SOFI
-  - AFRM
-  - RIVN
-  - NIO
-  - SMCI
-  - APP
-  - DUOL
-  - ROKU
-  - PINS
-  - SNAP
-  - SPOT
-  - TTD
-  - HUBS
-  - DASH
-  - SE
-  - UPST
-  - IONQ
+    tier: core
+    tickers:
+    - SHOP
+    - SQ
+    - PYPL
+    - ABNB
+    - UBER
+    - DDOG
+    - SNOW
+    - PLTR
+    - COIN
+    - RBLX
+    - HOOD
+    - SOFI
+    - AFRM
+    - RIVN
+    - NIO
+    - SMCI
+    - APP
+    - DUOL
+    - ROKU
+    - PINS
+    - SNAP
+    - SPOT
+    - TTD
+    - HUBS
+    - DASH
+    - SE
+    - UPST
+    - IONQ
 tickers:
 - NVDA
 - MSFT
@@ -127,3 +131,5 @@ tickers:
 - BMW
 - SPCX
 - IBM
+- AES
+- CU

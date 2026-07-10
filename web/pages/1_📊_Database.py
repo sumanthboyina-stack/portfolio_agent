@@ -159,10 +159,7 @@ def _to_local(utc_str: str) -> str:
         return (utc_str or "")[:19].replace("T", " ")
 
 
-def _conn():
-    c = sqlite3.connect(str(_DB))
-    c.row_factory = sqlite3.Row
-    return c
+from web.lib import db_conn as _conn
 
 
 def _count_for(table: str, date_col: str, date_from: str, date_to: str,

@@ -183,6 +183,28 @@ def get_options_data(ticker: str) -> str:
     })
 
 
+def get_short_interest(ticker: str) -> str:
+    """
+    Return short interest data for a ticker.
+
+    Reads from the local FINRA DB first (rich trend history). Falls back to
+    yfinance Ticker.info when no FINRA data has been loaded yet (e.g. first
+    run before the twice-monthly refresh fires).
+
+    Args:
+        ticker: Stock ticker symbol.
+
+    Returns:
+        JSON string with current_shares, days_to_cover, trend, squeeze_pressure,
+        and settlement_date (or source="yfinance" when using the fallback).
+    """
+    try:
+        from portfolio_agent.tools.finra import get_short_interest as _get_si
+        return json.dumps(_get_si(ticker))
+    except Exception as exc:
+        return json.dumps({"ticker": ticker.upper(), "available": False, "error": str(exc)})
+
+
 def get_analyst_targets(ticker: str) -> str:
     """
     Return analyst price targets and recommendation consensus from yfinance.

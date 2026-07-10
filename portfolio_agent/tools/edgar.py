@@ -1,7 +1,9 @@
 """SEC EDGAR tools — fetches financial statements and filings."""
 
+import html
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -125,6 +127,110 @@ def get_cash_flow(ticker: str) -> str:
     return json.dumps(result)
 
 
+# Patterns tried in priority order — first match wins.
+_GUIDANCE_PATTERNS = [
+    # Specific guidance-block intros (highest signal — appear just before the numbers)
+    re.compile(r"providing the following guidance", re.IGNORECASE),
+    re.compile(r"(our|the company'?s?)\s+(fiscal|q[1-4]|second|third|fourth|first).{0,40}(guidance|outlook)", re.IGNORECASE),
+    re.compile(r"(raises?|lowers?|reaffirms?|narrows?|updates?)\s+(its\s+)?(full.year|fiscal|annual|quarterly)\s+(guidance|outlook|forecast)", re.IGNORECASE),
+    # Section headers (moderate signal)
+    re.compile(r"\n\s*(Financial Outlook|Business Outlook|Outlook|Guidance)\s*\n", re.IGNORECASE),
+    re.compile(r"(full.year \d{4}|fiscal \d{4} guid|q[1-4] \d{4} guid)", re.IGNORECASE),
+]
+
+
+def _extract_guidance_section(text: str, max_chars: int = 3000) -> str:
+    """Extract the Outlook/Guidance section from a press release; fall back to head."""
+    for pat in _GUIDANCE_PATTERNS:
+        m = pat.search(text)
+        if m:
+            start = max(0, m.start() - 100)
+            return text[start: start + max_chars].strip()
+    return text[:max_chars].strip()
+
+
+def get_earnings_guidance(ticker: str, cik_map: dict[str, str] | None = None) -> dict:
+    """
+    Fetch the EX-99.1 press-release text from the latest 8-K for *ticker* and
+    return the guidance / outlook section (≤ 3 000 chars).
+
+    Args:
+        ticker:  Stock ticker symbol.
+        cik_map: Optional pre-loaded ticker→CIK dict (avoids a redundant download).
+
+    Returns:
+        {ticker, guidance_text, guidance_date, filing_accession}
+        or {ticker, guidance_text: None, error: str} on failure.
+    """
+    ticker  = ticker.upper()
+    cik     = ((cik_map or {}).get(ticker)) or _cik_for_ticker(ticker)
+    if not cik:
+        return {"ticker": ticker, "guidance_text": None, "error": "no_cik"}
+    cik_int = int(cik)
+
+    # ── Find the latest 8-K ────────────────────────────────────────────────────
+    try:
+        sub = requests.get(f"{_BASE}/submissions/CIK{cik}.json",
+                           headers=_HEADERS, timeout=15)
+        sub.raise_for_status()
+        recent     = sub.json().get("filings", {}).get("recent", {})
+        forms      = recent.get("form", [])
+        dates      = recent.get("filingDate", [])
+        accessions = recent.get("accessionNumber", [])
+
+        latest_acc  = None
+        latest_date = None
+        for form, dt, acc in zip(forms, dates, accessions):
+            if form == "8-K":
+                latest_acc  = acc
+                latest_date = dt
+                break
+        if not latest_acc:
+            return {"ticker": ticker, "guidance_text": None, "error": "no_8k"}
+    except Exception as exc:
+        return {"ticker": ticker, "guidance_text": None, "error": str(exc)}
+
+    # ── Filing folder listing → EX-99.1 filename ──────────────────────────────
+    # EDGAR doesn't expose a JSON document index; parse the HTML folder listing.
+    acc_nodash = latest_acc.replace("-", "")
+    folder_base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}"
+    _EX99_RE = re.compile(
+        r'href="(/Archives/edgar/data/[^"]*(?:ex[\-_]?99[^"]*|EX[\-_]?99[^"]*)\.htm[^"]*)"',
+        re.IGNORECASE,
+    )
+    try:
+        folder = requests.get(f"{folder_base}/", headers=_HEADERS, timeout=15)
+        folder.raise_for_status()
+        matches = _EX99_RE.findall(folder.text)
+        if not matches:
+            return {"ticker": ticker, "guidance_text": None,
+                    "guidance_date": latest_date, "error": "no_ex991"}
+        exhibit_url = f"https://www.sec.gov{matches[0]}"
+    except Exception as exc:
+        return {"ticker": ticker, "guidance_text": None, "error": str(exc)}
+
+    # ── Fetch, strip HTML, extract guidance section ────────────────────────────
+    try:
+        doc = requests.get(exhibit_url, headers=_HEADERS, timeout=20)
+        doc.raise_for_status()
+        text = doc.text
+        if re.search(r"<html|<body", text, re.IGNORECASE):
+            text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        return {
+            "ticker":           ticker,
+            "guidance_text":    _extract_guidance_section(text),
+            "guidance_date":    latest_date,
+            "filing_accession": latest_acc,
+        }
+    except Exception as exc:
+        return {"ticker": ticker, "guidance_text": None,
+                "guidance_date": latest_date, "error": str(exc)}
+
+
 def get_sec_filings(ticker: str, form_type: str = "10-K", limit: int = 5) -> str:
     """
     Return the most recent SEC filings of a given form type.
@@ -228,12 +334,17 @@ def get_fundamentals_bundle(ticker: str, cik_map: dict[str, str]) -> dict:
     except Exception:
         pass
 
+    # ── 8-K / EX-99.1 guidance section ──────────────────────────────────────
+    guidance = get_earnings_guidance(ticker, cik_map)
+
     return {
-        "ticker":     ticker,
-        "latest_10k": latest_10k,
-        "income":     income,
-        "balance":    balance,
-        "cashflow":   cashflow,
+        "ticker":        ticker,
+        "latest_10k":   latest_10k,
+        "income":        income,
+        "balance":       balance,
+        "cashflow":      cashflow,
+        "guidance_text": guidance.get("guidance_text"),
+        "guidance_date": guidance.get("guidance_date"),
     }
 
 

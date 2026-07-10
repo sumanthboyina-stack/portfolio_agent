@@ -45,6 +45,66 @@ PRED_COLORS: dict[str, tuple[str, str]] = {
 }
 
 
+# ── Shared color utilities ────────────────────────────────────────────────────
+
+def score_color(score) -> str:
+    """Return a color token for a 1–10 analyst score."""
+    if score is None:
+        return NEUTRAL
+    try:
+        v = float(score)
+    except (TypeError, ValueError):
+        return NEUTRAL
+    if v >= 7:
+        return SUCCESS
+    if v >= 5:
+        return WARNING
+    return DANGER
+
+
+def accuracy_color(pct: float) -> str:
+    """Return a color token for directional accuracy (0–100)."""
+    if pct > 55:
+        return SUCCESS
+    if pct > 45:
+        return WARNING
+    return DANGER
+
+
+def brier_color(score: float) -> str:
+    """Return a color token for Brier score (lower is better; 0.25 baseline)."""
+    if score < 0.22:
+        return SUCCESS
+    if score < 0.25:
+        return WARNING
+    return DANGER
+
+
+def concentration_color(weight_pct: float) -> str:
+    """Return a color token for portfolio concentration %."""
+    if weight_pct > 20:
+        return DANGER
+    if weight_pct > 15:
+        return WARNING
+    return PRIMARY
+
+
+def freshness_color(date_str, warn_days: int = 3):
+    """Return (display_text, color) for a data freshness date string."""
+    from datetime import datetime as _dt
+    if not date_str:
+        return "missing", DANGER
+    try:
+        n = (_dt.now() - _dt.fromisoformat(str(date_str)[:10])).days
+    except Exception:
+        return str(date_str), NEUTRAL
+    if n == 0:
+        return "today", SUCCESS
+    if n <= warn_days:
+        return f"{n}d ago", WARNING
+    return f"{n}d ago", DANGER
+
+
 # ── Global CSS injection ───────────────────────────────────────────────────────
 
 def inject_global_css() -> None:
@@ -569,20 +629,23 @@ def inject_global_css() -> None:
 
 # ── Top navigation bar ────────────────────────────────────────────────────────
 
-_NAV_ITEMS = [
-    ("dashboard",   "🏠", "Dashboard",    "app.py"),
-    ("chat",        "🤖", "APEX Chat",    "pages/4_🤖_Chat.py"),
-    ("predictions", "🔮", "Predictions",  "pages/7_🔮_Predictions.py"),
-    ("database",    "📊", "Database",     "pages/1_📊_Database.py"),
-    ("schedule",    "🗓️", "Schedule",   "pages/2_🗓️_Schedule.py"),
-    ("watchlist",   "📋", "Watchlist",    "pages/3_📋_Watchlist.py"),
-    ("portfolio",   "💼", "Portfolio",    "pages/5_💼_Portfolio.py"),
-    ("validation",  "🎯", "Validation",   "pages/6_🎯_Validation.py"),
+_NAV_PRIMARY = [
+    ("dashboard",   "🏠", "Today",         "app.py"),
+    ("predictions", "🔮", "Predictions",   "pages/7_🔮_Predictions.py"),
+    ("portfolio",   "💼", "Portfolio",     "pages/5_💼_Portfolio.py"),
+    ("chat",        "🤖", "Chat",          "pages/4_🤖_Chat.py"),
 ]
+_NAV_SECONDARY = [
+    ("validation",  "🎯", "Validation",    "pages/6_🎯_Validation.py"),
+    ("watchlist",   "📋", "Watchlist",     "pages/3_📋_Watchlist.py"),
+    ("schedule",    "🗓️", "Schedule",    "pages/2_🗓️_Schedule.py"),
+    ("database",    "📊", "Database",      "pages/1_📊_Database.py"),
+]
+_NAV_ITEMS = _NAV_PRIMARY + _NAV_SECONDARY  # backward compat
 
 
 def top_nav(active: str = "dashboard") -> None:
-    """Render a sticky top navigation bar with tab-style links."""
+    """Render a sticky top nav: 4 primary tabs + visual divider + 4 secondary tabs."""
     st.markdown(
         '<div class="top-nav-wrap">'
         '<div class="nav-brand">📈 Portfolio Intelligence</div>'
@@ -590,12 +653,31 @@ def top_nav(active: str = "dashboard") -> None:
         unsafe_allow_html=True,
     )
 
-    cols = st.columns([1.4] * len(_NAV_ITEMS), gap="small")
-    for col, (key, icon, label, path) in zip(cols, _NAV_ITEMS):
-        with col:
+    # 4 primary (wider) | thin divider | 4 secondary (narrower)
+    cols = st.columns([1.8, 1.8, 1.8, 1.8, 0.3, 1.3, 1.3, 1.3, 1.3], gap="small")
+
+    for i, (key, icon, label, path) in enumerate(_NAV_PRIMARY):
+        with cols[i]:
             if key == active:
                 st.markdown(
                     f'<div class="nav-tab active">{icon} <span>{label}</span></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.page_link(path, label=f"{icon} {label}", use_container_width=True)
+
+    with cols[4]:
+        st.markdown(
+            '<div style="width:1px;background:#E5E7EB;height:30px;margin:14px auto"></div>',
+            unsafe_allow_html=True,
+        )
+
+    for i, (key, icon, label, path) in enumerate(_NAV_SECONDARY):
+        with cols[5 + i]:
+            if key == active:
+                st.markdown(
+                    f'<div class="nav-tab active" style="font-size:0.875rem">'
+                    f'{icon} <span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
             else:
