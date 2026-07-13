@@ -34,6 +34,7 @@ sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
     inject_global_css, top_nav, badge_html, rec_badge_html, score_bar_html,
+    ticker_label,
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, NEUTRAL_LIGHT,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
 )
@@ -666,7 +667,7 @@ if _has_message and (_has_ticker or _no_ticker):
                         gap_st.update(label="⚠️ Data gap fill failed", state="error")
                         st.warning(f"Live agent error (continuing with cached data): {exc}", icon="⚠️")
 
-            st.markdown(f"#### 🧠 Panel Deliberation -- `{ticker}`")
+            st.markdown(f"#### 🧠 Panel Deliberation -- `{ticker_label(ticker)}`")
 
             # ── Stream execution ──────────────────────────────────────────────
             q: Queue = Queue()

@@ -9,8 +9,8 @@ holdings:
   account: Individual - TOD
   broker: fidelity
 - ticker: AJG
-  shares: 229.5324
-  avg_cost: 242.31
+  shares: 203.1547
+  avg_cost: 245.5
   account: Individual - TOD
   broker: fidelity
 - ticker: AMZN
@@ -61,8 +61,8 @@ holdings:
   account: Vanguard
   broker: vanguard
 - ticker: MU
-  shares: 4.5
-  avg_cost: 1079.18
+  shares: 14.5
+  avg_cost: 970.48
   account: Individual - TOD
   broker: fidelity
 - ticker: NVDA

@@ -73,6 +73,35 @@ def _migrate(conn: sqlite3.Connection) -> None:
     migrate_columns(conn, "universe_tickers", [
         ("market_cap_category", "TEXT"),
     ])
+    _dedupe_and_constrain_signals(conn)
+
+
+def _dedupe_and_constrain_signals(conn: sqlite3.Connection) -> None:
+    """
+    One-time cleanup + guard: earlier versions of insert_signals() had no
+    uniqueness constraint, so re-screening the same tier twice in one day
+    (e.g. morning + intraday) silently accumulated duplicate rows per
+    (ticker, tier, signal_date) instead of replacing them. Keep only the
+    highest-scoring row per key, then add a unique index so it can't recur —
+    insert_signals() upserts against it going forward.
+    """
+    conn.execute("""
+        DELETE FROM screening_signals
+        WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY ticker, tier, signal_date
+                    ORDER BY score DESC, id DESC
+                ) AS rn
+                FROM screening_signals
+            )
+            WHERE rn = 1
+        )
+    """)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_unique "
+        "ON screening_signals(ticker, tier, signal_date)"
+    )
 
 
 # ── Upsert helpers ────────────────────────────────────────────────────────────
@@ -193,6 +222,10 @@ def insert_signals(rows: list[dict]) -> int:
             INSERT INTO screening_signals
                 (ticker, tier, signal_date, signals_json, score, promoted)
             VALUES (?, ?, ?, ?, ?, 0)
+            ON CONFLICT(ticker, tier, signal_date) DO UPDATE SET
+                signals_json = excluded.signals_json,
+                score        = excluded.score,
+                created_at   = datetime('now')
             """,
             [
                 (
@@ -207,6 +240,13 @@ def insert_signals(rows: list[dict]) -> int:
         )
         c.commit()
     return len(rows)
+
+
+def get_latest_signal_date() -> Optional[str]:
+    """Return the most recent signal_date in screening_signals, or None if empty."""
+    with _db() as c:
+        row = c.execute("SELECT MAX(signal_date) AS d FROM screening_signals").fetchone()
+    return row["d"] if row and row["d"] else None
 
 
 def get_signals(signal_date: str, min_score: float = 0) -> list[dict]:

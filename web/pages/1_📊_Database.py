@@ -16,7 +16,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    inject_global_css, page_header, section_title, top_nav,
+    inject_global_css, page_header, section_title, top_nav, ticker_label,
     SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, REC_STYLES,
 )
 
@@ -393,7 +393,7 @@ with tab1:
             if not row_matches.empty:
                 row = row_matches.iloc[0]
                 st.divider()
-                section_title(f"Detail — {ticker}", badge_text=row.get('filing_type',''), badge_color=PRIMARY)
+                section_title(f"Detail — {ticker_label(ticker)}", badge_text=row.get('filing_type',''), badge_color=PRIMARY)
                 dc1, dc2 = st.columns(2)
                 with dc1:
                     _detail_card("Financials", [
@@ -498,7 +498,7 @@ with tab2:
             if not row_matches.empty:
                 row = row_matches.iloc[0]
                 st.divider()
-                section_title(f"Detail — {ticker}  {dt}", badge_color=PRIMARY)
+                section_title(f"Detail — {ticker_label(ticker)}  {dt}", badge_color=PRIMARY)
                 sent = (row.get("sentiment") or "").upper()
                 sent_col = SUCCESS if sent == "POSITIVE" else (DANGER if sent == "NEGATIVE" else NEUTRAL)
                 score = row.get("sentiment_score")
@@ -622,7 +622,7 @@ with tab3:
             if not row_matches.empty:
                 row = row_matches.iloc[0]
                 st.divider()
-                section_title(f"Detail — {ticker}", badge_color=PRIMARY)
+                section_title(f"Detail — {ticker_label(ticker)}", badge_color=PRIMARY)
                 dc1, dc2 = st.columns(2)
                 with dc1:
                     _detail_card("Broker Data", [
@@ -752,7 +752,7 @@ with tab4:
                 st.divider()
                 rec = row.get("recommendation", "HOLD")
                 col_hex, _, label = REC_STYLES.get(rec, (NEUTRAL, "#F1F5F9", rec))
-                section_title(f"Detail — {ticker}", badge_text=label, badge_color=col_hex)
+                section_title(f"Detail — {ticker_label(ticker)}", badge_text=label, badge_color=col_hex)
 
                 xc1, xc2, xc3 = st.columns(3)
                 with xc1:
@@ -890,7 +890,7 @@ with tab5:
                 row = row_m.iloc[0]
                 st.divider()
                 gl_icon = "🟢" if (row.get("gain_loss") or 0) >= 0 else "🔴"
-                section_title(f"Detail — {ticker}", badge_text=str(row.get("description",""))[:40], badge_color=PRIMARY)
+                section_title(f"Detail — {ticker_label(ticker)}", badge_text=str(row.get("description",""))[:40], badge_color=PRIMARY)
                 dc1, dc2 = st.columns(2)
                 with dc1:
                     _detail_card("Position", [

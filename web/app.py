@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from web.styles import (
-    inject_global_css, top_nav, section_title,
+    inject_global_css, top_nav, section_title, ticker_label,
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, PURPLE,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
     freshness_color, accuracy_color, brier_color,
@@ -231,9 +231,10 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
     hset = d.get("holding_set", set())
     hp   = d.get("hpreds", {})
 
-    def _item(priority, ticker, title, why, action_page):
+    def _item(priority, ticker, title, why, action_page, requires_action=True):
         items.append(dict(priority=priority, ticker=ticker,
-                          title=title, why=why, action_page=action_page))
+                          title=title, why=why, action_page=action_page,
+                          requires_action=requires_action))
 
     # ── CRITICAL ─────────────────────────────────────────────────────────────
     seen_ev: set = set()
@@ -288,7 +289,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
               f"Below coin-flip baseline (50%). Brier score {v5.get('brier_score',0):.3f} "
               f"vs 0.250 baseline. Treat 5-day signals as research prompts only — "
               f"not trade signals. See Validation for breakdown by ticker and horizon.",
-              "validation")
+              "validation", requires_action=False)
 
     if d.get("data_stale"):
         sd = d.get("sync_date", "unknown")
@@ -304,7 +305,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
                   f"Concentration {h['weight_pct']:.1f}% — approaching single-name limit",
                   "No immediate action required. Monitor — further appreciation will push "
                   "this past 20%.",
-                  "portfolio")
+                  "portfolio", requires_action=False)
 
     for ev in d.get("events", []):
         if (ev["severity"] == 3 and ev["ticker"] in hset
@@ -315,7 +316,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
                   ev.get("summary") or f"Material event: {ev['event_type'].replace('_',' ')}",
                   f"Portfolio weight {w:.1f}%. APEX already processed this — check the updated "
                   f"prediction on the Predictions page.",
-                  "predictions")
+                  "predictions", requires_action=False)
 
     # ── OPPORTUNITY ───────────────────────────────────────────────────────────
     for t, p in hp.items():
@@ -382,6 +383,16 @@ PAGE_MAP = {
     "predictions": "pages/7_🔮_Predictions.py",
     "portfolio":   "pages/5_💼_Portfolio.py",
     "validation":  "pages/6_🎯_Validation.py",
+}
+
+# Streamlit's actual page URL is the filename with the leading number, the
+# emoji, and their separators all stripped — NOT "emoji + space + Name" and
+# NOT "emoji_Name". e.g. "6_🎯_Validation.py" resolves to "/Validation".
+PAGE_URL = {
+    "chat":        "Chat",
+    "predictions": "Predictions",
+    "portfolio":   "Portfolio",
+    "validation":  "Validation",
 }
 
 
@@ -491,6 +502,16 @@ with left:
     if not queue:
         st.success("Nothing requires attention today.")
     else:
+        n_action = sum(1 for i in queue if i["requires_action"])
+        n_fyi    = len(queue) - n_action
+        st.markdown(
+            f'<div style="font-size:0.8rem;font-weight:600;color:#111827;'
+            f'margin-bottom:14px">'
+            f'{n_action} item{"s" if n_action != 1 else ""} need a decision, '
+            f'{n_fyi} {"are" if n_fyi != 1 else "is"} FYI</div>',
+            unsafe_allow_html=True,
+        )
+
         # ── Portfolio section ─────────────────────────────────────────────────
         st.markdown(
             '<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
@@ -512,21 +533,21 @@ with left:
                 f'{dot} {label} ({len(group)})</div>',
                 unsafe_allow_html=True,
             )
-            for idx, item in enumerate(group):
+            for item in group:
                 t = item.get("ticker")
-                ticker_tag = f"[{t}] " if t else ""
+                ticker_tag = f"[{ticker_label(t)}] " if t else ""
                 exp_label  = f"{ticker_tag}{item['title']}"
-                with st.expander(exp_label, expanded=(group_key == "critical" and idx == 0)):
+                with st.expander(exp_label, expanded=(group_key == "critical")):
                     st.markdown(
                         f'<div style="font-size:0.82rem;color:#374151;line-height:1.6">'
                         f'{item["why"]}</div>',
                         unsafe_allow_html=True,
                     )
-                    page = PAGE_MAP.get(item["action_page"])
-                    if page:
+                    url = PAGE_URL.get(item["action_page"])
+                    if url:
                         st.markdown(
                             f'<div style="font-size:0.75rem;color:#9CA3AF;margin-top:6px">'
-                            f'→ See: <a href="/{page.split("/")[-1].split("_",1)[-1].replace(".py","").replace("_"," ")}" '
+                            f'→ See: <a href="/{url}" '
                             f'target="_self">{item["action_page"].title()}</a></div>',
                             unsafe_allow_html=True,
                         )
@@ -556,7 +577,7 @@ with left:
             )
             for idx, item in enumerate(disc_group):
                 t = item.get("ticker")
-                ticker_tag = f"[{t}] " if t else ""
+                ticker_tag = f"[{ticker_label(t)}] " if t else ""
                 exp_label  = f"{ticker_tag}{item['title']}"
                 with st.expander(exp_label, expanded=(idx == 0)):
                     st.markdown(
@@ -564,11 +585,11 @@ with left:
                         f'{item["why"]}</div>',
                         unsafe_allow_html=True,
                     )
-                    page = PAGE_MAP.get(item["action_page"])
-                    if page:
+                    url = PAGE_URL.get(item["action_page"])
+                    if url:
                         st.markdown(
                             f'<div style="font-size:0.75rem;color:#9CA3AF;margin-top:6px">'
-                            f'→ See: <a href="/{page.split("/")[-1].split("_",1)[-1].replace(".py","").replace("_"," ")}" '
+                            f'→ See: <a href="/{url}" '
                             f'target="_self">{item["action_page"].title()}</a></div>',
                             unsafe_allow_html=True,
                         )
@@ -611,7 +632,7 @@ with right:
             f'<div style="font-size:0.63rem;color:#9CA3AF">Evaluated</div></div>'
             f'</div>'
             f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-            f'→ <a href="/\U0001f3af Validation" target="_self">Full validation report</a></div>'
+            f'→ <a href="/Validation" target="_self">Full validation report</a></div>'
             f'</div>'
         )
     else:
@@ -622,7 +643,7 @@ with right:
             f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:6px">System Health</div>'
             f'<div style="font-size:0.8rem;color:#9CA3AF">No validation data yet.</div>'
             f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-            f'→ <a href="/\U0001f3af Validation" target="_self">Full validation report</a></div>'
+            f'→ <a href="/Validation" target="_self">Full validation report</a></div>'
             f'</div>'
         )
 

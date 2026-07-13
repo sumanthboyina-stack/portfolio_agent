@@ -266,8 +266,18 @@ _COMPANY_NAMES: dict[str, str] = {
 
 
 def _cname(ticker: str) -> str:
-    """Return company name for display, or empty string if unknown."""
-    return _COMPANY_NAMES.get(ticker.upper(), "")
+    """Return company name for display, or empty string if unknown.
+
+    Prefers the curated short names above (nicer for display, disambiguates
+    share classes like GOOG/GOOGL); falls back to the SEC-registry lookup so
+    tickers outside the fixed watchlist (e.g. trending/discovered candidates)
+    still get a name.
+    """
+    curated = _COMPANY_NAMES.get(ticker.upper())
+    if curated:
+        return curated
+    from portfolio_agent.tools.company_names import get_company_name
+    return get_company_name(ticker) or ""
 
 
 # ── Pure helper functions ─────────────────────────────────────────────────────
@@ -1107,7 +1117,9 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             st.caption("Agent panel summary not available for this prediction.")
 
     # ── Historical predictions for this ticker ────────────────────────────────
-    with st.expander(f"📅 Historical Predictions — {drill_ticker}", expanded=False):
+    _drill_hist_name = _cname(drill_ticker)
+    _drill_hist_label = f"{drill_ticker} ({_drill_hist_name})" if _drill_hist_name else drill_ticker
+    with st.expander(f"📅 Historical Predictions — {_drill_hist_label}", expanded=False):
         hist_df = _load_ticker_history(drill_ticker)
         if hist_df.empty:
             st.info(f"No prediction history found for {drill_ticker}.", icon="📊")
@@ -1170,7 +1182,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         st.markdown(
             f'<div style="margin-top:8px;font-size:0.78rem;color:#64748B">'
             f'For full validation history, visit the '
-            f'<a href="/6_🎯_Validation" style="color:{PRIMARY}">Validation page</a>.</div>',
+            f'<a href="/Validation" style="color:{PRIMARY}">Validation page</a>.</div>',
             unsafe_allow_html=True,
         )
 

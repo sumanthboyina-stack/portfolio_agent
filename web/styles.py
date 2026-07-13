@@ -727,6 +727,21 @@ def section_title(text: str, badge_text: str = "", badge_color: str = PRIMARY) -
     )
 
 
+def ticker_label(ticker: str, max_len: int = 40) -> str:
+    """
+    Return "TICKER — Company Name" when the name is known (SEC-registered
+    companies), else just "TICKER" (ETFs, foreign ADRs, delisted tickers).
+    """
+    from portfolio_agent.tools.company_names import get_company_name
+
+    name = get_company_name(ticker)
+    if not name:
+        return ticker
+    if len(name) > max_len:
+        name = name[: max_len - 1].rstrip() + "…"
+    return f"{ticker} — {name}"
+
+
 def badge_html(text: str, color: str = PRIMARY, bg: str = PRIMARY_LIGHT,
                size: str = "0.78rem") -> str:
     return (

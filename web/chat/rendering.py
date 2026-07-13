@@ -22,7 +22,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    score_bar_html,
+    score_bar_html, ticker_label,
     REC_STYLES, SUCCESS, PRIMARY, WARNING, NEUTRAL, NEUTRAL_LIGHT,
 )
 
@@ -235,7 +235,7 @@ def _render_plan_card(plan: dict) -> None:
         f'<div style="background:white;border:1px solid #E2E8F0;border-radius:12px;'
         f'padding:16px 20px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">'
         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
-        f'<h4 style="margin:0;color:#0F172A;font-size:1rem">🗺️ Execution Plan -- <code>{ticker}</code></h4>'
+        f'<h4 style="margin:0;color:#0F172A;font-size:1rem">🗺️ Execution Plan -- <code>{ticker_label(ticker)}</code></h4>'
         f'</div>'
         f'{weight_badge}'
         f'{live_banner}{rows}'
@@ -444,7 +444,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         f'<div>'
         f'<span style="font-size:1.5rem;font-weight:800;color:{col}">{label}</span>'
         f'<span style="font-size:0.85rem;color:{NEUTRAL};margin-left:10px">'
-        f'{pred} · {_html.escape(str(data.get("ticker","")))}</span>'
+        f'{pred} · {_html.escape(ticker_label(str(data.get("ticker",""))))}</span>'
         f'<div style="margin-top:6px">{target_html}{horizon_html}</div>'
         f'</div>'
         f'<div style="text-align:right">'

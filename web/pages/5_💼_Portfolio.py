@@ -24,9 +24,11 @@ sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
     inject_global_css, page_header, section_title, badge_html, top_nav,
+    ticker_label,
     SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL,
     SUCCESS_LIGHT, WARNING_LIGHT, PRIMARY_LIGHT,
 )
+from portfolio_agent.tools.company_names import get_company_names
 
 _YAML_PATH = str(_ROOT / "config" / "portfolio.yaml")
 
@@ -301,12 +303,12 @@ else:
         pct_vals = [(v - base) / base * 100 if base else 0 for v in abs_vals]
         fig.add_trace(go.Scatter(
             x=dates, y=pct_vals,
-            name=ticker,
+            name=ticker_label(ticker, max_len=24),
             mode="lines",
             line=dict(color=PALETTE[i % len(PALETTE)], width=2, shape="spline", smoothing=0.4),
             customdata=abs_vals,
             hovertemplate=(
-                f"<b>{ticker}</b>  %{{x}}<br>"
+                f"<b>{ticker_label(ticker, max_len=30)}</b>  %{{x}}<br>"
                 "%{y:+.1f}%  ·  <b>$%{customdata:,.0f}</b>"
                 "<extra></extra>"
             ),
@@ -615,18 +617,23 @@ if all_holdings:
             unsafe_allow_html=True,
         )
 
+        holdings_names = get_company_names([h["ticker"] for h in display_holdings])
         for h in display_holdings:
             pnl = _pnl_html(h.get("cost_basis_total"), h.get("current_value"))
             broker_label = (h.get("broker") or "manual").title()
             acct_type = h.get("account_type") or ""
+            # Broker CSV import already provides a description for most rows;
+            # manually-added holdings don't have one, so fall back to the
+            # SEC-registry company name in that case.
+            desc_text = h.get("description") or holdings_names.get(h["ticker"].upper(), "")
 
             st.markdown(
                 f'<div style="display:grid;grid-template-columns:100px 220px 90px 100px 100px 110px 130px 90px;'
                 f'gap:8px;padding:10px 12px;background:white;border:1px solid #F1F5F9;'
                 f'border-radius:8px;margin-bottom:3px;font-size:0.85rem;align-items:center">'
                 f'<span style="font-weight:800;color:#0F172A">{h["ticker"]}</span>'
-                f'<span style="color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
-                f'{(h.get("description") or "")[:28]}</span>'
+                f'<span style="color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" '
+                f'title="{desc_text}">{desc_text[:28]}</span>'
                 f'<span>{_fmt_shares(h.get("shares"))}</span>'
                 f'<span>{_fmt_dollars(h.get("avg_cost"))}</span>'
                 f'<span>{_fmt_dollars(h.get("current_price"))}</span>'
