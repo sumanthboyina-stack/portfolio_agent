@@ -183,6 +183,21 @@ def get_tickers(
     return [r["ticker"] for r in rows if r["ticker"] not in exclude]
 
 
+def get_sectors(tickers: list[str]) -> dict[str, str]:
+    """Return {TICKER: sector} for whichever of *tickers* have a cached sector."""
+    if not tickers:
+        return {}
+    upper = [t.upper() for t in tickers]
+    ph = ",".join("?" * len(upper))
+    with _db() as c:
+        rows = c.execute(
+            f"SELECT ticker, sector FROM universe_tickers "
+            f"WHERE ticker IN ({ph}) AND sector IS NOT NULL",
+            upper,
+        ).fetchall()
+    return {r["ticker"]: r["sector"] for r in rows}
+
+
 def needs_refresh(index_name: str, max_age_days: int = 90) -> bool:
     """Return True if the index has never been fetched or was fetched more than max_age_days ago."""
     with _db() as c:

@@ -73,6 +73,18 @@ def _load() -> dict:
         d["data_stale"]    = oldest < stale10 if oldest else True
         d["sync_date"]     = oldest[:10] if oldest else None
 
+        # ── Risk/Technical flags (latest available) ─────────────────────────
+        try:
+            from portfolio_agent.tools.risk_flags_db import get_active_flags
+            # Latest available date, not strictly "today" — the dashboard may be
+            # opened before the morning batch finishes; yesterday's flags are
+            # still meaningfully current for something that changes this slowly.
+            d["risk_flags"] = [
+                f for f in get_active_flags(None) if f["ticker"] in d["holding_set"]
+            ]
+        except Exception:
+            d["risk_flags"] = []
+
         # ── Trigger events last 48 h ────────────────────────────────────────
         rows = c.execute("""
             SELECT ticker, event_type, severity, summary, detected_at, processed
@@ -183,6 +195,24 @@ def _load() -> dict:
         """).fetchone()
         d["last_run"] = dict(row) if row else None
 
+    # ── Newly promoted screener candidates (today's Discovered signals) ────────
+    try:
+        from portfolio_agent.tools.universe_db import get_latest_signal_date, get_signals
+        import yaml as _yaml
+        wl_path = _ROOT / "config" / "watchlist.yaml"
+        wl_tickers = set()
+        if wl_path.exists():
+            wl_data = _yaml.safe_load(wl_path.read_text()) or {}
+            wl_tickers = {str(t).upper() for t in wl_data.get("tickers", [])}
+        latest_sig_date = get_latest_signal_date()
+        if latest_sig_date:
+            sigs = get_signals(latest_sig_date, min_score=2)
+            d["discovered_signals"] = [s for s in sigs if s["ticker"] not in wl_tickers][:10]
+        else:
+            d["discovered_signals"] = []
+    except Exception:
+        d["discovered_signals"] = []
+
     return d
 
 
@@ -265,6 +295,47 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
                   "Single name above 20%. Consider whether the position sizing still matches "
                   "your original thesis. See the Portfolio page for full breakdown.",
                   "portfolio")
+
+    # Risk specialist flags — sector/issuer/correlation/beta dimensions the
+    # inline concentration check above doesn't cover (see risk_flags table,
+    # populated daily alongside APEX; decoupled from the weight engine).
+    seen_risk: set = set()
+    for rf in d.get("risk_flags", []):
+        if rf["source"] != "risk" or rf["ticker"] in seen_risk:
+            continue
+        seen_risk.add(rf["ticker"])
+        try:
+            rd = json.loads(rf.get("raw_json") or "{}")
+        except Exception:
+            rd = {}
+        bits = []
+        if (rd.get("sector_concentration_pct") or 0) > 25:
+            bits.append(f"{rd.get('sector','sector')} at {rd['sector_concentration_pct']:.0f}% of portfolio")
+        if (rd.get("issuer_concentration_pct") or 0) > 15:
+            peers = ", ".join(rd.get("issuer_peers") or [])
+            bits.append(f"issuer concentration {rd['issuer_concentration_pct']:.0f}%" + (f" (with {peers})" if peers else ""))
+        if abs(rd.get("beta_vs_spy") or 0) > 1.5:
+            bits.append(f"beta {rd['beta_vs_spy']:.2f} vs SPY")
+        detail = "; ".join(bits) if bits else (rf.get("summary") or "Risk specialist flagged this position")
+        _item("critical", rf["ticker"],
+              f"Risk flag — score {rf.get('score','?')}/10",
+              f"{detail}. {rd.get('summary','')}",
+              "chat")
+
+    # Technical specialist — bearish momentum on a held position
+    for rf in d.get("risk_flags", []):
+        if rf["source"] != "technical":
+            continue
+        try:
+            td = json.loads(rf.get("raw_json") or "{}")
+        except Exception:
+            td = {}
+        if td.get("momentum") == "BEARISH":
+            _item("watch", rf["ticker"],
+                  f"Bearish momentum — technical score {rf.get('score','?')}/10",
+                  f"{td.get('summary', 'Technical specialist flagged bearish momentum.')} "
+                  f"Ask Chat for the full technical breakdown before acting.",
+                  "chat")
 
     # ── WATCH ─────────────────────────────────────────────────────────────────
     seen_rc: set = set()
@@ -361,6 +432,84 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
               "predictions")
 
     return items
+
+
+def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
+    """
+    One ranked-by-urgency list of everything that changed, pulled from the
+    four places that used to scatter this: trigger events (dashboard),
+    recommendation changes (Predictions), screener discoveries (Watchlist),
+    and risk/technical flags. Meant to sit above everything else — the
+    "what fired, what's different, what needs a decision" glance.
+    """
+    hset = d.get("holding_set", set())
+    hmap = d.get("holding_map", {})
+    feed: list[dict] = []
+
+    def _add(urgency, icon, ticker, title, action_page):
+        feed.append(dict(urgency=urgency, icon=icon, ticker=ticker,
+                         title=title, action_page=action_page))
+
+    # ── Severity-3 news events ──────────────────────────────────────────────
+    for ev in d.get("events", []):
+        if ev["severity"] != 3:
+            continue
+        w = hmap.get(ev["ticker"], {}).get("weight_pct")
+        held_tag = f" · {w:.1f}% of portfolio" if w else ""
+        if not ev.get("processed"):
+            _add(100, "🔴", ev["ticker"],
+                 f"{ev.get('summary') or ev['event_type'].replace('_',' ')}{held_tag} — not yet processed",
+                 "chat")
+        else:
+            _add(55, "🟡", ev["ticker"],
+                 f"{ev.get('summary') or ev['event_type'].replace('_',' ')}{held_tag} — processed",
+                 "predictions")
+
+    # ── Recommendation changes (rating flips) ───────────────────────────────
+    for rc in d.get("rec_changes", []):
+        prev = rc.get("previous_prediction") or "—"
+        curr = rc.get("recommendation") or "—"
+        if curr in ("SELL", "STRONG_SELL"):
+            urgency = 92 if curr == "STRONG_SELL" else 85
+            icon = "🔴"
+        elif curr in ("BUY", "STRONG_BUY"):
+            urgency = 58 if curr == "STRONG_BUY" else 50
+            icon = "🟢"
+        else:
+            urgency = 40
+            icon = "🟡"
+        _add(urgency, icon, rc["ticker"],
+             f"{prev} → {curr} (conf {rc.get('confidence','?')}/10)",
+             "predictions")
+
+    # ── Risk / technical flags ──────────────────────────────────────────────
+    for rf in d.get("risk_flags", []):
+        try:
+            rd = json.loads(rf.get("raw_json") or "{}")
+        except Exception:
+            rd = {}
+        score = rf.get("score") or 0
+        if rf["source"] == "risk":
+            _add(70 + min(score, 10) * 2, "🟠", rf["ticker"],
+                 f"Risk flag — {rd.get('summary', rf.get('summary',''))[:90]}",
+                 "chat")
+        else:
+            _add(55, "🟠", rf["ticker"],
+                 f"Bearish momentum — {rd.get('summary', rf.get('summary',''))[:90]}",
+                 "chat")
+
+    # ── Newly promoted screener candidates ──────────────────────────────────
+    for sig in d.get("discovered_signals", []):
+        try:
+            fired = json.loads(sig.get("signals_json") or "[]")
+        except Exception:
+            fired = []
+        _add(30 + min(sig.get("score") or 0, 10) * 3, "🌟", sig["ticker"],
+             f"Discovered — score {sig.get('score','?')} ({', '.join(fired) or 'screener hit'})",
+             "chat")
+
+    feed.sort(key=lambda i: i["urgency"], reverse=True)
+    return feed[:limit]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -479,6 +628,43 @@ st.markdown(
     + '</div>',
     unsafe_allow_html=True,
 )
+
+
+# ── Unified "What Fired" feed — one ranked list, above everything else ────────
+# Replaces four scattered surfaces (dashboard events, Predictions rec changes,
+# Watchlist screener hits, risk flags) with one urgency-sorted list so the
+# "what fired, what's different, what needs a decision" glance takes one look,
+# not four page visits.
+
+_fired = _build_fired_feed(d)
+if _fired:
+    _fired_html = ""
+    for _f in _fired:
+        _url = PAGE_URL.get(_f["action_page"])
+        _link = (
+            f'<a href="/{_url}" target="_self" style="font-size:0.7rem;color:{PRIMARY};'
+            f'margin-left:auto;white-space:nowrap">→ {_f["action_page"].title()}</a>'
+            if _url else ""
+        )
+        _fired_html += (
+            f'<div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;'
+            f'border-bottom:1px solid #F1F5F9">'
+            f'<span style="font-size:0.9rem">{_f["icon"]}</span>'
+            f'<span style="font-weight:800;color:#111827;min-width:110px">'
+            f'{ticker_label(_f["ticker"]) if _f["ticker"] else "—"}</span>'
+            f'<span style="font-size:0.82rem;color:#374151;flex:1">{_f["title"]}</span>'
+            f'{_link}'
+            f'</div>'
+        )
+    st.markdown(
+        f'<div style="background:white;border:1px solid #E5E7EB;border-radius:12px;'
+        f'padding:12px 18px;margin-bottom:18px">'
+        f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.08em;color:#6B7280;margin-bottom:6px">⚡ What Fired — {len(_fired)} item(s), ranked by urgency</div>'
+        f'{_fired_html}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ── Two-column layout ─────────────────────────────────────────────────────────

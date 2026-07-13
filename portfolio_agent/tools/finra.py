@@ -30,7 +30,7 @@ from typing import Optional
 
 import requests
 
-_FINRA_KEY   = os.getenv("FINRA_API_KEY", "8c0350981679449685be")
+_FINRA_KEY   = os.getenv("FINRA_API_KEY", "")
 _BASE        = "https://api.finra.org/data/group"
 # "equityShortInterest" (OTC-only) was retired by FINRA in Sept 2022 — no longer
 # published. "consolidatedShortInterest" is the current dataset and covers

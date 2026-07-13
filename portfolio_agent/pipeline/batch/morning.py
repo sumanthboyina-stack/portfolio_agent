@@ -105,17 +105,40 @@ async def run_batch_morning(
 
     log.info("\n── Phase 4: APEX Predictions ───────────────────────────────────", event_type="phase_start")
 
+    # restricted_list.yaml's pipeline_skip "phases: [all]" only ever covered
+    # {news, research, fundamentals} in pipeline_skip.py — APEX and the
+    # Risk/Technical phase never checked it, so tickers marked "removed from
+    # daily run" (e.g. GRFXY, RIVN) kept getting full daily analysis anyway.
+    from portfolio_agent.tools.pipeline_skip import is_all_phases_skipped
+    _apex_skip = [t for t in portfolio_tickers if is_all_phases_skipped(t)]
+    apex_tickers = [t for t in portfolio_tickers if t not in _apex_skip]
+    if _apex_skip:
+        log.info(
+            f"  [restricted/apex] skipping {len(_apex_skip)}: {', '.join(sorted(_apex_skip))}",
+            event_type="restricted_skip",
+        )
+
     if force_all:
         # Legacy behaviour: all portfolio tickers + trending, all scheduled horizons
         log.info("  [force-all] Bypassing event-driven cadence.", event_type="info")
-        all_apex = list(dict.fromkeys(portfolio_tickers + trending))
+        all_apex = list(dict.fromkeys(apex_tickers + trending))
         await _run_daily_apex(all_apex, tracker=tracker)
     else:
         await _run_morning_apex_event_driven(
-            portfolio_tickers, all_tickers, trending, tracker, log,
+            apex_tickers, all_tickers, trending, tracker, log,
         )
 
     GEMINI_COUNTER.print_stats(prefix=" (end of morning batch)")
+
+    # Risk + Technical flags — decoupled from APEX/weight engine (Approach B).
+    # Portfolio holdings only; writes to risk_flags, feeds the dashboard's
+    # Attention Queue / risk strip directly.
+    log.info("\n── Phase 4.5: Risk & Technical Flags ────────────────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.pipeline.daily.risk_technical import _run_daily_risk_technical
+        await _run_daily_risk_technical(apex_tickers, tracker=tracker)
+    except Exception as _rt_exc:
+        log.warning(f"  [risk_technical] Phase skipped — {_rt_exc}", event_type="warning")
 
     # Universe screen — pure math (no LLM). Quarterly refresh of index membership
     # fires automatically when due; daily screen finds breakout candidates in

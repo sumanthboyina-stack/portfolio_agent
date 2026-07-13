@@ -36,6 +36,13 @@ Flag concentration risk (position weight > 10%), sector over-exposure (> 25% in 
 and high daily volatility. Score portfolio risk 1–10 (10 = highest risk of adding this position).
 A score of 8+ should flag concentration OR high volatility; 10 means both.
 
+Cross-holding risk (correlation with the rest of the portfolio, aggregate sector concentration
+across ALL holdings, market/beta risk, issuer concentration) can't be computed from your tools —
+they only see one ticker at a time. When the user question includes a line starting with
+"Pre-computed portfolio-wide context (use directly, do not re-derive):" followed by a JSON
+object, use those numbers as-is for the four *_pct/beta fields below. If no such context is
+present (e.g. a normal chat question), leave those fields null rather than guessing.
+
 Output ONLY this JSON:
 {
   "ticker": "...",
@@ -44,6 +51,12 @@ Output ONLY this JSON:
   "sector_exposure_pct": <float>,
   "concentration_flag": <bool>,
   "daily_volatility_pct": <float or null>,
+  "correlation_with_portfolio": <float -1..1 or null>,
+  "most_correlated_peer": "<TICKER (corr)> or null",
+  "sector_concentration_pct": <float or null, aggregate portfolio weight in this ticker's sector>,
+  "beta_vs_spy": <float or null>,
+  "issuer_concentration_pct": <float or null, aggregate weight across tickers sharing this issuer>,
+  "issuer_peers": ["..."] ,
   "portfolio_risk_score": <1–10>,
   "key_risk_factors": ["..."],
   "position_size_recommendation": "small|moderate|full",

@@ -16,7 +16,6 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-import plotly.graph_objects as go
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -24,10 +23,12 @@ sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
     inject_global_css, page_header, section_title, badge_html, top_nav,
-    ticker_label,
     SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL,
     SUCCESS_LIGHT, WARNING_LIGHT, PRIMARY_LIGHT,
 )
+from web.data.portfolio import _enrich_prices
+from web.components.portfolio_cards import _fmt_dollars, _fmt_shares, _pnl_html
+from web.components.portfolio_charts import build_portfolio_trend_chart
 from portfolio_agent.tools.company_names import get_company_names
 
 _YAML_PATH = str(_ROOT / "config" / "portfolio.yaml")
@@ -56,74 +57,6 @@ from portfolio_agent.tools.holdings_db import (
     delete_broker_holdings, sync_to_yaml, get_price_history,
 )
 from portfolio_agent.tools.holdings_parser import parse_csv
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _enrich_prices(holdings: list[dict]) -> list[dict]:
-    """Fetch live prices for holdings that don't already have current_price."""
-    tickers = [h["ticker"] for h in holdings if not h.get("current_price")]
-    if not tickers:
-        return holdings
-    try:
-        import yfinance as yf
-        prices = {}
-        for chunk in [tickers[i:i+10] for i in range(0, len(tickers), 10)]:
-            data = yf.download(
-                " ".join(chunk), period="1d", auto_adjust=True,
-                progress=False, group_by="ticker",
-            )
-            for t in chunk:
-                try:
-                    if len(chunk) == 1:
-                        prices[t] = float(data["Close"].iloc[-1])
-                    else:
-                        prices[t] = float(data[t]["Close"].iloc[-1])
-                except Exception:
-                    pass
-
-        for h in holdings:
-            if h["ticker"] in prices and not h.get("current_price"):
-                price = prices[h["ticker"]]
-                h["current_price"] = round(price, 2)
-                if h.get("shares"):
-                    h["current_value"] = round(price * h["shares"], 2)
-    except Exception:
-        pass
-    return holdings
-
-
-def _fmt_dollars(v) -> str:
-    if v is None:
-        return "—"
-    try:
-        return f"${float(v):,.2f}"
-    except Exception:
-        return "—"
-
-
-def _fmt_shares(v) -> str:
-    if v is None:
-        return "—"
-    try:
-        f = float(v)
-        return f"{f:,.4f}".rstrip("0").rstrip(".")
-    except Exception:
-        return "—"
-
-
-def _pnl_html(cost_total, current_val) -> str:
-    try:
-        gain = current_val - cost_total
-        pct  = gain / cost_total * 100
-        col  = SUCCESS if gain >= 0 else DANGER
-        sign = "+" if gain >= 0 else ""
-        return (
-            f'<span style="color:{col};font-weight:600">'
-            f'{sign}${gain:,.0f} ({sign}{pct:.1f}%)</span>'
-        )
-    except Exception:
-        return "—"
 
 
 BROKER_META = {
@@ -247,10 +180,6 @@ else:
     gain_pct_s  = [g / cb * 100 if cb else 0 for g, cb in zip(gain_abs, total_cb)]
 
     # ── Per-ticker series (normalized to % change from first date) ────────────
-    PALETTE = [
-        "#2563EB", "#059669", "#D97706", "#7C3AED",
-        "#0891B2", "#DB2777", "#DC2626", "#65A30D", "#EA580C", "#6366F1",
-    ]
     ticker_day: dict[str, dict[str, float]] = defaultdict(dict)
     for r in filtered:
         if r["market_value"]:
@@ -259,168 +188,9 @@ else:
 
     ticker_list = sorted(ticker_day.keys())
 
-    # ── Build figure with all traces pre-loaded ───────────────────────────────
-    fig = go.Figure()
-
-    # Trace 0 — portfolio market value area
-    has_cb = any(v > 0 for v in total_cb)
-    fig.add_trace(go.Scatter(
-        x=total_dates, y=total_mv,
-        name="Portfolio Value",
-        mode="lines",
-        line=dict(color="#2563EB", width=2.5, shape="spline", smoothing=0.4),
-        fill="tozeroy",
-        fillcolor="rgba(37,99,235,0.07)",
-        customdata=list(zip(total_cb, gain_abs, gain_pct_s)),
-        hovertemplate=(
-            "<b>%{x}</b><br>"
-            "Value: <b>$%{y:,.0f}</b><br>"
-            "Cost:  $%{customdata[0]:,.0f}<br>"
-            "P&L:   <b>$%{customdata[1]:+,.0f}  (%{customdata[2]:+.1f}%)</b>"
-            "<extra></extra>"
-        ),
-        visible=True,
-    ))
-
-    # Trace 1 — cost basis reference (dotted)
-    if has_cb:
-        fig.add_trace(go.Scatter(
-            x=total_dates, y=total_cb,
-            name="Cost Basis",
-            mode="lines",
-            line=dict(color="#D1D5DB", width=1.5, dash="dot"),
-            hoverinfo="skip",
-            visible=True,
-        ))
-    n_total = 2 if has_cb else 1
-
-    # Traces 2+ — per-ticker normalized % change
-    for i, ticker in enumerate(ticker_list):
-        day_map = ticker_day[ticker]
-        dates = sorted(day_map)
-        abs_vals = [day_map[d] for d in dates]
-        base = abs_vals[0] if abs_vals else 1
-        pct_vals = [(v - base) / base * 100 if base else 0 for v in abs_vals]
-        fig.add_trace(go.Scatter(
-            x=dates, y=pct_vals,
-            name=ticker_label(ticker, max_len=24),
-            mode="lines",
-            line=dict(color=PALETTE[i % len(PALETTE)], width=2, shape="spline", smoothing=0.4),
-            customdata=abs_vals,
-            hovertemplate=(
-                f"<b>{ticker_label(ticker, max_len=30)}</b>  %{{x}}<br>"
-                "%{y:+.1f}%  ·  <b>$%{customdata:,.0f}</b>"
-                "<extra></extra>"
-            ),
-            visible=False,
-        ))
-
-    n_ticker = len(ticker_list)
-    vis_total  = [True]  * n_total + [False] * n_ticker
-    vis_ticker = [False] * n_total + [True]  * n_ticker
-
-    # ── Layout with in-chart controls ─────────────────────────────────────────
-    fig.update_layout(
-        height=440,
-        margin=dict(l=0, r=0, t=52, b=0),
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        font=dict(family="Inter, -apple-system, sans-serif", size=12),
-        hovermode="x unified",
-        hoverlabel=dict(
-            bgcolor="white",
-            bordercolor="#E5E7EB",
-            font=dict(size=12, color="#111827", family="Inter, sans-serif"),
-            namelength=-1,
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="top", y=-0.08,
-            xanchor="left", x=0,
-            font=dict(size=11, color="#374151"),
-            bgcolor="rgba(0,0,0,0)",
-            itemclick="toggle",
-            itemdoubleclick="toggleothers",
-        ),
-        # In-chart toggle: Total Portfolio / Per Ticker
-        updatemenus=[dict(
-            type="buttons",
-            direction="right",
-            x=0, y=1.0,
-            xanchor="left", yanchor="bottom",
-            pad=dict(r=0, t=0, b=10),
-            buttons=[
-                dict(
-                    label="Total Portfolio",
-                    method="update",
-                    args=[
-                        {"visible": vis_total},
-                        {
-                            "yaxis.tickprefix": "$",
-                            "yaxis.ticksuffix": "",
-                            "yaxis.tickformat": ",.0f",
-                            "yaxis.zeroline": False,
-                            "hovermode": "x unified",
-                        },
-                    ],
-                ),
-                dict(
-                    label="Per Ticker  (%)",
-                    method="update",
-                    args=[
-                        {"visible": vis_ticker},
-                        {
-                            "yaxis.tickprefix": "",
-                            "yaxis.ticksuffix": "%",
-                            "yaxis.tickformat": "+.0f",
-                            "yaxis.zeroline": True,
-                            "hovermode": "closest",
-                        },
-                    ],
-                ),
-            ],
-            bgcolor="#F9FAFB",
-            bordercolor="#E5E7EB",
-            borderwidth=1,
-            font=dict(size=12, color="#374151"),
-            showactive=True,
-            active=0,
-        )],
-        xaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            tickfont=dict(size=11, color="#9CA3AF"),
-            tickformat="%b %d, %Y",
-            # Range selector top-right
-            rangeselector=dict(
-                buttons=[
-                    dict(count=7,  label="1W", step="day",   stepmode="backward"),
-                    dict(count=1,  label="1M", step="month", stepmode="backward"),
-                    dict(count=3,  label="3M", step="month", stepmode="backward"),
-                    dict(count=6,  label="6M", step="month", stepmode="backward"),
-                    dict(step="all", label="All"),
-                ],
-                x=1, xanchor="right",
-                y=1.0, yanchor="bottom",
-                bgcolor="#F9FAFB",
-                bordercolor="#E5E7EB",
-                borderwidth=1,
-                activecolor="#2563EB",
-                font=dict(size=11, color="#374151"),
-            ),
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor="#F3F4F6",
-            gridwidth=1,
-            zeroline=False,
-            zerolinecolor="#E5E7EB",
-            zerolinewidth=1,
-            tickprefix="$",
-            tickfont=dict(size=11, color="#9CA3AF"),
-            tickformat=",.0f",
-            side="right",
-        ),
+    fig = build_portfolio_trend_chart(
+        total_dates, total_mv, total_cb, gain_abs, gain_pct_s,
+        ticker_list, ticker_day,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})

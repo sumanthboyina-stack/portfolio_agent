@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import pytest
+
+from portfolio_agent.tools.weight_engine import (
+    BASE,
+    HORIZON_BASE_WEIGHTS,
+    WEIGHT_FLOOR,
+    _fundamentals_penalty,
+    _macro_signal,
+    _news_signal,
+    _normalize,
+    compute_dynamic_weights,
+    compute_dynamic_weights_for_horizon,
+)
+
+
+def test_horizon_base_weights_sum_to_one():
+    for horizon, weights in HORIZON_BASE_WEIGHTS.items():
+        assert sum(weights.values()) == pytest.approx(1.0), horizon
+
+
+def test_base_weights_sum_to_one():
+    assert sum(BASE.values()) == pytest.approx(1.0)
+
+
+def test_normalize_sums_to_one_without_floor():
+    raw = {"fundamentals": 0.4, "research": 0.3, "macro": 0.2, "news": 0.1}
+    weights = _normalize(raw, use_floor=False)
+    assert sum(weights.values()) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_normalize_applies_floor_to_zeroed_source():
+    # The floor clamps raw (pre-normalization) values, so it holds in the final
+    # weights as long as no single source swamps the total after clamping.
+    raw = {"fundamentals": 0.3, "research": 0.0, "macro": 0.3, "news": 0.3}
+    weights = _normalize(raw, use_floor=True)
+    assert weights["research"] >= WEIGHT_FLOOR
+    assert sum(weights.values()) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_normalize_floor_is_pre_normalization_only():
+    # NOTE: WEIGHT_FLOOR clamps raw inputs before the division, it does not
+    # guarantee a post-normalization minimum share. When one source dominates
+    # the raw total, a floored-to-0.05 source can still normalize below 0.05
+    # (here: 0.05 / 1.15 ~= 0.043). This is documenting current behavior, not
+    # asserting it's the desired contract.
+    raw = {"fundamentals": 1.0, "research": 0.0, "macro": 0.0, "news": 0.0}
+    weights = _normalize(raw, use_floor=True)
+    assert weights["research"] < WEIGHT_FLOOR
+    assert sum(weights.values()) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_news_signal_no_data_returns_none():
+    boost, event, _ = _news_signal([])
+    assert event == "NONE"
+    assert boost == 0.0
+
+
+def test_news_signal_detects_earnings_release():
+    news = [{"date": "2099-01-01", "headline_1": "Company beat estimates", "headline_2": "", "summary": ""}]
+    boost, event, _ = _news_signal(news)
+    assert event == "EARNINGS_RELEASE"
+    assert boost > 0
+
+
+def test_news_signal_detects_leadership_change():
+    news = [{"date": "2099-01-01", "headline_1": "CEO resigns amid controversy", "headline_2": "", "summary": ""}]
+    boost, event, _ = _news_signal(news)
+    assert event == "LEADERSHIP_CHANGE"
+
+
+def test_macro_signal_extreme_volatility():
+    boost, event, _ = _macro_signal({"vix": 35})
+    assert event == "EXTREME_VOLATILITY"
+    assert boost > 0
+
+
+def test_macro_signal_elevated_volatility():
+    boost, event, _ = _macro_signal({"vix": 25})
+    assert event == "ELEVATED_VOLATILITY"
+
+
+def test_macro_signal_neutral():
+    boost, event, _ = _macro_signal({"vix": 15, "macro_regime_hint": "NEUTRAL"})
+    assert event == "NEUTRAL"
+    assert boost == 0.0
+
+
+def test_macro_signal_no_data():
+    boost, event, _ = _macro_signal(None)
+    assert event == "NO_DATA"
+    assert boost == 0.0
+
+
+def test_fundamentals_penalty_fresh_data():
+    from datetime import date
+    penalty, _ = _fundamentals_penalty({"filing_date": date.today().isoformat()}, "NONE")
+    assert penalty == 0.0
+
+
+def test_fundamentals_penalty_stale_data():
+    penalty, _ = _fundamentals_penalty({"filing_date": "2000-01-01"}, "NONE")
+    assert penalty > 0.0
+
+
+def test_fundamentals_penalty_missing_data():
+    penalty, _ = _fundamentals_penalty(None, "NONE")
+    assert penalty > 0.0
+
+
+def test_fundamentals_penalty_heavy_during_earnings_without_fresh_filing():
+    penalty, _ = _fundamentals_penalty({"filing_date": "2000-01-01"}, "EARNINGS_RELEASE")
+    assert penalty > _fundamentals_penalty({"filing_date": "2000-01-01"}, "NONE")[0]
+
+
+def test_compute_dynamic_weights_for_horizon_sums_to_one_and_respects_floor():
+    for horizon in HORIZON_BASE_WEIGHTS:
+        weights = compute_dynamic_weights_for_horizon(
+            "AAPL", horizon, db_context={}, macro_snapshot={}
+        )
+        assert sum(weights.values()) == pytest.approx(1.0, abs=1e-3)
+        assert all(v >= WEIGHT_FLOOR - 1e-9 for v in weights.values())
+
+
+def test_compute_dynamic_weights_legacy_includes_all_horizons_when_requested():
+    result = compute_dynamic_weights(
+        "AAPL",
+        news_data=[],
+        research_data=None,
+        macro_snapshot=None,
+        fundamentals_data=None,
+        horizons=list(HORIZON_BASE_WEIGHTS.keys()),
+    )
+    assert sum(result["weights"].values()) == pytest.approx(1.0, abs=1e-3)
+    assert set(result["weights_by_horizon"].keys()) == set(HORIZON_BASE_WEIGHTS.keys())

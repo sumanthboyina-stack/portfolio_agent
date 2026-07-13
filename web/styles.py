@@ -630,22 +630,23 @@ def inject_global_css() -> None:
 # ── Top navigation bar ────────────────────────────────────────────────────────
 
 _NAV_PRIMARY = [
-    ("dashboard",   "🏠", "Today",         "app.py"),
-    ("predictions", "🔮", "Predictions",   "pages/7_🔮_Predictions.py"),
-    ("portfolio",   "💼", "Portfolio",     "pages/5_💼_Portfolio.py"),
-    ("chat",        "🤖", "Chat",          "pages/4_🤖_Chat.py"),
+    ("dashboard",     "🏠", "Today",         "app.py"),
+    ("opportunities", "🧭", "Opportunities", "pages/8_🧭_Opportunities.py"),
+    ("predictions",   "🔮", "Predictions",   "pages/7_🔮_Predictions.py"),
+    ("portfolio",     "💼", "Portfolio",     "pages/5_💼_Portfolio.py"),
 ]
 _NAV_SECONDARY = [
-    ("validation",  "🎯", "Validation",    "pages/6_🎯_Validation.py"),
     ("watchlist",   "📋", "Watchlist",     "pages/3_📋_Watchlist.py"),
+    ("validation",  "🎯", "Validation",    "pages/6_🎯_Validation.py"),
+    ("chat",        "🤖", "Chat",          "pages/4_🤖_Chat.py"),
+]
+_NAV_ADMIN = [
     ("schedule",    "🗓️", "Schedule",    "pages/2_🗓️_Schedule.py"),
     ("database",    "📊", "Database",      "pages/1_📊_Database.py"),
 ]
-_NAV_ITEMS = _NAV_PRIMARY + _NAV_SECONDARY  # backward compat
-
 
 def top_nav(active: str = "dashboard") -> None:
-    """Render a sticky top nav: 4 primary tabs + visual divider + 4 secondary tabs."""
+    """Render a sticky top nav: primary tabs, secondary tabs, and an admin drawer toggle."""
     st.markdown(
         '<div class="top-nav-wrap">'
         '<div class="nav-brand">📈 Portfolio Intelligence</div>'
@@ -653,8 +654,8 @@ def top_nav(active: str = "dashboard") -> None:
         unsafe_allow_html=True,
     )
 
-    # 4 primary (wider) | thin divider | 4 secondary (narrower)
-    cols = st.columns([1.8, 1.8, 1.8, 1.8, 0.3, 1.3, 1.3, 1.3, 1.3], gap="small")
+    # 4 primary (wider) | thin divider | 3 secondary (narrower) | thin divider | admin gear
+    cols = st.columns([1.8, 1.8, 1.8, 1.8, 0.3, 1.4, 1.4, 1.4, 0.3, 0.6], gap="small")
 
     for i, (key, icon, label, path) in enumerate(_NAV_PRIMARY):
         with cols[i]:
@@ -683,7 +684,37 @@ def top_nav(active: str = "dashboard") -> None:
             else:
                 st.page_link(path, label=f"{icon} {label}", use_container_width=True)
 
+    with cols[8]:
+        st.markdown(
+            '<div style="width:1px;background:#E5E7EB;height:30px;margin:14px auto"></div>',
+            unsafe_allow_html=True,
+        )
+
+    with cols[9]:
+        if st.button("⚙️", key="admin_drawer_toggle", help="Admin: Schedule & Database",
+                     use_container_width=True):
+            st.session_state["_admin_drawer_open"] = not st.session_state.get("_admin_drawer_open", False)
+
     st.markdown('</div></div>', unsafe_allow_html=True)
+
+    if st.session_state.get("_admin_drawer_open", False) or active in ("schedule", "database"):
+        st.markdown(
+            '<div style="padding:6px 24px 0;display:flex;gap:6px;align-items:center">'
+            '<span style="font-size:0.7rem;font-weight:700;text-transform:uppercase;'
+            'letter-spacing:0.08em;color:#9CA3AF;margin-right:4px">Admin</span></div>',
+            unsafe_allow_html=True,
+        )
+        admin_cols = st.columns([1, 1, 6])
+        for i, (key, icon, label, path) in enumerate(_NAV_ADMIN):
+            with admin_cols[i]:
+                if key == active:
+                    st.markdown(
+                        f'<div class="nav-tab active" style="font-size:0.85rem">'
+                        f'{icon} <span>{label}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.page_link(path, label=f"{icon} {label}", use_container_width=True)
 
 
 # ── HTML component helpers ─────────────────────────────────────────────────────
