@@ -77,13 +77,32 @@ These query the local portfolio database and return real pipeline results:
 | Question type | Tool to call FIRST |
 |---|---|
 | "latest opportunities", "trending stocks", "what looks good", "new discoveries", "top picks" | `get_latest_opportunities` |
+| "most opportunistic stock", "undervalued", "trading below where it should", "best upside to target", any screen combining a valuation gap with a bullish signal | `get_undervalued_opportunities` |
 | "my portfolio", "what do I own", "holdings", "portfolio performance" | `get_portfolio_summary` |
 | "today's predictions", "latest signals", "what does APEX say", "all recommendations" | `get_predictions_summary` |
-| Specific ticker prediction history | `get_prediction_history` |
+| Specific ticker prediction/recommendation | `get_prediction_history` |
+| Specific ticker -- "should I trust this", "how accurate has APEX been", track record | `get_prediction_accuracy` |
 | Specific ticker fundamentals | `get_fundamentals` |
 | Specific ticker broker research | `get_research` |
 | Specific ticker news | `get_ticker_news` |
 | Specific ticker price | `get_price_history` |
+
+### Broad screening questions (no single ticker in mind)
+Questions like "what's the most opportunistic stock right now", "what looks undervalued", \
+"what should I look at" are a DATABASE SCREEN across many tickers, not a request to deep-dive \
+one stock. Call `get_undervalued_opportunities` and/or `get_latest_opportunities` / \
+`get_predictions_summary`, reason over the *results*, and answer directly. Never guess a \
+ticker out of the wording of a broad question (e.g. do NOT treat "trading lower" as a ticker \
+symbol) -- if a tool needs a ticker and none was given, that's a sign the question is a screen, \
+not a single-stock lookup.
+
+### Ticker-specific questions
+When the user does name a ticker (or a company you resolve via `search_ticker`) and it's \
+already in the local database, ground your answer in what's stored before reaching for \
+anything else: `get_prediction_history` (past recommendations), `get_prediction_accuracy` \
+(has APEX been right about this ticker before?), `get_price_history` (has it actually moved \
+the way predicted?), plus `get_fundamentals` / `get_research` / `get_ticker_news` as relevant. \
+Only fall back to `web_search` for gaps those don't cover.
 
 ### 2. LIVE MARKET DATA (when DB doesn't have what's needed)
 - Market headlines → `get_market_news`
@@ -109,8 +128,9 @@ Use `web_search` ONLY when:
 - If `get_latest_opportunities` returns data, present it directly -- do not also call web search.
 
 ## Presenting opportunities
-When showing results from `get_latest_opportunities` or `get_predictions_summary`:
+When showing results from `get_latest_opportunities`, `get_undervalued_opportunities`, or `get_predictions_summary`:
 - Lead with the ticker, recommendation, and composite score
+- For `get_undervalued_opportunities`, lead with `upside_to_target_pct` -- that's the point of the screen
 - Include news/research/fundamental sub-scores when available
 - Add a 1-sentence reasoning summary if the DB returned one
 - Suggest "Type **Analyze [TICKER]** for the full 4-analyst APEX panel" for any ticker of interest
@@ -125,24 +145,37 @@ When showing results from `get_latest_opportunities` or `get_predictions_summary
 
 # ── Intent classifier ─────────────────────────────────────────────────────────
 
+_PREDICT_PHRASE_RE = re.compile(
+    r"\b("
+    r"analyz\w*|analysis|predict|prediction|"
+    r"should i buy|should i sell|buy or sell|worth buying|"
+    r"investment thesis|investment recommendation|"
+    r"full report|deep dive|apex analysis|"
+    r"give me a report|run apex|run analysis"
+    r")\b"
+)
+
+
 def _classify_intent(query: str, tickers: list[str]) -> str:
     """
     Classify the query as 'predict' (full APEX panel) or 'chat' (conversational).
 
-    'predict' triggers when the user clearly wants an investment recommendation.
-    Everything else routes to the conversational tool-calling agent.
+    'predict' triggers only when the user names a specific ticker AND clearly
+    wants a fresh investment recommendation for it. Broad/exploratory questions
+    (screening, comparisons, "what looks good") always route to the
+    conversational tool-calling agent, which can pull DB records (predictions,
+    research, price history, validation outcomes) and web search as needed --
+    even for questions that happen to mention a ticker.
     """
+    if not tickers:
+        return "chat"
     q = query.lower()
-    predict_phrases = {
-        "analyze", "analysis", "full analysis", "predict", "prediction",
-        "should i buy", "should i sell", "buy or sell", "worth buying",
-        "investment thesis", "investment recommendation",
-        "full report", "deep dive", "apex analysis",
-        "give me a report", "run apex", "run analysis",
-    }
-    if any(ph in q for ph in predict_phrases):
+    # Word-boundary match -- a plain substring check would match "predict"/
+    # "prediction" inside "predictions", turning "analyst predictions are
+    # strong" into a false "predict" classification.
+    if _PREDICT_PHRASE_RE.search(q):
         return "predict"
-    if tickers and len(query.split()) <= 3:
+    if len(query.split()) <= 3:
         return "predict"
     return "chat"
 

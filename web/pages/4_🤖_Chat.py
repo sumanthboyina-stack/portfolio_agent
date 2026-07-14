@@ -136,6 +136,57 @@ _COMPANY_MAP: dict[str, str] = {
 }
 
 
+_COMMON_INDEX_TICKERS = {
+    "SPY", "QQQ", "DIA", "VOO", "IWM", "VIX", "VTI", "IVV",
+}
+
+
+@st.cache_data(ttl=300)
+def _known_tickers() -> frozenset[str]:
+    """
+    Universe of tickers this app actually knows about: the watchlist, portfolio
+    holdings, the EDGAR-verified fundamentals table, the S&P1500/Nasdaq screener
+    universe, plus a handful of common index/ETF symbols.
+
+    Used to validate a bare regex match before treating it as a ticker --
+    without this, any 1-5 letter English word not in the hand-maintained
+    stopword list (e.g. "LOWER", "TREND", "GAINS") gets misread as a symbol.
+
+    Deliberately does NOT read the `predictions` table: it's append-only and can
+    already contain bogus "tickers" from a bad extraction (this exact bug) or a
+    typo'd company name -- using it here would let a past false positive vouch
+    for a future one.
+    """
+    known: set[str] = set(_COMMON_INDEX_TICKERS) | set(_load_watchlist())
+
+    db_path = _ROOT / "data" / "portfolio.db"
+    if db_path.exists():
+        try:
+            import sqlite3
+            with sqlite3.connect(str(db_path)) as conn:
+                rows = conn.execute("SELECT DISTINCT ticker FROM fundamentals").fetchall()
+                known.update(r[0].upper() for r in rows if r[0])
+        except Exception:
+            pass
+
+    try:
+        from portfolio_agent.tools.universe_db import get_tickers
+        known.update(t.upper() for t in get_tickers())
+    except Exception:
+        pass
+
+    try:
+        import yaml
+        pdata = yaml.safe_load((_ROOT / "config" / "portfolio.yaml").read_text()) or {}
+        known.update(
+            h["ticker"].upper() for h in pdata.get("holdings", []) if h.get("ticker")
+        )
+    except Exception:
+        pass
+
+    return frozenset(known)
+
+
 def _extract_tickers(text: str) -> list[str]:
     found: list[str] = []
     upper = text.upper()
@@ -149,9 +200,12 @@ def _extract_tickers(text: str) -> list[str]:
             # Remove matched region to avoid double-matching sub-strings
             upper = upper.replace(name, " ", 1)
 
-    # 2. Then match bare uppercase ticker-like tokens
+    # 2. Then match bare uppercase ticker-like tokens -- only accept ones we
+    # actually recognize, so ordinary English words (e.g. "LOWER" in "trading
+    # lower") can't get misread as ticker symbols.
+    known = _known_tickers()
     for t in dict.fromkeys(_TICKER_RE.findall(upper)):
-        if t not in _STOP and t not in found:
+        if t not in _STOP and t not in found and t in known:
             found.append(t)
 
     return found

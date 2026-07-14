@@ -126,8 +126,8 @@ def score_outcome(pred: dict, actual_return: float) -> Outcome:
 
 def evaluate_matured_predictions(today: Optional[date] = None, force: bool = False) -> dict:
     """
-    Layer 1 — For each prediction whose evaluation_date is today and still pending,
-    fetch actual price returns, score the outcome, and persist to DB.
+    Layer 1 — For each prediction whose evaluation_date is today or earlier and
+    still pending, fetch actual price returns, score the outcome, and persist to DB.
     No LLM involved. Pass force=True to run on non-trading days (e.g. manual runs).
     """
     from portfolio_agent.tools.prediction_db import get_matured_pending_predictions, update_prediction_outcome, is_trading_day

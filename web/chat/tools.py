@@ -3,7 +3,7 @@ Chat tool definitions + implementations.
 
 Contains:
   - _search_ticker_by_name   : yfinance company-name lookup
-  - _CHAT_TOOLS              : 14-entry tool schema list for LiteLLM
+  - _CHAT_TOOLS              : 16-entry tool schema list for LiteLLM
   - _chat_tool_*             : one function per tool
   - _execute_chat_tool()     : dispatcher called by orchestration
 """
@@ -187,6 +187,26 @@ _CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_prediction_accuracy",
+            "description": (
+                "Get APEX's validated track record for a specific ticker: how many past "
+                "predictions have matured and been scored against actual price moves, the "
+                "directional accuracy %, average Brier score, and the most recent scored "
+                "outcome -- broken down by horizon (5d/21d/63d/250d). Use this whenever a "
+                "user asks whether to trust a recommendation for a ticker, or how accurate "
+                "past predictions have been -- it's the 'validations' layer, separate from "
+                "the recommendation itself (get_prediction_history)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_latest_opportunities",
             "description": (
                 "Query the local database for the latest trending/new investment opportunities "
@@ -248,6 +268,38 @@ _CHAT_TOOLS = [
                     "recommendation": {
                         "type": "string",
                         "description": "Optional filter: 'BUY', 'SELL', 'HOLD', 'STRONG_BUY', 'STRONG_SELL'",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_undervalued_opportunities",
+            "description": (
+                "Screen the local database for tickers trading below analyst price targets "
+                "with a bullish APEX signal -- i.e. 'undervalued but the outlook is strong.' "
+                "Joins each ticker's latest prediction (recommendation, composite score) "
+                "against its stored analyst price target to compute upside % to target, "
+                "sorted by upside descending. Use this FIRST for questions like "
+                "'what's the most opportunistic stock trading below where it should be', "
+                "'which stock has the most upside to its price target', or any screen "
+                "combining valuation gap with analyst/APEX conviction -- do not run a "
+                "single-ticker analysis for this kind of broad screening question."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_upside_pct": {
+                        "type": "number",
+                        "description": "Minimum upside % to analyst target to include (default 5)",
+                        "default": 5,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default 10)",
+                        "default": 10,
                     },
                 },
             },
@@ -325,6 +377,69 @@ def _chat_tool_get_predictions(ticker: str) -> dict:
     from portfolio_agent.tools.prediction_db import get_prediction_history
     hist = get_prediction_history(ticker.upper(), limit=10)
     return {"ticker": ticker.upper(), "prediction_history": hist}
+
+
+def _chat_tool_get_prediction_accuracy(ticker: str) -> dict:
+    db_path = _ROOT / "data" / "portfolio.db"
+    if not db_path.exists():
+        return {"ticker": ticker.upper(), "note": "Database not found."}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT horizon_days, outcome, outcome_score, brier_score,
+                   actual_direction, actual_return, evaluated_at, recommendation
+            FROM predictions
+            WHERE ticker = ? AND evaluation_status = 'evaluated'
+            ORDER BY evaluated_at DESC
+        """, [ticker.upper()]).fetchall()
+        conn.close()
+        rows = [dict(r) for r in rows]
+        if not rows:
+            return {
+                "ticker": ticker.upper(), "evaluated_count": 0,
+                "note": (
+                    "No matured/scored predictions yet for this ticker -- either it's new "
+                    "to the system or its predictions haven't reached their evaluation date."
+                ),
+            }
+        _correct_labels = {"strong_correct", "directionally_correct", "flat_correct"}
+        by_horizon: dict[int, dict] = {}
+        for r in rows:
+            h = r.get("horizon_days")
+            b = by_horizon.setdefault(h, {"horizon_days": h, "count": 0, "correct": 0, "briers": []})
+            b["count"] += 1
+            if r.get("outcome") in _correct_labels:
+                b["correct"] += 1
+            if r.get("brier_score") is not None:
+                b["briers"].append(r["brier_score"])
+        horizon_summary = []
+        for h, b in sorted(by_horizon.items(), key=lambda kv: (kv[0] is None, kv[0])):
+            horizon_summary.append({
+                "horizon_days": h,
+                "evaluated_count": b["count"],
+                "directional_accuracy_pct": round(b["correct"] / b["count"] * 100, 1),
+                "avg_brier_score": round(sum(b["briers"]) / len(b["briers"]), 3) if b["briers"] else None,
+            })
+        latest = rows[0]
+        return {
+            "ticker": ticker.upper(),
+            "evaluated_count": len(rows),
+            "overall_directional_accuracy_pct": round(
+                sum(1 for r in rows if r.get("outcome") in _correct_labels) / len(rows) * 100, 1
+            ),
+            "by_horizon": horizon_summary,
+            "most_recent_outcome": {
+                "horizon_days": latest.get("horizon_days"),
+                "recommendation_at_time": latest.get("recommendation"),
+                "outcome": latest.get("outcome"),
+                "actual_direction": latest.get("actual_direction"),
+                "actual_return_pct": round((latest.get("actual_return") or 0) * 100, 2),
+                "evaluated_at": (latest.get("evaluated_at") or "")[:10],
+            },
+        }
+    except Exception as exc:
+        return {"ticker": ticker.upper(), "note": f"DB query failed: {exc}"}
 
 
 def _chat_tool_get_price_history(ticker: str, period: str = "3mo") -> dict:
@@ -518,6 +633,47 @@ def _chat_tool_get_latest_opportunities(min_confidence: int = 6, limit: int = 10
         return {"note": f"DB query failed: {exc}"}
 
 
+def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: int = 10) -> dict:
+    db_path = _ROOT / "data" / "portfolio.db"
+    if not db_path.exists():
+        return {"note": "Database not found. Run the pipeline first to populate data."}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
+                   p.pt_mean, p.pt_current_price, p.pt_num_analysts, p.created_at
+            FROM predictions p
+            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions GROUP BY ticker) x
+              ON p.ticker = x.ticker AND p.created_at = x.dt
+            WHERE p.recommendation IN ('BUY', 'STRONG_BUY')
+              AND p.pt_mean IS NOT NULL AND p.pt_current_price > 0
+        """).fetchall()
+        conn.close()
+        candidates = []
+        for r in rows:
+            d = dict(r)
+            upside = (d["pt_mean"] / d["pt_current_price"] - 1) * 100
+            if upside >= min_upside_pct:
+                d["upside_to_target_pct"] = round(upside, 1)
+                candidates.append(d)
+        candidates.sort(key=lambda d: d["upside_to_target_pct"], reverse=True)
+        candidates = candidates[:limit]
+        if not candidates:
+            return {
+                "source": "db", "count": 0,
+                "note": (
+                    "No tickers currently meet the undervalued+bullish screen "
+                    f"(BUY/STRONG_BUY with >={min_upside_pct}% upside to analyst target). "
+                    "Try a lower min_upside_pct, or note that most tickers may lack a "
+                    "stored analyst price target."
+                ),
+            }
+        return {"source": "db", "count": len(candidates), "opportunities": candidates}
+    except Exception as exc:
+        return {"note": f"DB query failed: {exc}"}
+
+
 def _chat_tool_get_portfolio_summary() -> dict:
     db_path = _ROOT / "data" / "portfolio.db"
     if not db_path.exists():
@@ -637,6 +793,8 @@ def _execute_chat_tool(name: str, args: dict) -> str:
             result = _chat_tool_get_macro()
         elif name == "get_prediction_history":
             result = _chat_tool_get_predictions(args.get("ticker", ""))
+        elif name == "get_prediction_accuracy":
+            result = _chat_tool_get_prediction_accuracy(args.get("ticker", ""))
         elif name == "get_price_history":
             result = _chat_tool_get_price_history(
                 args.get("ticker", ""), args.get("period", "3mo")
@@ -644,6 +802,11 @@ def _execute_chat_tool(name: str, args: dict) -> str:
         elif name == "get_latest_opportunities":
             result = _chat_tool_get_latest_opportunities(
                 min_confidence=args.get("min_confidence", 6),
+                limit=args.get("limit", 10),
+            )
+        elif name == "get_undervalued_opportunities":
+            result = _chat_tool_get_undervalued_opportunities(
+                min_upside_pct=args.get("min_upside_pct", 5),
                 limit=args.get("limit", 10),
             )
         elif name == "get_portfolio_summary":

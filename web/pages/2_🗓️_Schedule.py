@@ -326,18 +326,39 @@ def _phase_badge(text: str) -> str:
     return "🔄 Starting…"
 
 
+# Phases with no meaningful per-ticker count (they run once per pipeline
+# invocation) — rendered as a single done/pending indicator, not a X/Y bar.
+_BINARY_PHASES = {
+    "short_interest", "universe_screen", "price_backfill",
+    "l1_outcome", "l2_metrics", "l3_snapshot",
+}
+
+
+def _new_phases_dict() -> dict[str, dict]:
+    """Base per-phase state, shared by the log-text parser and the DB reader."""
+    base = dict(status="pending", total=0, completed=0, failed=0, ticker="", note="")
+    return {
+        "news":            {**base, "flagged": 0, "filter_analyzed": 0,
+                             "filter_no_art": 0, "filter_low_mat": 0, "filter_no_new": 0},
+        "short_interest":  dict(base),
+        "research":        {**base, "track_a": 0},
+        "fundamentals":    dict(base),
+        "apex":            dict(base),
+        "risk_technical":  dict(base),
+        "universe_screen": dict(base),
+        "price_backfill":  dict(base),
+        "l1_outcome":      dict(base),
+        "l2_metrics":      dict(base),
+        "l3_snapshot":     dict(base),
+    }
+
+
 def _parse_progress(log_text: str) -> dict:
     """
     Parse log output into structured phase/ticker progress.
     Returns a dict with total_tickers and per-phase state.
     """
-    phases: dict[str, dict] = {
-        "fundamentals": dict(status="pending", total=0, completed=0, failed=0, ticker="", note=""),
-        "research":     dict(status="pending", total=0, completed=0, failed=0, ticker="", note="", track_a=0),
-        "news":         dict(status="pending", total=0, completed=0, failed=0, ticker="", note="", flagged=0,
-                            filter_analyzed=0, filter_no_art=0, filter_low_mat=0, filter_no_new=0),
-        "apex":         dict(status="pending", total=0, completed=0, failed=0, ticker="", note=""),
-    }
+    phases: dict[str, dict] = _new_phases_dict()
     total_tickers = 0
     current = None
 
@@ -347,13 +368,21 @@ def _parse_progress(log_text: str) -> dict:
         if m:
             total_tickers = int(m.group(1))
 
-        # ── phase markers (order: News → Research → Fundamentals → APEX) ───────
+        # ── phase markers (order: News → Short Interest → Research → Fundamentals
+        #    → APEX → Risk/Technical → Universe Screen → Price Backfill) ────────
         if re.search(r"Phase 1.{0,20}News|── Phase 1", line):
             current = "news"
             phases["news"]["status"] = "running"
+        elif re.search(r"── Short Interest Check", line):
+            current = "short_interest"
+            phases["short_interest"]["status"] = "running"
+            if phases["news"]["status"] == "running":
+                phases["news"]["status"] = "done"
         elif re.search(r"Phase 2.{0,20}Research|── Phase 2", line):
             current = "research"
             phases["research"]["status"] = "running"
+            if phases["short_interest"]["status"] == "running":
+                phases["short_interest"]["status"] = "done"
             if phases["news"]["status"] == "running":
                 phases["news"]["status"] = "done"
         elif re.search(r"Phase 3.{0,20}Fundamentals|── Phase 3", line):
@@ -361,11 +390,26 @@ def _parse_progress(log_text: str) -> dict:
             phases["fundamentals"]["status"] = "running"
             if phases["research"]["status"] == "running":
                 phases["research"]["status"] = "done"
+        elif re.search(r"Phase 4\.5.{0,20}Risk|── Phase 4\.5", line):
+            current = "risk_technical"
+            phases["risk_technical"]["status"] = "running"
+            if phases["apex"]["status"] == "running":
+                phases["apex"]["status"] = "done"
         elif re.search(r"Phase 4.{0,20}APEX|── Phase 4", line):
             current = "apex"
             phases["apex"]["status"] = "running"
             if phases["fundamentals"]["status"] == "running":
                 phases["fundamentals"]["status"] = "done"
+        elif re.search(r"Phase 5.{0,20}Universe Screen|── Phase 5", line):
+            current = "universe_screen"
+            phases["universe_screen"]["status"] = "running"
+            if phases["risk_technical"]["status"] == "running":
+                phases["risk_technical"]["status"] = "done"
+        elif re.search(r"── Price History Backfill", line):
+            current = "price_backfill"
+            phases["price_backfill"]["status"] = "running"
+            if phases["universe_screen"]["status"] == "running":
+                phases["universe_screen"]["status"] = "done"
 
         # ── fundamentals: to-process count ───────────────────────────────────
         m = re.search(r"Fundamentals: (\d+) to process", line)
@@ -451,6 +495,72 @@ def _parse_progress(log_text: str) -> dict:
                 phases["news"]["failed"]    = int(m.group(2))
             phases["news"]["status"] = "done"
 
+        # ── risk & technical: per-ticker progress + completion ────────────────
+        m = re.search(r"\[(\d+)/(\d+)\]\s+(\S+)\s+—\s+risk=", line)
+        if m and current == "risk_technical":
+            phases["risk_technical"]["completed"] = int(m.group(1)) - 1
+            phases["risk_technical"]["total"]     = int(m.group(2))
+            phases["risk_technical"]["ticker"]    = m.group(3)
+        if "Risk/Technical phase done" in line:
+            m = re.search(r"(\d+) flag\(s\) saved.*?(\d+) failed", line)
+            if m:
+                phases["risk_technical"]["completed"] = int(m.group(1))
+                phases["risk_technical"]["failed"]    = int(m.group(2))
+            phases["risk_technical"]["status"] = "done"
+
+        # ── universe screen: candidate summary ─────────────────────────────────
+        m = re.search(r"\[universe\] (\d+) candidate\(s\) flagged", line)
+        if m:
+            phases["universe_screen"].update(
+                note=f"{m.group(1)} candidates flagged", status="done", completed=1, total=1,
+            )
+        elif re.search(r"\[universe\] No signals today", line):
+            phases["universe_screen"].update(
+                note="no signals today", status="done", completed=1, total=1,
+            )
+
+        # ── price backfill: row-count summary ──────────────────────────────────
+        m = re.search(r"Backfilled (\d+) price rows across (\d+) missing day", line)
+        if m:
+            phases["price_backfill"].update(
+                note=f"{m.group(1)} rows backfilled", status="done", completed=1, total=1,
+            )
+        elif re.search(r"Price history up to date", line):
+            phases["price_backfill"].update(
+                note="up to date", status="done", completed=1, total=1,
+            )
+
+        # ── evening/validation layers ────────────────────────────────────────
+        if re.search(r"── Layer 1: Outcome Assignment|Layer 1: Outcome Assignment ===", line):
+            current = "l1_outcome"
+            phases["l1_outcome"]["status"] = "running"
+        if re.search(r"── Layer 2: Rolling Metrics|Layer 2: Rolling Metrics ===", line):
+            current = "l2_metrics"
+            phases["l2_metrics"]["status"] = "running"
+            if phases["l1_outcome"]["status"] == "running":
+                phases["l1_outcome"]["status"] = "done"
+        if re.search(r"── Layer 3: Portfolio Price Snapshot", line):
+            current = "l3_snapshot"
+            phases["l3_snapshot"]["status"] = "running"
+            if phases["l2_metrics"]["status"] == "running":
+                phases["l2_metrics"]["status"] = "done"
+        m = re.search(r"L1: (\d+) evaluated\s+(\d+) data_missing\s+(\d+) errors", line)
+        if m:
+            phases["l1_outcome"].update(
+                note=f"{m.group(1)} evaluated · {m.group(2)} missing · {m.group(3)} errors",
+                status="done", completed=1, total=1,
+            )
+        m = re.search(r"L2: (\d+) metric rows written", line)
+        if m:
+            phases["l2_metrics"].update(
+                note=f"{m.group(1)} metric rows written", status="done", completed=1, total=1,
+            )
+        m = re.search(r"L3: (\d+) holdings snapped", line)
+        if m:
+            phases["l3_snapshot"].update(
+                note=f"{m.group(1)} holdings snapped", status="done", completed=1, total=1,
+            )
+
         # ── exhausted / checkpoint ────────────────────────────────────────────
         # ── apex: total and completion ────────────────────────────────────────
         m = re.search(r"(\d+) / \d+ portfolio tickers → APEX", line)
@@ -489,13 +599,7 @@ def _db_to_parsed(db_run: dict) -> dict:
     dphases = db_run["phases"]
     total = run.get("total_tickers", 0)
 
-    phases: dict[str, dict] = {
-        "fundamentals": dict(status="pending", total=0, completed=0, failed=0, ticker="", note=""),
-        "research":     dict(status="pending", total=0, completed=0, failed=0, ticker="", note="", track_a=0),
-        "news":         dict(status="pending", total=0, completed=0, failed=0, ticker="", note="", flagged=0,
-                            filter_analyzed=0, filter_no_art=0, filter_low_mat=0, filter_no_new=0),
-        "apex":         dict(status="pending", total=0, completed=0, failed=0, ticker="", note=""),
-    }
+    phases: dict[str, dict] = _new_phases_dict()
     for name, p in dphases.items():
         if name not in phases:
             continue
@@ -508,7 +612,7 @@ def _db_to_parsed(db_run: dict) -> dict:
             "ticker":    p.get("current_ticker", ""),
             "note":      p.get("note", ""),
         })
-    return {"total_tickers": total, "phases": phases}
+    return {"total_tickers": total, "phases": phases, "run_status": run.get("status", "")}
 
 
 def _render_progress(log_text: str, job_type: str) -> None:
@@ -521,42 +625,65 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
     """Render milestone timeline + per-phase progress bars from pre-parsed dict."""
     total = prog["total_tickers"]
     ph    = prog["phases"]
+    # Only set when prog came from _db_to_parsed() — log-only progress (still-
+    # running jobs with no DB rows yet) has no run_status, so "pending" there
+    # genuinely means "hasn't started," not "was skipped."
+    run_finished = prog.get("run_status") in ("completed", "error")
 
     # Determine which phases are relevant for this job type
+    _DAILY_PHASES = [
+        "news", "short_interest", "research", "fundamentals", "apex",
+        "risk_technical", "universe_screen", "price_backfill",
+    ]
     phase_keys = {
-        "daily":      ["news", "research", "fundamentals", "apex"],
-        "morning":    ["news", "research", "fundamentals", "apex"],
-        "intraday":   ["news", "research", "fundamentals", "apex"],
-        "evening":    ["validation_score"],
-        "validation": ["validation_score"],
-    }.get(job_type, ["news", "research", "fundamentals", "apex"])
+        "daily":      _DAILY_PHASES,
+        "morning":    _DAILY_PHASES,
+        "intraday":   ["news", "research", "fundamentals", "apex", "price_backfill"],
+        "evening":    ["l1_outcome", "l2_metrics", "l3_snapshot"],
+        "validation": ["l1_outcome", "l2_metrics"],
+    }.get(job_type, _DAILY_PHASES)
 
-    if job_type in ("validation", "evening"):
-        st.caption("✅ Scoring matured predictions & recomputing rolling metrics…")
-        return
-
-    # Nothing to show yet
+    # A finished run with every tracked phase still "pending" genuinely has
+    # nothing to show (e.g. no DB rows at all); a run still in progress is
+    # "starting up." Either way there's no bar data to render.
     if total == 0 and all(ph[k]["status"] == "pending" for k in phase_keys):
-        st.caption("⏳ Job starting up…")
+        st.caption("✅ Run finished — no phase data recorded." if run_finished else "⏳ Job starting up…")
         return
+
+    # Once the run has finished, a phase still "pending" wasn't skipped by the
+    # UI — the pipeline decided there was nothing to do (or never reached it).
+    # Render that as "skipped," not an indefinite "Waiting…".
+    if run_finished:
+        for k in phase_keys:
+            if ph[k]["status"] == "pending":
+                ph[k]["status"] = "skipped"
 
     PHASE_META = {
-        "news":         ("📰", "News",         "1 ·"),
-        "research":     ("🔬", "Research",     "2 ·"),
-        "fundamentals": ("📄", "Fundamentals", "3 ·"),
-        "apex":         ("🤖", "APEX",         "4 ·"),
+        "news":            ("📰", "News",             "1 ·"),
+        "short_interest":  ("📉", "Short Interest",   "1.5 ·"),
+        "research":        ("🔬", "Research",         "2 ·"),
+        "fundamentals":    ("📄", "Fundamentals",      "3 ·"),
+        "apex":            ("🤖", "APEX",              "4 ·"),
+        "risk_technical":  ("🛡️", "Risk & Technical", "4.5 ·"),
+        "universe_screen": ("🔭", "Universe Screen",   "5 ·"),
+        "price_backfill":  ("🧮", "Price Backfill",    "6 ·"),
+        "l1_outcome":      ("✅", "Outcome Scoring",   "1 ·"),
+        "l2_metrics":      ("📈", "Rolling Metrics",   "2 ·"),
+        "l3_snapshot":     ("📸", "Portfolio Snapshot","3 ·"),
     }
     STATUS_COLOR = {
         "pending":   "#475569",
         "running":   "#3B82F6",
         "done":      "#10B981",
         "exhausted": "#F59E0B",
+        "skipped":   "#6B7280",
     }
     STATUS_DOT = {
         "pending":   "#475569",
         "running":   "#3B82F6",
         "done":      "#10B981",
         "exhausted": "#F59E0B",
+        "skipped":   "#6B7280",
     }
 
     # ── milestone timeline ─────────────────────────────────────────────────────
@@ -568,7 +695,7 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
 
         # connector line before the dot (skip for first)
         if i > 0:
-            prev_done = ph[phase_keys[i - 1]]["status"] in ("done", "exhausted")
+            prev_done = ph[phase_keys[i - 1]]["status"] in ("done", "exhausted", "skipped")
             line_color = "#10B981" if prev_done else "#334155"
             dot_html += f'<div style="flex:1;height:3px;background:{line_color};margin:0 2px"></div>'
 
@@ -606,28 +733,40 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         status = p["status"]
         color  = STATUS_COLOR[status]
 
+        is_binary = k in _BINARY_PHASES
+
         if status == "pending":
             pct      = 0
             bar_text = "Waiting…"
-        elif status == "running":
-            pct        = int(p["completed"] / max(p["total"], 1) * 100)
-            ticker_str = f" · {p['ticker']} in progress" if p["ticker"] else ""
-            bar_text   = f"{p['completed']} / {p['total']} complete{ticker_str}"
-            if k == "news" and p.get("note"):
-                bar_text += f" · {p['note']}"
-        elif status == "done":
+        elif status == "skipped":
             pct      = 100
-            fail_str = f", {p['failed']} failed" if p.get("failed") else ""
-            bar_text = f"{p['completed']} saved{fail_str}"
-            if k == "research" and p.get("track_a"):
-                bar_text += f" · {p['track_a']} raw fetched"
-            if k == "news":
-                parts = []
-                if p.get("filter_analyzed"): parts.append(f"{p['filter_analyzed']} analyzed")
-                if p.get("filter_low_mat"):  parts.append(f"{p['filter_low_mat']} low-mat")
-                if p.get("filter_no_new"):   parts.append(f"{p['filter_no_new']} no-new")
-                if p.get("filter_no_art"):   parts.append(f"{p['filter_no_art']} no-art")
-                if parts: bar_text += " · " + " | ".join(parts)
+            bar_text = "⏭ Skipped — not needed this run"
+        elif status == "running":
+            if is_binary:
+                pct      = 0
+                bar_text = p.get("note") or "Running…"
+            else:
+                pct        = int(p["completed"] / max(p["total"], 1) * 100)
+                ticker_str = f" · {p['ticker']} in progress" if p["ticker"] else ""
+                bar_text   = f"{p['completed']} / {p['total']} complete{ticker_str}"
+                if k == "news" and p.get("note"):
+                    bar_text += f" · {p['note']}"
+        elif status == "done":
+            pct = 100
+            if is_binary:
+                bar_text = p.get("note") or "Done"
+            else:
+                fail_str = f", {p['failed']} failed" if p.get("failed") else ""
+                bar_text = f"{p['completed']} saved{fail_str}"
+                if k == "research" and p.get("track_a"):
+                    bar_text += f" · {p['track_a']} raw fetched"
+                if k == "news":
+                    parts = []
+                    if p.get("filter_analyzed"): parts.append(f"{p['filter_analyzed']} analyzed")
+                    if p.get("filter_low_mat"):  parts.append(f"{p['filter_low_mat']} low-mat")
+                    if p.get("filter_no_new"):   parts.append(f"{p['filter_no_new']} no-new")
+                    if p.get("filter_no_art"):   parts.append(f"{p['filter_no_art']} no-art")
+                    if parts: bar_text += " · " + " | ".join(parts)
         else:  # exhausted
             pct      = int(p["completed"] / max(p["total"], 1) * 100)
             bar_text = f"{p['completed']} / {p['total']} · ⚠️ {p.get('note', 'models exhausted')}"

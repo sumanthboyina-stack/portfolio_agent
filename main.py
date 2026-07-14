@@ -189,21 +189,30 @@ async def _main() -> None:
         log.info("=" * 60, event_type="separator")
         log.info("=== APEX Validation — Layer 1: Outcome Assignment ===", event_type="phase_start")
         log.info("=" * 60, event_type="separator")
+        if _tracker:
+            _tracker.start_phase("l1_outcome", total=1)
         r1 = evaluate_matured_predictions(force=True)
+        _l1_note = (
+            f"{r1.get('evaluated',0)} evaluated  "
+            f"{r1.get('data_missing',0)} data_missing  "
+            f"{r1.get('errors',0)} errors"
+        )
+        if _tracker:
+            _tracker.finish_phase("l1_outcome", 1, 0, note=_l1_note)
         log.info("", event_type="info")
         log.info("=" * 60, event_type="separator")
         log.info("=== APEX Validation — Layer 2: Rolling Metrics ===", event_type="phase_start")
         log.info("=" * 60, event_type="separator")
+        if _tracker:
+            _tracker.start_phase("l2_metrics", total=1)
         r2 = recompute_rolling_metrics()
+        _l2_note = f"{r2.get('metrics_written',0)} metric rows written"
+        if _tracker:
+            _tracker.finish_phase("l2_metrics", 1, 0, note=_l2_note)
         log.info("", event_type="info")
         log.info("=" * 60, event_type="separator")
-        log.info(
-            f"  L1: {r1.get('evaluated',0)} evaluated  "
-            f"{r1.get('data_missing',0)} data_missing  "
-            f"{r1.get('errors',0)} errors",
-            event_type="summary",
-        )
-        log.info(f"  L2: {r2.get('metrics_written',0)} metric rows written", event_type="summary")
+        log.info(f"  L1: {_l1_note}", event_type="summary")
+        log.info(f"  L2: {_l2_note}", event_type="summary")
         log.info("=" * 60, event_type="separator")
         if _tracker:
             _tracker.finish_run("completed")

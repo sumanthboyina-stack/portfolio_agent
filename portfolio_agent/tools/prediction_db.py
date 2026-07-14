@@ -472,11 +472,12 @@ def get_prediction_history(ticker: str, limit: int = 10) -> list[Prediction]:
 
 
 def get_matured_pending_predictions(today: str) -> list[dict]:
-    """Return predictions where evaluation_date=today and not yet evaluated."""
+    """Return predictions where evaluation_date<=today and not yet evaluated."""
     with _db() as c:
         rows = c.execute(  # noqa: E501
             """SELECT * FROM predictions
-               WHERE evaluation_date = ?
+               WHERE evaluation_date <= ?
+               AND evaluation_date IS NOT NULL AND evaluation_date != ''
                AND (evaluation_status IS NULL OR evaluation_status = 'pending')
                AND horizon_days IS NOT NULL""",
             [today],

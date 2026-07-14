@@ -80,14 +80,20 @@ async def run_batch_morning(
     # Short interest refresh — cheap no-op when settlement date hasn't changed;
     # fires one paginated FINRA pull (~twice per month) when new data is due.
     log.info("\n── Short Interest Check ────────────────────────────────────────", event_type="phase_start")
+    if tracker:
+        tracker.start_phase("short_interest", total=1)
     try:
         from portfolio_agent.tools.finra import maybe_refresh_short_interest
         maybe_refresh_short_interest(all_tickers, log=log)
+        if tracker:
+            tracker.finish_phase("short_interest", 1, 0)
     except Exception as _si_exc:
         log.warning(
             f"  [short_interest] Refresh skipped — {_si_exc}",
             event_type="warning",
         )
+        if tracker:
+            tracker.finish_phase("short_interest", 0, 1, note=str(_si_exc)[:120])
 
     log.info("\n── Phase 2: Research ───────────────────────────────────────────", event_type="phase_start")
     if not await _run_daily_research(all_tickers, always_run, tracker=tracker):
@@ -145,6 +151,8 @@ async def run_batch_morning(
     # the extended/broad tiers and writes them to screening_signals so the
     # intraday Track B can triage them with news+research later in the day.
     log.info("\n── Phase 5: Universe Screen (math only) ────────────────────────", event_type="phase_start")
+    if tracker:
+        tracker.start_phase("universe_screen", total=1)
     try:
         from portfolio_agent.tools.universe_db import needs_refresh as _universe_needs_refresh
         from portfolio_agent.tools.screener import screen_universe as _screen_universe
@@ -163,31 +171,42 @@ async def run_batch_morning(
         )
         total = len(promoted_ext) + len(promoted_broad)
         if total:
+            _univ_note = (
+                f"{total} candidate(s) flagged "
+                f"({len(promoted_ext)} extended, {len(promoted_broad)} broad)"
+            )
             log.info(
-                f"  [universe] {total} candidate(s) flagged "
-                f"({len(promoted_ext)} extended, {len(promoted_broad)} broad) "
-                f"— intraday checks will triage these.",
+                f"  [universe] {_univ_note} — intraday checks will triage these.",
                 event_type="summary",
             )
         else:
-            log.info("  [universe] No signals today.", event_type="info")
+            _univ_note = "No signals today"
+            log.info(f"  [universe] {_univ_note}.", event_type="info")
+        if tracker:
+            tracker.finish_phase("universe_screen", 1, 0, note=_univ_note)
     except Exception as _univ_exc:
         log.warning(f"  [universe] Screen skipped — {_univ_exc}", event_type="warning")
+        if tracker:
+            tracker.finish_phase("universe_screen", 0, 1, note=str(_univ_exc)[:120])
 
     log.info("\n── Price History Backfill ──────────────────────────────────────", event_type="phase_start")
+    if tracker:
+        tracker.start_phase("price_backfill", total=1)
     try:
         from portfolio_agent.tools.holdings_db import backfill_missing_price_snapshots
         rb = backfill_missing_price_snapshots()
         if rb.get("backfilled", 0) > 0:
-            log.info(
-                f"  Backfilled {rb['backfilled']} price rows across "
-                f"{rb['missing_days']} missing day(s)",
-                event_type="summary",
-            )
+            _pb_note = f"Backfilled {rb['backfilled']} price rows across {rb['missing_days']} missing day(s)"
+            log.info(f"  {_pb_note}", event_type="summary")
         else:
-            log.info("  Price history up to date — nothing to backfill.", event_type="info")
+            _pb_note = "Price history up to date — nothing to backfill"
+            log.info(f"  {_pb_note}.", event_type="info")
+        if tracker:
+            tracker.finish_phase("price_backfill", 1, 0, note=_pb_note)
     except Exception as e:
         log.warning(f"  Price backfill failed — {e}", event_type="warning")
+        if tracker:
+            tracker.finish_phase("price_backfill", 0, 1, note=str(e)[:120])
 
     if tracker:
         tracker.finish_run("completed")
@@ -221,6 +240,9 @@ async def _run_morning_apex_event_driven(
 
     if not is_trading_day(today_date):
         log.info(f"  [{today}] Not a trading day — skipping APEX.", event_type="info")
+        if tracker:
+            tracker.start_phase("apex", total=0)
+            tracker.finish_phase("apex", 0, 0, note="not a trading day")
         return
 
     # Detect events (writes to trigger_events table)
@@ -293,6 +315,9 @@ async def _run_morning_apex_event_driven(
             "  No predictions needed today (no scheduled horizons + no events).",
             event_type="info",
         )
+        if tracker:
+            tracker.start_phase("apex", total=0)
+            tracker.finish_phase("apex", 0, 0, note="no predictions needed today")
         return
 
     effective_horizons = sorted(needed_horizons)

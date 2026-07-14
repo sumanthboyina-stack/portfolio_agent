@@ -125,14 +125,22 @@ with st.sidebar:
         'Model filter</p>',
         unsafe_allow_html=True,
     )
-    _HIGHER_MODELS = frozenset({'Claude-Sonnet', 'GPT-4o', 'Claude-Sonnet + GPT-4o'})
+    def _is_higher_reasoning(model_name: str) -> bool:
+        # Substring match (not an exact-string set) so ensemble label variants —
+        # e.g. "Claude-Sonnet+GPT-4o" vs "Claude-Sonnet + GPT-4o" — and future
+        # GPT-4x releases are all still classified correctly.
+        n = model_name.lower()
+        return "claude" in n or "gpt-4" in n
 
     _all_model_names = _get_model_names()
-    _higher_names = [m for m in _all_model_names if m in _HIGHER_MODELS]
-    _lower_names  = [m for m in _all_model_names if m not in _HIGHER_MODELS]
+    _higher_names = [m for m in _all_model_names if _is_higher_reasoning(m)]
+    _lower_names  = [m for m in _all_model_names if not _is_higher_reasoning(m)]
 
-    # Options: "All models" + each higher model individually + "Lower reasoning" (grouped)
-    _radio_options = ["All models"] + _higher_names + (["Lower reasoning"] if _lower_names else [])
+    _radio_options = ["All models"]
+    if _higher_names:
+        _radio_options.append("Higher reasoning")
+    if _lower_names:
+        _radio_options.append("Lower reasoning")
 
     _model_sel = st.selectbox(
         "model_filter",
@@ -142,24 +150,24 @@ with st.sidebar:
         key="val_model_radio",
     )
 
+    _GROUP_NAMES = {"Higher reasoning": _higher_names, "Lower reasoning": _lower_names}
+
     if _model_sel == "All models":
         _model_filter: list[str] | None = None
         st.caption("All predictions — no model filter applied")
-    elif _model_sel == "Lower reasoning":
-        _model_filter = _lower_names
-        # Show individual names so user knows what's included in the group
+    else:
+        _model_filter = _GROUP_NAMES[_model_sel]
+        icon = "🧠" if _model_sel == "Higher reasoning" else "⚡"
+        st.caption(f"{icon} {_model_sel} (GPT-4x / Claude)" if _model_sel == "Higher reasoning" else f"{icon} {_model_sel}")
+        # Show individual names so the user knows what's included in the group
         st.markdown(
             '<div style="margin-top:4px">' +
             "".join(
-                f'<div style="font-size:0.68rem;color:#6B7280;padding:1px 0">⚡ {m}</div>'
-                for m in _lower_names
+                f'<div style="font-size:0.68rem;color:#6B7280;padding:1px 0">{icon} {m}</div>'
+                for m in _model_filter
             ) + '</div>',
             unsafe_allow_html=True,
         )
-    else:
-        # Individual higher-reasoning model selected
-        _model_filter = [_model_sel]
-        st.caption(f"🧠 Higher reasoning model")
 
     st.divider()
 

@@ -18,6 +18,7 @@ Track B — Trending tickers (new opportunity discovery)
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -113,6 +114,13 @@ async def run_batch_intraday(
     log.info(f"  {len(trending_tickers)} trending tickers found, {len(trending_new)} outside portfolio", event_type="info")
     log.info(f"{'━' * 64}", event_type="separator")
 
+    run_id = os.environ.get("PIPELINE_RUN_ID", "")
+    log_file = str(_PROJECT_ROOT / "logs" / f"{run_id}.log") if run_id else ""
+    from portfolio_agent.tools.progress_tracker import PipelineProgressTracker as _Tracker
+    tracker = _Tracker(run_id, "intraday", os.getpid(), log_file) if run_id else None
+    if tracker:
+        tracker.set_total(len(portfolio_tickers) + len(trending_new))
+
     from portfolio_agent.config import get_event_driven_config
     from portfolio_agent.events.detector import run_all_detectors
     from portfolio_agent.events.db import get_pending_events
@@ -127,10 +135,14 @@ async def run_batch_intraday(
 
     if not is_trading_day(today_date):
         log.info(f"  [{today}] Not a trading day — skipping intraday check.", event_type="info")
+        if tracker:
+            tracker.finish_run("completed")
         return
 
     if not config.get("enabled", True):
         log.info("  event_driven disabled in config — skipping.", event_type="info")
+        if tracker:
+            tracker.finish_run("completed")
         return
 
     # ── Event detection on all tickers ───────────────────────────────────────
@@ -165,7 +177,7 @@ async def run_batch_intraday(
         }
         await _run_daily_apex(
             portfolio_triggered,
-            tracker=None,
+            tracker=tracker,
             trigger_map=trigger_map,
             scheduled_horizons_override=[5],
         )
@@ -244,14 +256,14 @@ async def run_batch_intraday(
             trending_from_news=severity_promoted,  # only newly-promoted ones
             extra_tickers=None,
             watchlist_path=wp,
-            tracker=None,
+            tracker=tracker,
         )
 
         # Research phase — always_run forces Track B tickers through even if fresh
         await _run_daily_research(
             all_tickers=research_tickers,
             always_run=set(research_tickers),
-            tracker=None,
+            tracker=tracker,
         )
 
         # Fundamentals phase — EDGAR check for trending tickers
@@ -259,7 +271,7 @@ async def run_batch_intraday(
         await _run_daily_fundamentals(
             all_tickers=research_tickers,
             always_run=set(research_tickers),
-            tracker=None,
+            tracker=tracker,
         )
 
         # APEX 5d predictions — opportunity discovery for trending tickers
@@ -271,22 +283,30 @@ async def run_batch_intraday(
         }
         await _run_daily_apex(
             research_tickers,
-            tracker=None,
+            tracker=tracker,
             trigger_map=trending_trigger_map,
             scheduled_horizons_override=[5],
         )
 
     # ── Price History Backfill (fill any gaps from missed evening runs) ──────
+    if tracker:
+        tracker.start_phase("price_backfill", total=1)
     try:
         from portfolio_agent.tools.holdings_db import backfill_missing_price_snapshots
         rb = backfill_missing_price_snapshots()
         if rb.get("backfilled", 0) > 0:
-            log.info(
-                f"  [Price Backfill] {rb['backfilled']} rows inserted for "
-                f"{rb['missing_days']} missing day(s)",
-                event_type="summary",
-            )
+            _pb_note = f"{rb['backfilled']} rows inserted for {rb['missing_days']} missing day(s)"
+            log.info(f"  [Price Backfill] {_pb_note}", event_type="summary")
+        else:
+            _pb_note = "Nothing to backfill"
+        if tracker:
+            tracker.finish_phase("price_backfill", 1, 0, note=_pb_note)
     except Exception as e:
         log.warning(f"  [Price Backfill] failed — {e}", event_type="warning")
+        if tracker:
+            tracker.finish_phase("price_backfill", 0, 1, note=str(e)[:120])
+
+    if tracker:
+        tracker.finish_run("completed")
 
     log.info("\nIntraday batch complete.", event_type="phase_end")
