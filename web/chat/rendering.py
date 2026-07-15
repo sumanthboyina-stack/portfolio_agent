@@ -466,6 +466,20 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
     )
     st.markdown(card_html, unsafe_allow_html=True)
 
+    # Chart only for a freshly-generated card (show_history=True), not on replay of
+    # past messages -- otherwise every historical prediction in the session would
+    # re-fetch live price data on each page load.
+    if show_history and data.get("ticker"):
+        try:
+            from web.components.predictions_charts import _plot_price_chart
+            fig_price = _plot_price_chart(data["ticker"], period="6mo")
+        except Exception:
+            fig_price = None
+        if fig_price is not None:
+            with st.expander("📉 Price Chart", expanded=True):
+                st.plotly_chart(fig_price, use_container_width=True,
+                                 config={"displayModeBar": False})
+
     if show_history:
         from portfolio_agent.tools.prediction_db import get_prediction_history
         hist = get_prediction_history(data.get("ticker",""), limit=6)

@@ -3,7 +3,7 @@ Chat tool definitions + implementations.
 
 Contains:
   - _search_ticker_by_name   : yfinance company-name lookup
-  - _CHAT_TOOLS              : 16-entry tool schema list for LiteLLM
+  - _CHAT_TOOLS              : tool schema list for LiteLLM
   - _chat_tool_*             : one function per tool
   - _execute_chat_tool()     : dispatcher called by orchestration
 """
@@ -321,6 +321,59 @@ _CHAT_TOOLS = [
                     },
                 },
                 "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_technical_snapshot",
+            "description": (
+                "Get the current technical setup for a stock: SMA20/50/200, RSI14, MACD, "
+                "Bollinger Bands, ATR14, and price vs SMA50 %. Use for questions about "
+                "momentum, trend, overbought/oversold, moving averages, or 'technical setup' "
+                "on a specific ticker."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_portfolio_sector_allocation",
+            "description": (
+                "Get the current portfolio's exposure broken down by sector -- % of "
+                "portfolio value and the tickers in each sector. Use when the user asks "
+                "about sector allocation, diversification, or 'what sectors am I in.'"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_portfolio_risk_flags",
+            "description": (
+                "Get the daily Risk/Technical specialists' flags for portfolio holdings -- "
+                "correlation vs the portfolio, sector/issuer concentration %, beta vs SPY, "
+                "and bearish-momentum warnings. Pass a ticker to get that position's flags "
+                "specifically (active or not); omit it to get every currently-active "
+                "('flag=1') warning across the whole portfolio, same as the dashboard's "
+                "Attention Queue. Use for questions about concentration risk, correlation "
+                "between holdings, or whether a position is flagged."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Optional -- restrict to this ticker's flags.",
+                    }
+                },
             },
         },
     },
@@ -769,6 +822,105 @@ def _chat_tool_get_predictions_summary(segment: str = "all",
         return {"note": f"DB query failed: {exc}"}
 
 
+def _chat_tool_get_technical_snapshot(ticker: str) -> dict:
+    try:
+        from portfolio_agent.tools.yfinance_tools import get_technical_indicators
+        return json.loads(get_technical_indicators(ticker.upper()))
+    except Exception as exc:
+        return {"ticker": ticker.upper(), "note": f"Technical data unavailable: {exc}"}
+
+
+def _chat_tool_get_portfolio_sector_allocation() -> dict:
+    db_path = _ROOT / "data" / "portfolio.db"
+    if not db_path.exists():
+        return {"note": "Database not found. Run the pipeline first."}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        holdings = [dict(r) for r in conn.execute("""
+            SELECT ticker, SUM(COALESCE(current_value,0)) current_value
+            FROM holdings GROUP BY ticker
+        """).fetchall()]
+        conn.close()
+        if not holdings:
+            return {"note": "No holdings found."}
+        tv = sum(h["current_value"] for h in holdings) or 1.0
+
+        from portfolio_agent.tools.universe_db import get_sectors
+        sectors = get_sectors([h["ticker"] for h in holdings])
+
+        sector_totals: dict[str, float] = {}
+        sector_tickers: dict[str, list[str]] = {}
+        for h in holdings:
+            s = sectors.get(h["ticker"], "Unknown")
+            sector_totals[s] = sector_totals.get(s, 0.0) + h["current_value"]
+            sector_tickers.setdefault(s, []).append(h["ticker"])
+
+        allocation = sorted(
+            (
+                {
+                    "sector": s,
+                    "weight_pct": round(v / tv * 100, 1),
+                    "value": round(v, 2),
+                    "tickers": sector_tickers[s],
+                }
+                for s, v in sector_totals.items()
+            ),
+            key=lambda x: x["weight_pct"], reverse=True,
+        )
+        return {"source": "db", "total_value": round(tv, 2), "allocation": allocation}
+    except Exception as exc:
+        return {"note": f"DB query failed: {exc}"}
+
+
+def _chat_tool_get_portfolio_risk_flags(ticker: str = "") -> dict:
+    try:
+        from portfolio_agent.tools.risk_flags_db import get_active_flags, get_flags_for_ticker
+
+        if ticker:
+            flags = get_flags_for_ticker(ticker.upper())
+            if not flags:
+                return {"ticker": ticker.upper(),
+                        "note": "No risk/technical flag data for this ticker yet."}
+            out = {}
+            for source, row in flags.items():
+                row = dict(row)
+                try:
+                    row["detail"] = json.loads(row.pop("raw_json", None) or "{}")
+                except Exception:
+                    row["detail"] = {}
+                out[source] = row
+            return {"ticker": ticker.upper(), "flags": out}
+
+        db_path = _ROOT / "data" / "portfolio.db"
+        holding_tickers: set = set()
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            holding_tickers = {r[0] for r in conn.execute("SELECT DISTINCT ticker FROM holdings").fetchall()}
+            conn.close()
+
+        active = [f for f in get_active_flags(None)
+                  if not holding_tickers or f["ticker"] in holding_tickers]
+        for f in active:
+            try:
+                f["detail"] = json.loads(f.pop("raw_json", None) or "{}")
+            except Exception:
+                f["detail"] = {}
+        return {
+            "as_of_date": active[0]["as_of_date"] if active else None,
+            "count": len(active),
+            "flags": active,
+            "note": (
+                "flag=1 rows only -- these are the active concentration/correlation/"
+                "beta/momentum warnings the dashboard's Attention Queue surfaces."
+                if active else
+                "No active risk/technical flags for current holdings."
+            ),
+        }
+    except Exception as exc:
+        return {"ticker": ticker.upper() if ticker else None, "note": f"DB query failed: {exc}"}
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 def _execute_chat_tool(name: str, args: dict) -> str:
@@ -816,6 +968,12 @@ def _execute_chat_tool(name: str, args: dict) -> str:
                 segment=args.get("segment", "all"),
                 recommendation=args.get("recommendation"),
             )
+        elif name == "get_technical_snapshot":
+            result = _chat_tool_get_technical_snapshot(args.get("ticker", ""))
+        elif name == "get_portfolio_sector_allocation":
+            result = _chat_tool_get_portfolio_sector_allocation()
+        elif name == "get_portfolio_risk_flags":
+            result = _chat_tool_get_portfolio_risk_flags(args.get("ticker", ""))
         else:
             result = {"error": f"Unknown tool: {name}"}
         return json.dumps(result, default=str)

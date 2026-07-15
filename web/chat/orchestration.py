@@ -86,6 +86,9 @@ These query the local portfolio database and return real pipeline results:
 | Specific ticker broker research | `get_research` |
 | Specific ticker news | `get_ticker_news` |
 | Specific ticker price | `get_price_history` |
+| Specific ticker momentum/trend/RSI/moving averages/"technical setup" | `get_technical_snapshot` |
+| "sector allocation", "diversification", "what sectors am I in" | `get_portfolio_sector_allocation` |
+| "am I too concentrated", "correlated holdings", "risk flags", "beta vs the market" | `get_portfolio_risk_flags` |
 
 ### Broad screening questions (no single ticker in mind)
 Questions like "what's the most opportunistic stock right now", "what looks undervalued", \

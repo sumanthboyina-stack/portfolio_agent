@@ -428,6 +428,38 @@ if not st.session_state.session_id and not st.session_state.messages:
     )
     st.markdown(_hero_html, unsafe_allow_html=True)
 
+    # ── Attention Queue nudge -- same critical-tier logic as the dashboard ────
+    from web.data.attention import get_critical_nudge_items
+    _nudges = get_critical_nudge_items(limit=3)
+    if _nudges:
+        _n = len(_nudges)
+        st.markdown(
+            f'<div style="max-width:760px;margin:0 auto 10px;background:{DANGER_LIGHT};'
+            f'border:1px solid {DANGER}33;border-radius:12px;padding:14px 18px 4px">'
+            f'<div style="font-size:0.78rem;font-weight:700;color:{DANGER};'
+            f'text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">'
+            f'⚠️ {_n} item{"s" if _n != 1 else ""} need your attention</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        _nudge_cols = st.columns(len(_nudges))
+        for _ni, _nudge in enumerate(_nudges):
+            with _nudge_cols[_ni]:
+                if st.button(_nudge["title"], use_container_width=True, key=f"nudge_{_ni}"):
+                    if not st.session_state.session_id:
+                        _new_chat()
+                    st.session_state.messages.append({
+                        "role": "user", "content": _nudge["query"],
+                        "type": "text", "metadata": {},
+                    })
+                    _nudge_tickers = _extract_tickers(_nudge["query"])
+                    if not _nudge_tickers and _nudge.get("ticker"):
+                        _nudge_tickers = [_nudge["ticker"]]
+                    st.session_state.current_tickers = _nudge_tickers
+                    st.session_state.chat_no_ticker  = not _nudge_tickers
+                    st.rerun()
+        st.markdown('<div style="margin-bottom:8px"></div>', unsafe_allow_html=True)
+
     # Suggested prompts
     st.markdown(
         '<p style="text-align:center;font-size:0.72rem;font-weight:700;'
