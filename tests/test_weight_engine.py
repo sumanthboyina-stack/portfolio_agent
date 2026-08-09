@@ -52,21 +52,31 @@ def test_normalize_floor_is_pre_normalization_only():
 
 
 def test_news_signal_no_data_returns_none():
-    boost, event, _ = _news_signal([])
+    boost, event, penalty, _ = _news_signal([])
     assert event == "NONE"
     assert boost == 0.0
 
 
+def test_news_signal_no_data_applies_real_penalty():
+    # Regression test: missing news used to only skip the boost (leaving the
+    # base weight fully intact) despite the rationale claiming "minimum
+    # weight" -- it must now actually apply a nonzero penalty so the raw
+    # weight shrinks, matching how fundamentals/research already behave.
+    _, _, penalty, _ = _news_signal([])
+    assert penalty > 0.0
+
+
 def test_news_signal_detects_earnings_release():
     news = [{"date": "2099-01-01", "headline_1": "Company beat estimates", "headline_2": "", "summary": ""}]
-    boost, event, _ = _news_signal(news)
+    boost, event, penalty, _ = _news_signal(news)
     assert event == "EARNINGS_RELEASE"
     assert boost > 0
+    assert penalty == 0.0
 
 
 def test_news_signal_detects_leadership_change():
     news = [{"date": "2099-01-01", "headline_1": "CEO resigns amid controversy", "headline_2": "", "summary": ""}]
-    boost, event, _ = _news_signal(news)
+    boost, event, penalty, _ = _news_signal(news)
     assert event == "LEADERSHIP_CHANGE"
 
 
@@ -134,3 +144,4 @@ def test_compute_dynamic_weights_legacy_includes_all_horizons_when_requested():
     )
     assert sum(result["weights"].values()) == pytest.approx(1.0, abs=1e-3)
     assert set(result["weights_by_horizon"].keys()) == set(HORIZON_BASE_WEIGHTS.keys())
+    

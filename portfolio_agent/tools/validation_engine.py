@@ -41,6 +41,15 @@ RETURN_BUCKETS = [
 _BUCKET_NAMES = [b[0] for b in RETURN_BUCKETS]
 _BUCKET_TO_PROB_KEY = {name: f"p_{name}" for name in _BUCKET_NAMES}
 
+# Single source of truth for the UP/DOWN/FLAT categorical threshold.
+# Must match the "flat (-1% to +1%)" band the model is prompted with
+# (see prompt_templates.py's distribution instructions) — previously this
+# was hardcoded to 0.005 (±0.5%) in six places below, half the width of what
+# the model was actually told "flat" means, which made every FLAT call
+# nearly impossible to score correct (real 5-day moves rarely land inside
+# ±0.5%). Kept as a single constant so it can't drift out of sync again.
+FLAT_THRESHOLD = 0.01
+
 
 def actual_return_bucket(ret: float) -> str:
     """Map an actual return (fraction, e.g. 0.03 = +3%) to its bucket name."""
@@ -75,7 +84,7 @@ def compute_distribution_metrics(pred: dict, actual_ret: float) -> tuple[Optiona
     Returns (brier_score, log_loss), or (None, None) if distribution is absent.
 
     p_up = P(moderate_up) + P(strong_up) derived from the 5-bucket distribution.
-    actual_up = 1 if actual_ret > +0.5%, else 0 (flat and down both count as "not up").
+    actual_up = 1 if actual_ret > +1%, else 0 (flat and down both count as "not up").
 
     Binary Brier = (p_up − actual_up)²   range [0, 1]  baseline (coin flip) = 0.25
     Binary log-loss = −[a·log(p) + (1−a)·log(1−p)]   baseline = ln(2) ≈ 0.693
@@ -85,7 +94,7 @@ def compute_distribution_metrics(pred: dict, actual_ret: float) -> tuple[Optiona
     if p_up is None:
         return None, None
 
-    actual_up = 1.0 if actual_ret > 0.005 else 0.0
+    actual_up = 1.0 if actual_ret > FLAT_THRESHOLD else 0.0
 
     brier = (p_up - actual_up) ** 2
 
@@ -104,7 +113,7 @@ class Outcome:
 
 
 def score_outcome(pred: dict, actual_return: float) -> Outcome:
-    actual_dir  = "UP" if actual_return > 0.005 else "DOWN" if actual_return < -0.005 else "FLAT"
+    actual_dir  = "UP" if actual_return > FLAT_THRESHOLD else "DOWN" if actual_return < -FLAT_THRESHOLD else "FLAT"
     pred_dir    = (pred.get("predicted_direction") or "").upper()
     r_lo = (pred.get("predicted_return_low")  or 0.0) / 100
     r_hi = (pred.get("predicted_return_high") or 0.0) / 100
@@ -194,7 +203,7 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
             )
 
             outcome    = score_outcome(pred, actual_return)
-            actual_dir = "UP" if actual_return > 0.005 else "DOWN" if actual_return < -0.005 else "FLAT"
+            actual_dir = "UP" if actual_return > FLAT_THRESHOLD else "DOWN" if actual_return < -FLAT_THRESHOLD else "FLAT"
             r_lo       = (pred.get("predicted_return_low")  or 0.0) / 100
             r_hi       = (pred.get("predicted_return_high") or 0.0) / 100
             in_range   = bool(r_lo != 0 or r_hi != 0) and (r_lo <= actual_return <= r_hi)
@@ -566,7 +575,7 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
 
     Binary metrics use:
       p_up = (p_moderate_up + p_strong_up) / 100   (normalised to [0, 1])
-      actual_up = 1 if actual_return > +0.5%, else 0
+      actual_up = 1 if actual_return > +1%, else 0
       Brier baseline = 0.25 (coin flip), log-loss baseline = ln(2) ≈ 0.693
     """
     clauses = ["evaluation_status = 'evaluated'", "actual_direction IS NOT NULL"]
@@ -613,7 +622,7 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
     if dist_rows:
         brier_vals, ll_vals = [], []
         for r, p_up in dist_rows:
-            actual_up = 1.0 if (r.get("actual_return") or 0) > 0.005 else 0.0
+            actual_up = 1.0 if (r.get("actual_return") or 0) > FLAT_THRESHOLD else 0.0
             brier_vals.append((p_up - actual_up) ** 2)
             p_clip = max(min(p_up, 1 - 1e-6), 1e-6)
             ll_vals.append(-(actual_up * math.log(p_clip) + (1 - actual_up) * math.log(1 - p_clip)))
@@ -623,7 +632,7 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
     # ── Reliability diagram (10 bins of p_up) ─────────────────────────────────
     bins: list[list] = [[] for _ in range(10)]
     for r, p_up in dist_rows:
-        actual_up = 1.0 if (r.get("actual_return") or 0) > 0.005 else 0.0
+        actual_up = 1.0 if (r.get("actual_return") or 0) > FLAT_THRESHOLD else 0.0
         idx = min(int(p_up * 10), 9)
         bins[idx].append((p_up, actual_up))
 
@@ -669,7 +678,7 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
             continue
         b_vals, l_vals = [], []
         for r, p_up in h_rows:
-            actual_up = 1.0 if (r.get("actual_return") or 0) > 0.005 else 0.0
+            actual_up = 1.0 if (r.get("actual_return") or 0) > FLAT_THRESHOLD else 0.0
             b_vals.append((p_up - actual_up) ** 2)
             p_clip = max(min(p_up, 1 - 1e-6), 1e-6)
             l_vals.append(-(actual_up * math.log(p_clip) + (1 - actual_up) * math.log(1 - p_clip)))

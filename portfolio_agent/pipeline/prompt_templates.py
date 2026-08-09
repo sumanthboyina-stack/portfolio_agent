@@ -311,23 +311,25 @@ End your response with EXACTLY this JSON block (no text after):
     {{
       "horizon_days": 5,
       "predicted_direction": "UP|DOWN|FLAT",
-      "predicted_return_low": 1.5,
-      "predicted_return_high": 4.0,
-      "conviction_score": 7,
-      "horizon_composite": 6.8,
-      "weights_used": {{"news": 0.60, "research": 0.22, "macro": 0.12, "fundamentals": 0.06}},
-      "reasoning_text": "News/momentum catalyst driving 5-day outlook",
+      "predicted_return_low": -1.0,
+      "predicted_return_high": 2.0,
+      "conviction_score": 5,
+      "horizon_composite": 5.5,
+      "weights_used": {{"news": 0.35, "research": 0.30, "macro": 0.20, "fundamentals": 0.15}},
+      "reasoning_text": "Replace with ticker-specific reasoning tied to this ticker's actual data above -- do not reuse this placeholder text or its numbers verbatim",
       "distribution": {{
-        "strong_down": 5,
-        "moderate_down": 10,
-        "flat": 15,
-        "moderate_up": 45,
-        "strong_up": 25
+        "strong_down": 10,
+        "moderate_down": 20,
+        "flat": 25,
+        "moderate_up": 30,
+        "strong_up": 15
       }}
     }}
   ]
 }}
-```"""
+```
+
+IMPORTANT: the values above (direction, return range, conviction, weights, distribution) are a FORMATTING example only, not a default or a prior. Each ticker's actual weights_used must come from that ticker's own dynamic_weights.weights_by_horizon (see step 5) — not copied from this example. When a data source has thin or missing data (e.g. no news today), do not let another source's estimate quietly fill the gap at full conviction: reflect the added uncertainty in a wider distribution and a lower conviction_score, not just in the prose."""
 
 # ── Publisher quality tiers used by _rank_articles ────────────────────────────
 _NEWS_PUB_TIER1 = frozenset({

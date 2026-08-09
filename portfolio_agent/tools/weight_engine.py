@@ -116,10 +116,24 @@ _SECTOR_ROTATION = {
 
 # ── Signal detection (horizon-independent) ────────────────────────────────────
 
-def _news_signal(news_data: list[dict]) -> tuple[float, str, str]:
-    """Returns (boost, event_type, rationale)."""
+def _news_signal(news_data: list[dict]) -> tuple[float, str, float, str]:
+    """
+    Returns (boost, event_type, penalty, rationale).
+
+    Unlike research/fundamentals, this used to only ever apply a *boost* (0 to
+    4.5x) on top of the base news weight, with no penalty path — so a ticker
+    with zero news still kept its full base news weight (55% for the 5-day
+    horizon) despite the rationale text claiming "news receives minimum
+    weight." That mismatch let an empty, unpenalized news slot quietly anchor
+    the composite score toward whatever neutral-ish news_score the LLM had to
+    invent for missing data, while the model's own reasoning text correctly
+    talked around the gap (citing research/fundamentals instead) — a real
+    disconnect between the stated explanation and the actual weighting.
+    penalty now actually shrinks the news weight when data is absent or inert,
+    matching how _fundamentals_penalty / research's r_penalty already work.
+    """
     if not news_data:
-        return _B_NONE, "NONE", "No news data — news receives minimum weight"
+        return _B_NONE, "NONE", _P_HEAVY, "No news data — news weight reduced, redistributed to other analysts"
 
     recent_cutoff = (date.today() - timedelta(days=2)).isoformat()
     recent = [n for n in news_data if (n.get("date") or "") >= recent_cutoff]
@@ -137,33 +151,33 @@ def _news_signal(news_data: list[dict]) -> tuple[float, str, str]:
     ).lower()
 
     if any(kw in all_text for kw in _EARNINGS_BEAT_MISS):
-        return _B_DOMINANT, "EARNINGS_RELEASE", (
+        return _B_DOMINANT, "EARNINGS_RELEASE", _P_NONE, (
             "Earnings print detected in last 2 days "
             "(beat/miss keywords) — actual results dominate signal"
         )
     if any(kw in all_text for kw in _EARNINGS_BROAD):
-        return _B_HIGH, "EARNINGS_PREVIEW", (
+        return _B_HIGH, "EARNINGS_PREVIEW", _P_NONE, (
             "Earnings-adjacent news (guidance / preview) detected — elevated news weight"
         )
     if any(kw in all_text for kw in _LEADERSHIP):
-        return _B_DOMINANT, "LEADERSHIP_CHANGE", (
+        return _B_DOMINANT, "LEADERSHIP_CHANGE", _P_NONE, (
             "Executive change detected — leadership news dominates near-term signal; "
             "historical fundamentals become less predictive"
         )
     if any(kw in all_text for kw in _MA):
-        return _B_HIGH, "MA_EVENT", (
+        return _B_HIGH, "MA_EVENT", _P_NONE, (
             "M&A activity detected — deal news dominates valuation signal"
         )
     if any(kw in all_text for kw in _REGULATORY):
-        return _B_HIGH, "REGULATORY", (
+        return _B_HIGH, "REGULATORY", _P_NONE, (
             "Regulatory event detected (FDA / SEC / legal) — binary risk dominates"
         )
     if any(kw in all_text for kw in _MACRO_EVENT):
-        return _B_MEDIUM, "MACRO_NEWS", (
+        return _B_MEDIUM, "MACRO_NEWS", _P_NONE, (
             "Fed / macro event news detected — macro weight also elevated separately"
         )
     if any(kw in full_text for kw in _SECTOR_ROTATION):
-        return _B_LOW, "SECTOR_ROTATION", (
+        return _B_LOW, "SECTOR_ROTATION", _P_NONE, (
             "Sector rotation keywords in 7-day news — macro + news both mildly elevated"
         )
 
@@ -174,19 +188,19 @@ def _news_signal(news_data: list[dict]) -> tuple[float, str, str]:
     if scores:
         avg_mag = sum(abs(s) for s in scores) / len(scores)
         if avg_mag > 0.5:
-            return _B_MEDIUM, "ELEVATED_SENTIMENT", (
+            return _B_MEDIUM, "ELEVATED_SENTIMENT", _P_NONE, (
                 f"Strong average sentiment magnitude ({avg_mag:.2f}) — "
                 "news signal elevated above baseline"
             )
         if avg_mag > 0.2:
-            return _B_LOW, "MILD_SENTIMENT", (
+            return _B_LOW, "MILD_SENTIMENT", _P_NONE, (
                 f"Mild average sentiment ({avg_mag:.2f}) — "
                 "slight news weight boost"
             )
 
-    return _B_NONE, "NONE", (
-        "No material news signal detected — news receives minimum weight; "
-        "fundamentals and research carry the analysis"
+    return _B_NONE, "NONE", _P_MEDIUM, (
+        "No material news signal detected — news weight reduced; "
+        "fundamentals and research carry more of the analysis"
     )
 
 
@@ -343,7 +357,7 @@ def _apply_signals(
     Returns (raw_weights, regime, rationale, data_caps, signal_strengths).
     raw_weights are pre-floor, pre-normalization.
     """
-    n_boost, news_event, n_rat   = _news_signal(news_data)
+    n_boost, news_event, n_penalty, n_rat = _news_signal(news_data)
     m_boost, macro_event, m_rat  = _macro_signal(macro_snapshot)
     r_boost, r_penalty, r_rat    = _research_signal(research_data)
     f_penalty, f_rat             = _fundamentals_penalty(fundamentals_data, news_event)
@@ -352,7 +366,7 @@ def _apply_signals(
         "fundamentals": base["fundamentals"] * (1.0 - f_penalty),
         "research":     base["research"]     * (1.0 + r_boost) * (1.0 - r_penalty),
         "macro":        base["macro"]        * (1.0 + m_boost),
-        "news":         base["news"]         * (1.0 + n_boost),
+        "news":         base["news"]         * (1.0 + n_boost) * (1.0 - n_penalty),
     }
 
     if news_event in ("EARNINGS_RELEASE", "LEADERSHIP_CHANGE"):
@@ -388,6 +402,7 @@ def _apply_signals(
         "macro_boost":    m_boost,
         "research_boost": r_boost,
         "fund_penalty":   f_penalty,
+        "news_penalty":   n_penalty,
         "news_event":     news_event,
         "macro_event":    macro_event,
     }
