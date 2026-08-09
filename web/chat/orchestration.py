@@ -196,7 +196,7 @@ def _run_chat_agent_thread(
         from dotenv import load_dotenv
         load_dotenv(_ROOT / ".env")
         import litellm
-        from portfolio_agent._models import FAILOVER_CHAINS, _is_failover_error
+        from portfolio_agent._models import FAILOVER_CHAINS
 
         chat_chain = FAILOVER_CHAINS.get("flash", [])
         ticker_hint = (
@@ -263,7 +263,7 @@ def _run_chat_agent_thread(
                 return
 
             except Exception as exc:
-                if _is_failover_error(exc) and (model_id, provider, label) != chat_chain[-1]:
+                if _is_apex_transient(exc) and (model_id, provider, label) != chat_chain[-1]:
                     q.put(("warn", f"⚠ {label} failed -- trying next model…"))
                     continue
                 q.put(("error", str(exc)))

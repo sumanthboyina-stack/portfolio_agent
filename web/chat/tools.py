@@ -238,9 +238,13 @@ _CHAT_TOOLS = [
             "name": "get_portfolio_summary",
             "description": (
                 "Get current portfolio holdings from the local database: tickers, shares, "
-                "current value, cost basis, weight%, and latest APEX recommendation for each. "
-                "Use when user asks about their portfolio, what they own, their holdings, "
-                "portfolio performance, or portfolio composition."
+                "current value, cost basis, sector, weight%, and latest APEX recommendation "
+                "for each. Also returns day_change_dollar / day_change_pct -- the portfolio's "
+                "change in value versus the most recent prior trading day, sourced from the "
+                "nightly portfolio_price_history snapshot (or a live previous-close fetch if "
+                "that snapshot isn't available yet). Use when user asks about their portfolio, "
+                "what they own, their holdings, how the portfolio performed today, portfolio "
+                "performance, sector allocation, or portfolio composition."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -738,7 +742,8 @@ def _chat_tool_get_portfolio_summary() -> dict:
             SELECT ticker,
                    SUM(shares) shares,
                    SUM(COALESCE(current_value,0)) current_value,
-                   SUM(COALESCE(cost_basis_total, shares*avg_cost, 0)) cost_basis
+                   SUM(COALESCE(cost_basis_total, shares*avg_cost, 0)) cost_basis,
+                   MAX(sector) sector
             FROM holdings GROUP BY ticker ORDER BY current_value DESC
         """).fetchall()]
         tv = sum(h["current_value"] for h in holdings)
@@ -762,16 +767,103 @@ def _chat_tool_get_portfolio_summary() -> dict:
             """, ht).fetchall()}
             for h in holdings:
                 h["apex"] = preds.get(h["ticker"])
+
+        day_perf = _compute_day_performance(conn, holdings)
+
         conn.close()
         return {
             "source": "db",
             "total_value": round(tv, 2),
             "total_cost": round(tc, 2),
             "unrealized_pct": round((tv - tc) / tc * 100, 1) if tc else None,
+            "day_change_dollar": day_perf.get("day_change_dollar"),
+            "day_change_pct": day_perf.get("day_change_pct"),
+            "day_change_as_of": day_perf.get("as_of"),
+            "day_change_source": day_perf.get("source"),
             "holdings": holdings,
         }
     except Exception as exc:
         return {"note": f"DB query failed: {exc}"}
+
+
+def _compute_day_performance(conn: "sqlite3.Connection", holdings: list[dict]) -> dict:
+    """
+    Today's $ / % portfolio change vs. the most recent prior trading day.
+
+    Primary source: portfolio_price_history, snapshotted nightly by the evening
+    batch pipeline (portfolio_agent.tools.holdings_db.snapshot_portfolio_prices).
+    Falls back to a live yfinance 2-day pull (previous close) if that table has
+    no rows yet -- e.g. the evening batch hasn't run since holdings were loaded.
+    """
+    from datetime import date as _date
+
+    today = _date.today().isoformat()
+    tv_today = sum(h["current_value"] for h in holdings)
+
+    try:
+        row = conn.execute(
+            "SELECT MAX(date) AS d FROM portfolio_price_history WHERE date < ?",
+            (today,),
+        ).fetchone()
+        prev_date = row["d"] if row else None
+    except Exception:
+        prev_date = None
+
+    if prev_date:
+        rows = conn.execute(
+            """SELECT ticker, SUM(market_value) mv
+               FROM portfolio_price_history WHERE date = ? GROUP BY ticker""",
+            (prev_date,),
+        ).fetchall()
+        prev_by_ticker = {r["ticker"]: r["mv"] for r in rows if r["mv"] is not None}
+        # Only compare tickers still held today, so a since-sold position
+        # doesn't distort the day-over-day delta.
+        held = {h["ticker"] for h in holdings}
+        prev_total = sum(v for t, v in prev_by_ticker.items() if t in held)
+        if prev_total:
+            return {
+                "day_change_dollar": round(tv_today - prev_total, 2),
+                "day_change_pct": round((tv_today - prev_total) / prev_total * 100, 2),
+                "as_of": prev_date,
+                "source": "portfolio_price_history",
+            }
+
+    # Fallback: no snapshot history yet -- fetch live previous close per ticker.
+    try:
+        import yfinance as yf
+        tickers = [h["ticker"] for h in holdings if h.get("ticker")]
+        if not tickers:
+            return {}
+        prev_total = 0.0
+        matched_any = False
+        for chunk in [tickers[i:i + 20] for i in range(0, len(tickers), 20)]:
+            data = yf.download(
+                " ".join(chunk), period="5d", interval="1d",
+                auto_adjust=True, progress=False, group_by="ticker",
+            )
+            for h in holdings:
+                t = h["ticker"]
+                if t not in chunk or not h.get("shares"):
+                    continue
+                try:
+                    col = data["Close"] if len(chunk) == 1 else data[t]["Close"]
+                    closes = col.dropna()
+                    if len(closes) >= 2:
+                        prev_total += float(closes.iloc[-2]) * h["shares"]
+                        matched_any = True
+                except Exception:
+                    continue
+        if matched_any and prev_total:
+            return {
+                "day_change_dollar": round(tv_today - prev_total, 2),
+                "day_change_pct": round((tv_today - prev_total) / prev_total * 100, 2),
+                "as_of": "previous close (live fetch)",
+                "source": "yfinance_live_fallback",
+            }
+    except Exception:
+        pass
+
+    return {}
 
 
 def _chat_tool_get_predictions_summary(segment: str = "all",
