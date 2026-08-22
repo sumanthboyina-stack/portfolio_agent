@@ -213,6 +213,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "mean_log_loss" not in mr_cols:
         conn.execute("ALTER TABLE metrics_rolling ADD COLUMN mean_log_loss REAL")
 
+    # 'unknown' was the segment every row got under the old (dead -- risk_segment
+    # is never set) bucketing; recompute_rolling_metrics() now writes 'all' for
+    # the same blended view plus 'portfolio' / 'opportunity' splits. Rename in
+    # place (one-time, idempotent) so existing trend history stays visible
+    # under the new segment name instead of silently disappearing.
+    conn.execute("UPDATE metrics_rolling SET segment = 'all' WHERE segment = 'unknown'")
+
     # Index on new columns — only safe after migration ensures columns exist
     # Rename prediction_date → as_of_date (idempotent)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}

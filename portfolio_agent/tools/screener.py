@@ -198,3 +198,47 @@ def screen_universe(
         event_type="summary",
     )
     return promoted
+
+
+def evaluate_screener_outcomes(log=None) -> dict:
+    """
+    Score forward returns for screening_signals rows that are now old enough
+    to mature (~1 trading week), so the Opportunities screen's rolling 30-day
+    conviction (persistence + did-it-actually-work) has fresh data each morning.
+
+    Entry price = close on signal_date, exit price = close as of today —
+    each row is only picked up once it's past the maturity window, so "today"
+    is consistently ~1 week out from signal_date. Rows whose price data is
+    still missing are left for a later run rather than retried in this pass.
+    """
+    from portfolio_agent.tools.universe_db import get_signals_needing_outcome, record_signal_outcome
+    from portfolio_agent.tools.yfinance_tools import get_close
+    from datetime import date
+
+    _l = log or _log
+    today = date.today().isoformat()
+
+    due = get_signals_needing_outcome()
+    evaluated = 0
+    data_missing = 0
+    errors = 0
+
+    for row in due:
+        try:
+            entry = get_close(row["ticker"], row["signal_date"])
+            exit_ = get_close(row["ticker"], today)
+            if not entry or not exit_:
+                data_missing += 1
+                continue
+            fwd_return = (exit_ / entry) - 1.0
+            record_signal_outcome(row["id"], fwd_return)
+            evaluated += 1
+        except Exception:
+            errors += 1
+
+    _l.info(
+        f"  [screener] outcomes: {evaluated} evaluated, "
+        f"{data_missing} data_missing, {errors} errors",
+        event_type="summary",
+    )
+    return {"evaluated": evaluated, "data_missing": data_missing, "errors": errors}

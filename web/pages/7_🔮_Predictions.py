@@ -140,13 +140,36 @@ st.markdown("---")
 render_all_predictions(df_portfolio)
 
 # ── Section 3: New Opportunities ──────────────────────────────────────────────
+_OPP_TICKER_CAP = 20
+
 if not df_opps.empty:
     st.markdown("---")
     section_title("🌟 New Opportunities", badge_text="Trending Discovery", badge_color=PURPLE)
+
+    _n_total_opp_tickers = len(df_opps["ticker"].unique())
+    if _n_total_opp_tickers > _OPP_TICKER_CAP:
+        # Rank each ticker by its best conviction score across horizons, then
+        # keep every horizon row for the top 20 so multi-horizon cards and the
+        # full score breakdown (fundamentals/research/macro/news) still render
+        # intact -- trending discovery can surface far more candidates than is
+        # useful to scroll through.
+        _top_tickers = (
+            df_opps.groupby("ticker")["conviction_score"].max()
+            .sort_values(ascending=False)
+            .head(_OPP_TICKER_CAP)
+            .index
+        )
+        df_opps = df_opps[df_opps["ticker"].isin(_top_tickers)].reset_index(drop=True)
+
     n_opp_tickers = len(df_opps["ticker"].unique())
+    _opp_caption = (
+        f"Top {n_opp_tickers} of {_n_total_opp_tickers} trending tickers by conviction"
+        if _n_total_opp_tickers > _OPP_TICKER_CAP else
+        f"{n_opp_tickers} trending ticker{'s' if n_opp_tickers != 1 else ''} analyzed today"
+    )
     st.caption(
-        f"{n_opp_tickers} trending ticker{'s' if n_opp_tickers != 1 else ''} analyzed today — "
-        "same full pipeline as portfolio: News · Research · Fundamentals · APEX predictions"
+        f"{_opp_caption} — same full pipeline as portfolio: "
+        "News · Research · Fundamentals · APEX predictions"
     )
     render_action_items(df_opps, title="High-Conviction Opportunities")
     render_all_predictions(df_opps, title="All Opportunities by Recommendation")

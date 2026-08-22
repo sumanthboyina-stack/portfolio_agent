@@ -185,10 +185,22 @@ def _compute_filtered_metrics(
     return [dict(r) for r in rows]
 
 
-def _load_rolling_metrics_series() -> pd.DataFrame:
-    """Historical rolling metrics from metrics_rolling table."""
+_SEGMENT_TO_BUCKET = {
+    "All": "all",
+    "Portfolio": "portfolio",
+    "New Opportunities": "opportunity",
+}
+
+
+def _load_rolling_metrics_series(segment: str = "All") -> pd.DataFrame:
+    """
+    Historical rolling metrics from metrics_rolling table, filtered to the
+    'all' / 'portfolio' / 'opportunity' bucket recompute_rolling_metrics()
+    writes per (horizon, lookback, version).
+    """
     if not _DB.exists():
         return pd.DataFrame()
+    bucket = _SEGMENT_TO_BUCKET.get(segment, "all")
     with sqlite3.connect(str(_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
@@ -197,8 +209,9 @@ def _load_rolling_metrics_series() -> pd.DataFrame:
                    brier_score, mean_log_loss, num_predictions,
                    high_conviction_accuracy, low_conviction_accuracy
             FROM metrics_rolling
+            WHERE segment = ?
             ORDER BY metric_date ASC
-        """).fetchall()
+        """, [bucket]).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
         df["metric_date"] = pd.to_datetime(df["metric_date"])

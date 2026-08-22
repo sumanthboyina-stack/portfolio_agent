@@ -327,7 +327,7 @@ with tabs[1]:
     )
 
     metric_df  = _load_metric_series(_seg_sel, _portfolio_tickers)
-    rolling_df = _load_rolling_metrics_series()
+    rolling_df = _load_rolling_metrics_series(_seg_sel)
 
     # Apply model filter to per-prediction series
     if _model_filter and not metric_df.empty and "model_name" in metric_df.columns:

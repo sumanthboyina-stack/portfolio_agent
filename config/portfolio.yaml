@@ -30,10 +30,6 @@ holdings:
   shares: 50.406
   account: Vanguard
   broker: vanguard
-- ticker: GRFXY
-  shares: 25.0
-  account: Vanguard
-  broker: vanguard
 - ticker: IVV
   shares: 18.532
   account: Vanguard
@@ -70,10 +66,6 @@ holdings:
   avg_cost: 97.26
   account: Individual - TOD
   broker: fidelity
-- ticker: RIVN
-  shares: 200.0
-  account: Vanguard
-  broker: vanguard
 - ticker: TSLA
   shares: 55.0
   account: Vanguard

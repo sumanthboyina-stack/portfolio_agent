@@ -201,6 +201,19 @@ def delete_broker_holdings(broker: str) -> int:
     return cursor.rowcount
 
 
+def delete_holding(ticker: str, broker: Optional[str] = None) -> int:
+    """Remove a single position (e.g. after selling out of it), optionally scoped to one broker/account."""
+    with _db() as conn:
+        if broker:
+            cursor = conn.execute(
+                "DELETE FROM holdings WHERE ticker = ? AND broker = ?", [ticker, broker]
+            )
+        else:
+            cursor = conn.execute("DELETE FROM holdings WHERE ticker = ?", [ticker])
+        conn.commit()
+    return cursor.rowcount
+
+
 def snapshot_portfolio_prices(as_of_date: str | None = None) -> dict:
     """
     Fetch the last closing price for every current holding via yfinance and

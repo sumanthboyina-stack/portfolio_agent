@@ -85,6 +85,25 @@ async def run_batch_evening(
         if tracker:
             tracker.finish_phase("l3_snapshot", 0, 1, note=str(e)[:120])
 
+    log.info("\n── Layer 4: Screener Outcome Scoring ───────────────────────────", event_type="phase_start")
+    if tracker:
+        tracker.start_phase("l4_screener_outcomes", total=1)
+    try:
+        from portfolio_agent.tools.screener import evaluate_screener_outcomes
+        r4 = evaluate_screener_outcomes(log=log)
+        _l4_note = (
+            f"{r4.get('evaluated', 0)} evaluated  "
+            f"{r4.get('data_missing', 0)} data_missing  "
+            f"{r4.get('errors', 0)} errors"
+        )
+        log.info(f"  L4: {_l4_note}", event_type="summary")
+        if tracker:
+            tracker.finish_phase("l4_screener_outcomes", 1, 0, note=_l4_note)
+    except Exception as e:
+        log.warning(f"  L4: Screener outcome scoring failed — {e}", event_type="warning")
+        if tracker:
+            tracker.finish_phase("l4_screener_outcomes", 0, 1, note=str(e)[:120])
+
     if tracker:
         tracker.finish_run("completed")
     log.info("\nEvening batch complete.", event_type="phase_end")

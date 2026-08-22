@@ -312,8 +312,8 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
         with _db() as c:
             rows = c.execute(
                 """SELECT horizon_days,
-                          COALESCE(risk_segment, 'unknown') AS segment,
                           COALESCE(system_version, 'v1.0')  AS sys_ver,
+                          trigger_type,
                           actual_direction, predicted_direction,
                           in_predicted_range, excess_return, error_magnitude,
                           outcome_score, conviction_score,
@@ -325,12 +325,21 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
                 [cutoff],
             ).fetchall()
 
-        # Group by (horizon_days, segment, system_version)
+        # Group by (horizon_days, segment, system_version). Every row lands in the
+        # blended 'all' bucket, and also in 'opportunity' or 'portfolio' depending
+        # on how it was discovered -- trending-opportunity picks are validated
+        # separately from portfolio-holding predictions so accuracy on discovery
+        # calls doesn't get diluted by (or hide behind) the much larger holdings
+        # population. (risk_segment is unused/always NULL -- it never carried a
+        # real bucketing signal, so it's dropped here rather than kept as dead
+        # weight alongside the new opportunity/portfolio split.)
         from collections import defaultdict
         groups: dict[tuple, list] = defaultdict(list)
         for r in rows:
-            key = (r["horizon_days"], r["segment"], r["sys_ver"])
-            groups[key].append(dict(r))
+            d = dict(r)
+            opp_seg = "opportunity" if d.get("trigger_type") == "trending_opportunity" else "portfolio"
+            groups[(d["horizon_days"], "all", d["sys_ver"])].append(d)
+            groups[(d["horizon_days"], opp_seg, d["sys_ver"])].append(d)
 
         def _dir_acc_for(subset: list) -> Optional[float]:
             if not subset:
