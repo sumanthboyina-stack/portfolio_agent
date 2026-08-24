@@ -227,6 +227,9 @@ async def _run_daily_apex(
                 pt_num_analysts=_ctx_res.get("num_analysts"),
                 pt_current_price=_ctx_res.get("current_price"),
                 used_fallback=result.used_fallback,
+                weight_regime=data.get("weight_regime"),
+                weights_used=data.get("weights_used"),
+                valuation_score=data.get("valuation_score"),
             )
 
             done_today       = get_today_horizons(ticker, today)

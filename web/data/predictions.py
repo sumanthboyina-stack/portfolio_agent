@@ -36,7 +36,7 @@ def _load_predictions(
             """SELECT id, ticker, as_of_date, recommendation, prediction,
                       confidence, composite_score, horizon_days, prediction_type,
                       predicted_direction, predicted_return_low, predicted_return_high,
-                      conviction_score, fundamental_score, research_score, macro_score,
+                      conviction_score, fundamental_score, valuation_score, research_score, macro_score,
                       news_score, reasoning, reasoning_text, panel_summary,
                       model_name, model_provider, evaluation_status, outcome,
                       actual_return, actual_direction, pt_current_price, pt_mean,

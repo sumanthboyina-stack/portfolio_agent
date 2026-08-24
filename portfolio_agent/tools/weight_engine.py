@@ -21,45 +21,55 @@ from typing import Optional
 
 # ── Legacy single-horizon base (kept for backward compat / chat path) ──────────
 BASE: dict[str, float] = {
-    "fundamentals": 0.40,
-    "research":     0.30,
-    "macro":        0.20,
-    "news":         0.10,
+    "fundamentals": 0.28,
+    "valuation":    0.22,
+    "research":     0.25,
+    "macro":        0.17,
+    "news":         0.08,
 }
 
 # ── Horizon-specific base weights ─────────────────────────────────────────────
+# valuation's share scales up with horizon — a DCF says little about a 5-day
+# move and a lot about a 250-day one — taken mostly from fundamentals's share,
+# with a small trim from macro/research/news at each horizon. All four rows
+# still sum to 1.0 (see tests/test_weight_engine.py).
 HORIZON_BASE_WEIGHTS: dict[int, dict[str, float]] = {
     5: {
         "news":         0.55,
-        "research":     0.25,
-        "macro":        0.15,
+        "research":     0.23,
+        "macro":        0.13,
         "fundamentals": 0.05,
+        "valuation":    0.04,
     },
     21: {
-        "news":         0.30,
-        "research":     0.30,
-        "macro":        0.15,
-        "fundamentals": 0.25,
+        "news":         0.28,
+        "research":     0.27,
+        "macro":        0.13,
+        "fundamentals": 0.20,
+        "valuation":    0.12,
     },
     63: {
-        "news":         0.15,
-        "research":     0.25,
-        "macro":        0.20,
-        "fundamentals": 0.40,
+        "news":         0.13,
+        "research":     0.20,
+        "macro":        0.17,
+        "fundamentals": 0.30,
+        "valuation":    0.20,
     },
     250: {
         "news":         0.05,
-        "research":     0.15,
-        "macro":        0.25,
-        "fundamentals": 0.55,
+        "research":     0.12,
+        "macro":        0.18,
+        "fundamentals": 0.35,
+        "valuation":    0.30,
     },
 }
 
 DEFAULT_BASE_WEIGHTS: dict[str, float] = {
-    "news":         0.20,
-    "research":     0.25,
-    "macro":        0.20,
-    "fundamentals": 0.35,
+    "news":         0.15,
+    "research":     0.22,
+    "macro":        0.18,
+    "fundamentals": 0.25,
+    "valuation":    0.20,
 }
 
 WEIGHT_FLOOR = 0.05
@@ -342,6 +352,44 @@ def _fundamentals_penalty(
     return _P_LIGHT, "Fundamentals age indeterminate — light staleness penalty applied"
 
 
+def _valuation_penalty(
+    valuation_data: Optional[dict],
+    news_event_type: str,
+) -> tuple[float, str]:
+    """
+    Returns (penalty 0.0-0.7, rationale). Structurally identical to
+    _fundamentals_penalty — a DCF ages the same way a filing does, and an
+    earnings release predates the DCF's own revenue/margin assumptions even
+    more directly than it predates the Fundamentals score.
+    """
+    if not valuation_data:
+        return _P_MEDIUM, "No valuation data in DB — weight penalised"
+
+    as_of = valuation_data.get("as_of_date") or ""
+
+    if news_event_type in ("EARNINGS_RELEASE", "EARNINGS_PREVIEW"):
+        three_days_ago = (date.today() - timedelta(days=3)).isoformat()
+        if as_of and as_of >= three_days_ago:
+            return _P_NONE, "DCF was refreshed alongside the new filing — current and directly relevant"
+        return _P_HEAVY, (
+            "Earnings event in progress — the DCF's revenue/margin assumptions predate the "
+            "new filing; news signal carries the near-term view"
+        )
+
+    if as_of:
+        try:
+            age = (date.today() - date.fromisoformat(as_of)).days
+            if age < 30:
+                return _P_NONE, f"Valuation is fresh ({age}d old) — full weight applied"
+            if age < 90:
+                return _P_LIGHT, f"Valuation is {age}d old — slight staleness penalty"
+            return _P_MEDIUM, f"Valuation is {age}d old — notable staleness; weight modestly reduced"
+        except ValueError:
+            pass
+
+    return _P_LIGHT, "Valuation age indeterminate — light staleness penalty applied"
+
+
 # ── Core signal application ────────────────────────────────────────────────────
 
 def _apply_signals(
@@ -350,6 +398,7 @@ def _apply_signals(
     research_data: Optional[dict],
     macro_snapshot: Optional[dict],
     fundamentals_data: Optional[dict],
+    valuation_data: Optional[dict] = None,
 ) -> tuple[dict, str, dict, dict, dict]:
     """
     Apply event-driven boosts/penalties to a base weight dict.
@@ -361,9 +410,11 @@ def _apply_signals(
     m_boost, macro_event, m_rat  = _macro_signal(macro_snapshot)
     r_boost, r_penalty, r_rat    = _research_signal(research_data)
     f_penalty, f_rat             = _fundamentals_penalty(fundamentals_data, news_event)
+    v_penalty, v_rat             = _valuation_penalty(valuation_data, news_event)
 
     raw = {
         "fundamentals": base["fundamentals"] * (1.0 - f_penalty),
+        "valuation":    base.get("valuation", 0.0) * (1.0 - v_penalty),
         "research":     base["research"]     * (1.0 + r_boost) * (1.0 - r_penalty),
         "macro":        base["macro"]        * (1.0 + m_boost),
         "news":         base["news"]         * (1.0 + n_boost) * (1.0 - n_penalty),
@@ -386,6 +437,7 @@ def _apply_signals(
 
     data_caps = {
         "fundamentals": 5 if not fundamentals_data else (7 if f_penalty >= _P_HEAVY else 10),
+        "valuation":    5 if not valuation_data else (7 if v_penalty >= _P_HEAVY else 10),
         "research":     5 if not research_data else 10,
         "macro":        10,
         "news":         5 if not news_data else 10,
@@ -393,18 +445,20 @@ def _apply_signals(
 
     rationale = {
         "fundamentals": f_rat,
+        "valuation":    v_rat,
         "research":     r_rat,
         "macro":        m_rat,
         "news":         n_rat,
     }
     signal_strengths = {
-        "news_boost":     n_boost,
-        "macro_boost":    m_boost,
-        "research_boost": r_boost,
-        "fund_penalty":   f_penalty,
-        "news_penalty":   n_penalty,
-        "news_event":     news_event,
-        "macro_event":    macro_event,
+        "news_boost":      n_boost,
+        "macro_boost":     m_boost,
+        "research_boost":  r_boost,
+        "fund_penalty":    f_penalty,
+        "valuation_penalty": v_penalty,
+        "news_penalty":    n_penalty,
+        "news_event":      news_event,
+        "macro_event":     macro_event,
     }
 
     return raw, regime, rationale, data_caps, signal_strengths
@@ -434,7 +488,8 @@ def compute_dynamic_weights_for_horizon(
 
     Picks the horizon's base weights, then applies the same dynamic
     adjustments (event triggers, staleness penalties) as before.
-    db_context expects keys: 'news' (list), 'research' (dict), 'fundamentals' (dict).
+    db_context expects keys: 'news' (list), 'research' (dict),
+    'fundamentals' (dict), 'valuation' (dict, optional).
     """
     base = HORIZON_BASE_WEIGHTS.get(horizon_days, DEFAULT_BASE_WEIGHTS).copy()
     raw, _, _, _, _ = _apply_signals(
@@ -443,6 +498,7 @@ def compute_dynamic_weights_for_horizon(
         db_context.get("research"),
         macro_snapshot,
         db_context.get("fundamentals"),
+        db_context.get("valuation"),
     )
     return _normalize(raw, use_floor=True)
 
@@ -469,6 +525,7 @@ def compute_dynamic_weights(
     macro_snapshot: Optional[dict],
     fundamentals_data: Optional[dict],
     horizons: list[int] | None = None,
+    valuation_data: Optional[dict] = None,
 ) -> dict:
     """
     Compute context-aware weights for the APEX panel synthesis.
@@ -482,7 +539,7 @@ def compute_dynamic_weights(
       data_caps, regime, weight_summary, per_source, signal_strengths
     """
     raw, regime, rationale, data_caps, signal_strengths = _apply_signals(
-        BASE, news_data, research_data, macro_snapshot, fundamentals_data
+        BASE, news_data, research_data, macro_snapshot, fundamentals_data, valuation_data
     )
     weights = _normalize(raw, use_floor=False)
 
@@ -493,6 +550,7 @@ def compute_dynamic_weights(
             "news":         news_data,
             "research":     research_data,
             "fundamentals": fundamentals_data,
+            "valuation":    valuation_data,
         }
         weights_by_horizon = compute_dynamic_weights_all_horizons(
             ticker, horizons, db_ctx, macro_snapshot or {}
@@ -503,6 +561,7 @@ def compute_dynamic_weights(
 
     weight_summary = (
         f"Fundamentals {_pct(weights['fundamentals'])} · "
+        f"Valuation {_pct(weights['valuation'])} · "
         f"Research {_pct(weights['research'])} · "
         f"Macro {_pct(weights['macro'])} · "
         f"News {_pct(weights['news'])}"
@@ -528,7 +587,7 @@ def compute_dynamic_weights(
                 "delta":     _delta(src),
                 "rationale": rationale[src],
             }
-            for src in ("fundamentals", "research", "macro", "news")
+            for src in ("fundamentals", "valuation", "research", "macro", "news")
         },
         "signal_strengths": signal_strengths,
     }

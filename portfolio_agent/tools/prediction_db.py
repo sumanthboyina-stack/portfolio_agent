@@ -19,6 +19,7 @@ Schema (predictions table):
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -198,6 +199,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("parent_merged_id",            "INTEGER"),
         ("trigger_type",                "TEXT"),
         ("trigger_event_id",            "INTEGER"),
+        ("weight_regime",               "TEXT"),
+        ("weights_used",                "TEXT"),
+        ("valuation_score",             "INTEGER"),
     ])
     # Index for per-model accuracy queries and parent linkage
     conn.execute(
@@ -331,6 +335,7 @@ def insert_prediction(
     predicted_return_high: Optional[float] = None,
     conviction_score: Optional[float] = None,
     fundamental_score: Optional[int] = None,
+    valuation_score: Optional[int] = None,
     research_score: Optional[int] = None,
     macro_score: Optional[int] = None,
     news_score: Optional[int] = None,
@@ -362,6 +367,9 @@ def insert_prediction(
     # Event-driven metadata
     trigger_type: Optional[str] = None,
     trigger_event_id: Optional[int] = None,
+    # Dynamic weight mix actually used to compute composite_score
+    weight_regime: Optional[str] = None,
+    weights_used: Optional[dict] = None,
 ) -> dict:
     """
     Insert a new prediction row (append-only). One row per horizon per ticker per date.
@@ -414,11 +422,12 @@ def insert_prediction(
                         snapshot_news_headlines, start_price,
                         p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                         used_fallback, parent_merged_id,
-                        trigger_type, trigger_event_id)
+                        trigger_type, trigger_event_id,
+                        weight_regime, weights_used, valuation_score)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -439,6 +448,8 @@ def insert_prediction(
                     p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                     int(used_fallback), parent_merged_id,
                     trigger_type, trigger_event_id,
+                    weight_regime, json.dumps(weights_used) if weights_used else None,
+                    valuation_score,
                 ],
             )
             c.commit()
@@ -616,3 +627,129 @@ def get_all_latest_predictions() -> dict[str, Prediction]:
         pred = Prediction.from_db_row(dict(row))
         result[pred.ticker] = pred
     return result
+
+
+# ── Score change attribution ("why did the recommendation change?") ───────────
+
+_PANEL_VERDICT_KEYS = {
+    "fundamentals": "chen_verdict",
+    "research":     "webb_verdict",
+    "macro":        "varga_verdict",
+    "news":         "park_verdict",
+}
+_SOURCE_LABELS = {
+    "fundamentals": "Fundamentals",
+    "research":     "Research",
+    "macro":        "Macro",
+    "news":         "News",
+}
+_SCORE_COLUMNS = {
+    "fundamentals": "fundamental_score",
+    "research":     "research_score",
+    "macro":        "macro_score",
+    "news":         "news_score",
+}
+
+
+def _strip_verdict_score_prefix(verdict: str) -> str:
+    """Strip the '(N/10)' score annotation — same regex the Agent Panel
+    expander in web/components/predictions_cards.py already uses."""
+    return re.sub(r"\(\d+(?:\.\d+)?/10\)\s*[—\-]?\s*", "", verdict or "").strip()
+
+
+def get_score_change_breakdown(ticker: str) -> Optional[dict]:
+    """
+    Day-over-day attribution of a ticker's composite_score change: for each of
+    fundamentals/research/macro/news, how many composite-score points that
+    source's (weight x score) contribution moved, plus that day's panel
+    verdict as the "why". Returns None if fewer than 2 distinct as_of_dates
+    exist for this ticker.
+
+    If either day's weights_used wasn't recorded (rows predating this
+    column), falls back to weight_engine.DEFAULT_BASE_WEIGHTS for both days
+    and sets weights_available=False so the caller can disclose the
+    approximation rather than presenting it as exact.
+    """
+    from portfolio_agent.tools.weight_engine import DEFAULT_BASE_WEIGHTS
+
+    ticker = ticker.upper()
+    with _db() as c:
+        rows = c.execute(
+            """SELECT as_of_date, recommendation, composite_score,
+                      fundamental_score, research_score, macro_score, news_score,
+                      weight_regime, weights_used, panel_summary
+               FROM predictions
+               WHERE ticker = ? AND as_of_date IS NOT NULL
+               ORDER BY as_of_date DESC, created_at DESC""",
+            [ticker],
+        ).fetchall()
+
+    by_date: dict[str, dict] = {}
+    for r in rows:
+        d = dict(r)
+        if d["as_of_date"] not in by_date:
+            by_date[d["as_of_date"]] = d
+        if len(by_date) >= 2:
+            break
+
+    dates_sorted = sorted(by_date.keys(), reverse=True)
+    if len(dates_sorted) < 2:
+        return None
+
+    today_row, yesterday_row = by_date[dates_sorted[0]], by_date[dates_sorted[1]]
+
+    def _weights(row: dict) -> tuple[dict, bool]:
+        try:
+            w = json.loads(row.get("weights_used") or "{}")
+        except (TypeError, ValueError):
+            w = {}
+        return (w, True) if w else (dict(DEFAULT_BASE_WEIGHTS), False)
+
+    today_weights, today_has_weights = _weights(today_row)
+    yesterday_weights, yesterday_has_weights = _weights(yesterday_row)
+    weights_available = today_has_weights and yesterday_has_weights
+
+    try:
+        today_panel = json.loads(today_row.get("panel_summary") or "{}")
+    except (TypeError, ValueError):
+        today_panel = {}
+
+    breakdown = []
+    for source, score_col in _SCORE_COLUMNS.items():
+        score_today = today_row.get(score_col)
+        score_yesterday = yesterday_row.get(score_col)
+        if score_today is None or score_yesterday is None:
+            continue
+        w_today = today_weights.get(source, DEFAULT_BASE_WEIGHTS[source])
+        w_yesterday = yesterday_weights.get(source, DEFAULT_BASE_WEIGHTS[source])
+        contribution = round(w_today * score_today - w_yesterday * score_yesterday, 2)
+        breakdown.append({
+            "source": _SOURCE_LABELS[source],
+            "contribution": contribution,
+            "rationale": _strip_verdict_score_prefix(today_panel.get(_PANEL_VERDICT_KEYS[source], "")),
+        })
+    breakdown.sort(key=lambda b: abs(b["contribution"]), reverse=True)
+
+    composite_today, composite_yesterday = today_row.get("composite_score"), yesterday_row.get("composite_score")
+    net_change = (
+        round(composite_today - composite_yesterday, 2)
+        if composite_today is not None and composite_yesterday is not None else None
+    )
+
+    return {
+        "ticker": ticker,
+        "today": {
+            "as_of_date": today_row["as_of_date"],
+            "recommendation": today_row.get("recommendation"),
+            "composite_score": composite_today,
+        },
+        "yesterday": {
+            "as_of_date": yesterday_row["as_of_date"],
+            "recommendation": yesterday_row.get("recommendation"),
+            "composite_score": composite_yesterday,
+        },
+        "net_change": net_change,
+        "sum_of_contributions": round(sum(b["contribution"] for b in breakdown), 2),
+        "breakdown": breakdown,
+        "weights_available": weights_available,
+    }

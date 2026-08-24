@@ -630,15 +630,17 @@ def inject_global_css() -> None:
 # ── Top navigation bar ────────────────────────────────────────────────────────
 
 _NAV_PRIMARY = [
-    ("dashboard",     "🏠", "Today",         "app.py"),
-    ("opportunities", "🧭", "Opportunities", "pages/8_🧭_Opportunities.py"),
-    ("predictions",   "🔮", "Predictions",   "pages/7_🔮_Predictions.py"),
-    ("portfolio",     "💼", "Portfolio",     "pages/5_💼_Portfolio.py"),
+    ("dashboard",         "🏠", "Today",             "app.py"),
+    ("opportunity_engine", "🚀", "Opportunity Engine", "pages/9_🎯_Opportunity_Engine.py"),
+    ("opportunities",     "🧭", "Opportunities",     "pages/8_🧭_Opportunities.py"),
+    ("predictions",       "🔮", "Predictions",       "pages/7_🔮_Predictions.py"),
+    ("portfolio",         "💼", "Portfolio",         "pages/5_💼_Portfolio.py"),
 ]
 _NAV_SECONDARY = [
     ("watchlist",   "📋", "Watchlist",     "pages/3_📋_Watchlist.py"),
     ("validation",  "🎯", "Validation",    "pages/6_🎯_Validation.py"),
     ("chat",        "🤖", "Chat",          "pages/4_🤖_Chat.py"),
+    ("valuation",   "📐", "Valuation",     "pages/10_📐_Valuation.py"),
 ]
 _NAV_ADMIN = [
     ("schedule",    "🗓️", "Schedule",    "pages/2_🗓️_Schedule.py"),
@@ -654,8 +656,14 @@ def top_nav(active: str = "dashboard") -> None:
         unsafe_allow_html=True,
     )
 
-    # 4 primary (wider) | thin divider | 3 secondary (narrower) | thin divider | admin gear
-    cols = st.columns([1.8, 1.8, 1.8, 1.8, 0.3, 1.4, 1.4, 1.4, 0.3, 0.6], gap="small")
+    # primary (wider) | thin divider | secondary (narrower) | thin divider | admin gear
+    n_primary, n_secondary = len(_NAV_PRIMARY), len(_NAV_SECONDARY)
+    widths = [1.8] * n_primary + [0.3] + [1.4] * n_secondary + [0.3, 0.6]
+    cols = st.columns(widths, gap="small")
+    divider_1 = n_primary
+    secondary_start = n_primary + 1
+    divider_2 = secondary_start + n_secondary
+    admin_col = divider_2 + 1
 
     for i, (key, icon, label, path) in enumerate(_NAV_PRIMARY):
         with cols[i]:
@@ -667,14 +675,14 @@ def top_nav(active: str = "dashboard") -> None:
             else:
                 st.page_link(path, label=f"{icon} {label}", use_container_width=True)
 
-    with cols[4]:
+    with cols[divider_1]:
         st.markdown(
             '<div style="width:1px;background:#E5E7EB;height:30px;margin:14px auto"></div>',
             unsafe_allow_html=True,
         )
 
     for i, (key, icon, label, path) in enumerate(_NAV_SECONDARY):
-        with cols[5 + i]:
+        with cols[secondary_start + i]:
             if key == active:
                 st.markdown(
                     f'<div class="nav-tab active" style="font-size:0.875rem">'
@@ -684,13 +692,13 @@ def top_nav(active: str = "dashboard") -> None:
             else:
                 st.page_link(path, label=f"{icon} {label}", use_container_width=True)
 
-    with cols[8]:
+    with cols[divider_2]:
         st.markdown(
             '<div style="width:1px;background:#E5E7EB;height:30px;margin:14px auto"></div>',
             unsafe_allow_html=True,
         )
 
-    with cols[9]:
+    with cols[admin_col]:
         if st.button("⚙️", key="admin_drawer_toggle", help="Admin: Schedule & Database",
                      use_container_width=True):
             st.session_state["_admin_drawer_open"] = not st.session_state.get("_admin_drawer_open", False)

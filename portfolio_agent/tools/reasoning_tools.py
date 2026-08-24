@@ -642,6 +642,7 @@ def get_full_analysis_context(
     from portfolio_agent.tools.fundamentals_db import get_stored_fundamentals
     from portfolio_agent.tools.research_db import get_stored_research
     from portfolio_agent.tools.prediction_db import get_prediction_history
+    from portfolio_agent.tools.valuation_db import get_stored_valuation
     from portfolio_agent.tools.weight_engine import compute_dynamic_weights
 
     if horizons is None:
@@ -654,6 +655,7 @@ def get_full_analysis_context(
     research            = get_stored_research(ticker)
     news                = _get_recent_news(ticker, days=7)
     prediction_history  = get_prediction_history(ticker, limit=5)
+    valuation           = get_stored_valuation(ticker)
 
     data_gaps = []
     if not fundamentals:
@@ -662,6 +664,8 @@ def get_full_analysis_context(
         data_gaps.append("research")
     if not news:
         data_gaps.append("news")
+    if not valuation:
+        data_gaps.append("valuation")
 
     # ── 2. Macro snapshot (live, no LLM) ─────────────────────────────────────
     macro_snapshot: dict = {}
@@ -678,6 +682,7 @@ def get_full_analysis_context(
         macro_snapshot=macro_snapshot,
         fundamentals_data=fundamentals,
         horizons=horizons,
+        valuation_data=valuation,
     )
 
     # Build score-cap instruction for the LLM
@@ -701,7 +706,8 @@ def get_full_analysis_context(
 
     horizon_weight_lines = [
         f"  {h}d: News {_pct(w['news'])} · Research {_pct(w['research'])} · "
-        f"Macro {_pct(w['macro'])} · Fundamentals {_pct(w['fundamentals'])}"
+        f"Macro {_pct(w['macro'])} · Fundamentals {_pct(w['fundamentals'])} · "
+        f"Valuation {_pct(w['valuation'])}"
         for h, w in sorted(wbh.items())
     ]
     horizon_weight_str = "\n".join(horizon_weight_lines) if horizon_weight_lines else "(none)"
@@ -711,6 +717,7 @@ def get_full_analysis_context(
         "fundamentals":       _safe_to_dict(fundamentals),
         "research":           _safe_to_dict(research),
         "news":               news,
+        "valuation":          valuation,
         "macro_snapshot":     macro_snapshot,
         "prediction_history": [_safe_to_dict(p) for p in prediction_history],
         "data_gaps":          data_gaps,

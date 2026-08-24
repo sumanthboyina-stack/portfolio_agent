@@ -35,13 +35,41 @@ def _company_facts(cik: str) -> dict:
     return resp.json()
 
 
+def _is_annual_duration(entry: dict) -> bool:
+    """
+    True for instant facts (balance-sheet items like Assets/Cash — no "start",
+    a point-in-time value, always valid) and for duration facts spanning a
+    full fiscal year (~300-400 days).
+
+    A 10-K's XBRL also tags each fiscal quarter's figures (for the "selected
+    quarterly data" footnote) under the SAME concept and form="10-K" — with no
+    duration filter, _latest_values previously mixed full-year revenue with
+    same-year quarterly slices under different "end" dates (e.g. AAPL FY2018's
+    Revenues concept: one true annual $265.6B entry plus four ~$50-90B
+    quarterly entries, all form="10-K"), silently corrupting any multi-year
+    trend built from "the n most recent values."
+    """
+    start, end = entry.get("start"), entry.get("end")
+    if not start:
+        return True  # instant fact — no duration to check
+    try:
+        from datetime import date as _date
+        days = (_date.fromisoformat(end) - _date.fromisoformat(start)).days
+    except (TypeError, ValueError):
+        return True
+    return 300 <= days <= 400
+
+
 def _latest_values(facts: dict, concept: str, unit: str = "USD", n: int = 4) -> list[dict]:
     """Extract the n most recent annual values for a given XBRL concept."""
     try:
         entries = facts["facts"]["us-gaap"][concept]["units"][unit]
     except KeyError:
         return []
-    annual = [e for e in entries if e.get("form") in ("10-K", "10-K/A") and "end" in e]
+    annual = [
+        e for e in entries
+        if e.get("form") in ("10-K", "10-K/A") and "end" in e and _is_annual_duration(e)
+    ]
     seen = set()
     deduped = []
     for e in sorted(annual, key=lambda x: x["end"], reverse=True):
@@ -52,6 +80,36 @@ def _latest_values(facts: dict, concept: str, unit: str = "USD", n: int = 4) -> 
         if len(deduped) >= n:
             break
     return deduped
+
+
+_REVENUE_CONCEPTS = (
+    "Revenues",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "SalesRevenueNet",
+    "SalesRevenueGoodsNet",
+    "RevenuesNetOfInterestExpense",
+)
+
+
+def _best_revenue_series(facts: dict, n: int = 4) -> list[dict]:
+    """
+    Companies migrate which XBRL revenue concept they tag over time (most
+    commonly the ASC 606 transition around fiscal 2018-2019, e.g. Apple moved
+    from "Revenues" to "RevenueFromContractWithCustomerExcludingAssessedTax").
+    An `or`-chain over _latest_values() picks the FIRST concept with any data
+    at all, which can be years stale if the company's now-retired tag still
+    has old non-empty results and the chain never reaches the current one
+    (confirmed on AAPL: "Revenues" only has 2016-2018 data and short-circuited
+    the chain, hiding "RevenueFromContractWithCustomerExcludingAssessedTax"'s
+    2022-2025 data). Instead, try every candidate and keep whichever series's
+    most recent period is actually the most recent.
+    """
+    best: list[dict] = []
+    for concept in _REVENUE_CONCEPTS:
+        series = _latest_values(facts, concept, n=n)
+        if series and (not best or series[0]["period"] > best[0]["period"]):
+            best = series
+    return best
 
 
 def get_income_statement(ticker: str) -> str:
@@ -71,7 +129,7 @@ def get_income_statement(ticker: str) -> str:
     facts = _company_facts(cik)
     result = {
         "ticker": ticker.upper(),
-        "revenue": _latest_values(facts, "Revenues") or _latest_values(facts, "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        "revenue": _best_revenue_series(facts),
         "net_income": _latest_values(facts, "NetIncomeLoss"),
         "eps_diluted": _latest_values(facts, "EarningsPerShareDiluted", unit="USD/shares"),
     }
@@ -300,11 +358,7 @@ def get_fundamentals_bundle(ticker: str, cik_map: dict[str, str]) -> dict:
         return {"ticker": ticker, "error": str(exc)}
 
     income = {
-        "revenue":     (_latest_values(facts, "Revenues")
-                        or _latest_values(facts, "RevenueFromContractWithCustomerExcludingAssessedTax")
-                        or _latest_values(facts, "SalesRevenueNet")
-                        or _latest_values(facts, "SalesRevenueGoodsNet")
-                        or _latest_values(facts, "RevenuesNetOfInterestExpense")),
+        "revenue":     _best_revenue_series(facts),
         "net_income":  _latest_values(facts, "NetIncomeLoss"),
         "eps_diluted": _latest_values(facts, "EarningsPerShareDiluted", unit="USD/shares"),
     }

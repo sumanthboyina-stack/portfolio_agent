@@ -205,6 +205,54 @@ def get_short_interest(ticker: str) -> str:
         return json.dumps({"ticker": ticker.upper(), "available": False, "error": str(exc)})
 
 
+def get_valuation_multiples(ticker: str) -> dict:
+    """
+    Balance sheet, market cap, and valuation-multiple inputs for the DCF/relative
+    valuation engine (portfolio_agent/tools/valuation_engine.py).
+
+    Unlike the other functions in this file, returns a plain dict rather than a
+    JSON string — this isn't an LLM-callable tool, it's a data primitive consumed
+    directly by deterministic Python math (same convention as portfolio_risk.py).
+
+    yf.Ticker(t).info is notoriously incomplete (varies by ticker type/exchange) —
+    every field is independently None-safe; this function never raises.
+    """
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception as exc:
+        _log.warning("yfinance get_valuation_multiples failed for %s: %s", ticker, exc)
+        info = {}
+
+    market_cap = _safe_float(info.get("marketCap"))
+    enterprise_value = _safe_float(info.get("enterpriseValue"))
+    ebitda = _safe_float(info.get("ebitda"))
+    revenue = _safe_float(info.get("totalRevenue"))
+
+    return {
+        "ticker": ticker.upper(),
+        "current_price": _safe_float(info.get("currentPrice") or info.get("regularMarketPrice")),
+        "market_cap": market_cap,
+        "shares_outstanding": _safe_float(info.get("sharesOutstanding")),
+        "total_debt": _safe_float(info.get("totalDebt")),
+        "total_cash": _safe_float(info.get("totalCash")),
+        "beta": _safe_float(info.get("beta")),
+        "trailing_pe": _safe_float(info.get("trailingPE")),
+        "forward_pe": _safe_float(info.get("forwardPE")),
+        "enterprise_value": enterprise_value,
+        "ebitda": ebitda,
+        "ev_to_ebitda": round(enterprise_value / ebitda, 2) if enterprise_value and ebitda else None,
+        "ev_to_revenue": round(enterprise_value / revenue, 2) if enterprise_value and revenue else None,
+        "price_to_sales": _safe_float(info.get("priceToSalesTrailing12Months")),
+        "peg_ratio": _safe_float(info.get("pegRatio") or info.get("trailingPegRatio")),
+        "operating_margin": _safe_float(info.get("operatingMargins")),
+        "free_cashflow": _safe_float(info.get("freeCashflow")),
+        "trailing_eps": _safe_float(info.get("trailingEps")),
+        "fifty_two_week_low": _safe_float(info.get("fiftyTwoWeekLow")),
+        "fifty_two_week_high": _safe_float(info.get("fiftyTwoWeekHigh")),
+        "sector": info.get("sector"),
+    }
+
+
 def get_analyst_targets(ticker: str) -> str:
     """
     Return analyst price targets and recommendation consensus from yfinance.

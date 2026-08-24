@@ -122,9 +122,10 @@ def _plot_prob_full(row: dict) -> go.Figure:
 
 
 def _plot_score_radar(row: dict) -> go.Figure:
-    categories = ["Fundamentals", "Research", "Macro", "News Sentiment"]
+    categories = ["Fundamentals", "Valuation", "Research", "Macro", "News Sentiment"]
     values = [
         row.get("fundamental_score") or 0,
+        row.get("valuation_score") or 0,
         row.get("research_score") or 0,
         row.get("macro_score") or 0,
         row.get("news_score") or 0,

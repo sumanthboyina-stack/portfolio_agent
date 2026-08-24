@@ -4,12 +4,14 @@ import pytest
 
 from portfolio_agent.tools.weight_engine import (
     BASE,
+    DEFAULT_BASE_WEIGHTS,
     HORIZON_BASE_WEIGHTS,
     WEIGHT_FLOOR,
     _fundamentals_penalty,
     _macro_signal,
     _news_signal,
     _normalize,
+    _valuation_penalty,
     compute_dynamic_weights,
     compute_dynamic_weights_for_horizon,
 )
@@ -22,6 +24,17 @@ def test_horizon_base_weights_sum_to_one():
 
 def test_base_weights_sum_to_one():
     assert sum(BASE.values()) == pytest.approx(1.0)
+
+
+def test_default_base_weights_sum_to_one():
+    assert sum(DEFAULT_BASE_WEIGHTS.values()) == pytest.approx(1.0)
+
+
+def test_valuation_weight_share_increases_with_horizon():
+    # A DCF says little about a 5-day move and a lot about a 250-day one.
+    horizons = sorted(HORIZON_BASE_WEIGHTS.keys())
+    shares = [HORIZON_BASE_WEIGHTS[h]["valuation"] for h in horizons]
+    assert shares == sorted(shares)
 
 
 def test_normalize_sums_to_one_without_floor():
@@ -122,6 +135,27 @@ def test_fundamentals_penalty_missing_data():
 def test_fundamentals_penalty_heavy_during_earnings_without_fresh_filing():
     penalty, _ = _fundamentals_penalty({"filing_date": "2000-01-01"}, "EARNINGS_RELEASE")
     assert penalty > _fundamentals_penalty({"filing_date": "2000-01-01"}, "NONE")[0]
+
+
+def test_valuation_penalty_fresh_data():
+    from datetime import date
+    penalty, _ = _valuation_penalty({"as_of_date": date.today().isoformat()}, "NONE")
+    assert penalty == 0.0
+
+
+def test_valuation_penalty_stale_data():
+    penalty, _ = _valuation_penalty({"as_of_date": "2000-01-01"}, "NONE")
+    assert penalty > 0.0
+
+
+def test_valuation_penalty_missing_data():
+    penalty, _ = _valuation_penalty(None, "NONE")
+    assert penalty > 0.0
+
+
+def test_valuation_penalty_heavy_during_earnings_without_fresh_dcf():
+    penalty, _ = _valuation_penalty({"as_of_date": "2000-01-01"}, "EARNINGS_RELEASE")
+    assert penalty > _valuation_penalty({"as_of_date": "2000-01-01"}, "NONE")[0]
 
 
 def test_compute_dynamic_weights_for_horizon_sums_to_one_and_respects_floor():

@@ -19,6 +19,9 @@ from web.styles import (
 from web.data.watchlist import load_watchlist, save_watchlist
 from portfolio_agent.tools.universe_db import (
     get_latest_signal_date, get_signals, has_any_universe_data, get_conviction_data,
+    rank_by_conviction, PERSISTENCE_STEP as _PERSISTENCE_STEP,
+    PERSISTENCE_MAX_DAYS as _PERSISTENCE_MAX_DAYS,
+    OUTCOME_SCALE as _OUTCOME_SCALE, OUTCOME_CAP as _OUTCOME_CAP,
 )
 from portfolio_agent.tools.yfinance_tools import get_close
 
@@ -83,48 +86,14 @@ if not latest_date:
 
 _DISCOVERED_CAP = 20
 
-# Conviction = today's raw score, adjusted by 30-day history:
-#   + persistence: extra days (beyond today) flagged in the trailing 30 days
-#   + outcome:     rolling avg forward return of matured historical flags
-#                  (from the evening batch's screener outcome scoring), so a
-#                  ticker that keeps firing but never actually moved doesn't
-#                  outrank one with a genuine track record.
-_PERSISTENCE_STEP     = 0.5
-_PERSISTENCE_MAX_DAYS = 5     # cap: +2.5 max from persistence alone
-_OUTCOME_SCALE        = 20.0  # +10% avg fwd return -> +2.0 conviction points
-_OUTCOME_CAP          = 2.0
-
+# A ticker could in principle qualify under more than one tier on the same
+# day, and conviction blends today's score with 30-day persistence/outcome
+# history — see universe_db.rank_by_conviction() (shared with the morning
+# batch's opportunity-discovery candidate selection).
 signals = get_signals(latest_date, min_score=2)
 existing_set = {t.upper() for t in all_tickers}
-# A ticker could in principle qualify under more than one tier on
-# the same day — keep only its best-scoring row so it renders once.
-best_by_ticker: dict[str, dict] = {}
-for s in signals:
-    if s["ticker"] in existing_set:
-        continue
-    prev = best_by_ticker.get(s["ticker"])
-    if prev is None or (s.get("score") or 0) > (prev.get("score") or 0):
-        best_by_ticker[s["ticker"]] = s
-
 conviction_by_ticker = get_conviction_data(latest_date, lookback_days=30, min_score=2)
-for ticker, s in best_by_ticker.items():
-    conv = conviction_by_ticker.get(ticker, {})
-    days_flagged   = conv.get("days_flagged") or 1
-    avg_fwd_return = conv.get("avg_fwd_return")
-    n_outcomes     = conv.get("n_outcomes") or 0
-
-    persistence_boost = min(max(days_flagged - 1, 0), _PERSISTENCE_MAX_DAYS) * _PERSISTENCE_STEP
-    outcome_adj = 0.0
-    if avg_fwd_return is not None and n_outcomes > 0:
-        outcome_adj = max(-_OUTCOME_CAP, min(_OUTCOME_CAP, avg_fwd_return * _OUTCOME_SCALE))
-
-    s["_days_flagged"]    = days_flagged
-    s["_avg_fwd_return"]  = avg_fwd_return
-    s["_n_outcomes"]      = n_outcomes
-    s["_first_flag_date"] = conv.get("first_flag_date")
-    s["_conviction"]      = (s.get("score") or 0) + persistence_boost + outcome_adj
-
-discovered_all = sorted(best_by_ticker.values(), key=lambda s: s.get("_conviction") or 0, reverse=True)
+discovered_all = rank_by_conviction(signals, conviction_by_ticker, exclude=existing_set)
 _n_total_discovered = len(discovered_all)
 
 section_title(

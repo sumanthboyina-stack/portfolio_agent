@@ -201,6 +201,41 @@ def get_sectors(tickers: list[str]) -> dict[str, str]:
     return {r["ticker"]: r["sector"] for r in rows}
 
 
+def get_peers(ticker: str, limit: int = 5) -> list[str]:
+    """
+    Same-sector tickers ranked by market-cap proximity (closest first) — a
+    simple peer screen for relative valuation, built from data already cached
+    here rather than a new data source. Despite its name, market_cap_category
+    stores the raw Nasdaq market-cap number, not a bucket label (see
+    universe.py) — that's what proximity is measured against.
+
+    Falls back to [] if the ticker or its sector isn't cached.
+    """
+    ticker = ticker.upper()
+    with _db() as c:
+        row = c.execute(
+            "SELECT sector, market_cap_category FROM universe_tickers "
+            "WHERE ticker = ? AND sector IS NOT NULL LIMIT 1",
+            (ticker,),
+        ).fetchone()
+        if not row:
+            return []
+        sector, target_cap = row["sector"], row["market_cap_category"]
+
+        candidates = c.execute(
+            "SELECT DISTINCT ticker, market_cap_category FROM universe_tickers "
+            "WHERE sector = ? AND ticker != ?",
+            (sector, ticker),
+        ).fetchall()
+
+    if target_cap is None:
+        return [r["ticker"] for r in candidates[:limit]]
+
+    with_cap = [r for r in candidates if r["market_cap_category"] is not None]
+    ranked = sorted(with_cap, key=lambda r: abs(r["market_cap_category"] - target_cap))
+    return [r["ticker"] for r in ranked[:limit]]
+
+
 def needs_refresh(index_name: str, max_age_days: int = 90) -> bool:
     """Return True if the index has never been fetched or was fetched more than max_age_days ago."""
     with _db() as c:
@@ -325,6 +360,60 @@ def record_signal_outcome(signal_id: int, fwd_return: float) -> None:
             (fwd_return, signal_id),
         )
         c.commit()
+
+
+# ── Conviction ranking (shared by Opportunities page + morning batch) ─────────
+#
+# Conviction = today's raw score, adjusted by 30-day history:
+#   + persistence: extra days (beyond today) flagged in the trailing 30 days
+#   + outcome:     rolling avg forward return of matured historical flags,
+#                  so a ticker that keeps firing but never actually moved
+#                  doesn't outrank one with a genuine track record.
+PERSISTENCE_STEP     = 0.5
+PERSISTENCE_MAX_DAYS = 5     # cap: +2.5 max from persistence alone
+OUTCOME_SCALE        = 20.0  # +10% avg fwd return -> +2.0 conviction points
+OUTCOME_CAP          = 2.0
+
+
+def rank_by_conviction(
+    signals: list[dict],
+    conviction_by_ticker: dict[str, dict],
+    exclude: Optional[set[str]] = None,
+) -> list[dict]:
+    """
+    Dedupe *signals* to one row per ticker (best score wins), attach conviction
+    fields (_days_flagged, _avg_fwd_return, _n_outcomes, _first_flag_date,
+    _conviction), and return sorted by conviction descending.
+
+    exclude: uppercase tickers to drop entirely (e.g. already on watchlist/portfolio).
+    """
+    exclude = {t.upper() for t in (exclude or set())}
+    best_by_ticker: dict[str, dict] = {}
+    for s in signals:
+        if s["ticker"] in exclude:
+            continue
+        prev = best_by_ticker.get(s["ticker"])
+        if prev is None or (s.get("score") or 0) > (prev.get("score") or 0):
+            best_by_ticker[s["ticker"]] = s
+
+    for ticker, s in best_by_ticker.items():
+        conv = conviction_by_ticker.get(ticker, {})
+        days_flagged   = conv.get("days_flagged") or 1
+        avg_fwd_return = conv.get("avg_fwd_return")
+        n_outcomes     = conv.get("n_outcomes") or 0
+
+        persistence_boost = min(max(days_flagged - 1, 0), PERSISTENCE_MAX_DAYS) * PERSISTENCE_STEP
+        outcome_adj = 0.0
+        if avg_fwd_return is not None and n_outcomes > 0:
+            outcome_adj = max(-OUTCOME_CAP, min(OUTCOME_CAP, avg_fwd_return * OUTCOME_SCALE))
+
+        s["_days_flagged"]    = days_flagged
+        s["_avg_fwd_return"]  = avg_fwd_return
+        s["_n_outcomes"]      = n_outcomes
+        s["_first_flag_date"] = conv.get("first_flag_date")
+        s["_conviction"]      = (s.get("score") or 0) + persistence_boost + outcome_adj
+
+    return sorted(best_by_ticker.values(), key=lambda s: s.get("_conviction") or 0, reverse=True)
 
 
 def get_conviction_data(

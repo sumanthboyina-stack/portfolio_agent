@@ -22,7 +22,8 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    inject_global_css, page_header, section_title, badge_html, top_nav,
+    inject_global_css, page_header, section_title, badge_html, top_nav, card,
+    ticker_label,
     SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL,
     SUCCESS_LIGHT, WARNING_LIGHT, PRIMARY_LIGHT,
 )
@@ -457,6 +458,120 @@ if all_holdings:
                         f'</div>',
                         unsafe_allow_html=True,
                     )
+
+        # ── Rebalance ─────────────────────────────────────────────────────────────
+        st.divider()
+        section_title(
+            "Rebalance",
+            badge_text="new cash allocation · reduce candidates",
+            badge_color=PRIMARY,
+        )
+        st.markdown(
+            '<p style="font-size:0.82rem;color:#64748B;margin:-6px 0 14px">'
+            'Where new cash should go — topping up existing conviction holdings or buying today\'s '
+            'Opportunity Engine picks — plus which positions are worth trimming for concentration or '
+            'a SELL signal. Deterministic scoring off stored APEX predictions and portfolio risk math, '
+            'no live LLM calls.</p>',
+            unsafe_allow_html=True,
+        )
+
+        cash_amount = st.number_input(
+            "Cash available to invest ($)", min_value=0, value=10000, step=500, key="rebal_cash",
+        )
+
+        @st.cache_data(ttl=1800, show_spinner=False)
+        def _cached_recommend_allocation(cash: float) -> dict:
+            from portfolio_agent.tools.portfolio_optimizer import recommend_allocation
+            return recommend_allocation(cash)
+
+        if cash_amount <= 0:
+            st.info("Enter a cash amount above to see an allocation recommendation.", icon="💵")
+        else:
+            with st.spinner("Scoring candidates against your portfolio…"):
+                rebal = _cached_recommend_allocation(float(cash_amount))
+
+            alloc_col, reduce_col = st.columns(2)
+
+            with alloc_col:
+                st.markdown('<p style="font-size:0.8rem;font-weight:700;color:#0F172A;margin-bottom:8px">Recommended Allocation</p>', unsafe_allow_html=True)
+                if not rebal["allocation"]:
+                    st.caption("No candidate cleared the conviction bar today — cash stays uninvested.")
+                for a in rebal["allocation"]:
+                    kind_badge = badge_html("existing", PRIMARY, PRIMARY_LIGHT) if a["kind"] == "existing" else badge_html("new", SUCCESS, SUCCESS_LIGHT)
+                    card(
+                        f'<div style="display:flex;align-items:center;gap:10px">'
+                        f'<div style="font-weight:800;color:#0F172A">{ticker_label(a["ticker"])}</div>'
+                        f'{kind_badge}'
+                        f'<div style="margin-left:auto;font-weight:800;color:{SUCCESS}">{_fmt_dollars(a["amount"])}</div>'
+                        f'</div>'
+                        f'<p style="margin:8px 0 0;font-size:0.78rem;color:#64748B;line-height:1.4">{a["why"]}</p>',
+                    )
+                if rebal["cash_reserved"] > 0:
+                    card(
+                        f'<div style="display:flex;align-items:center;gap:10px">'
+                        f'<div style="font-weight:800;color:#0F172A">CASH</div>'
+                        f'<div style="margin-left:auto;font-weight:800;color:{NEUTRAL}">{_fmt_dollars(rebal["cash_reserved"])}</div>'
+                        f'</div>'
+                        f'<p style="margin:8px 0 0;font-size:0.78rem;color:#64748B">'
+                        f'Undeployed — no further candidate cleared the conviction bar or position-size cap.</p>',
+                    )
+
+            with reduce_col:
+                st.markdown('<p style="font-size:0.8rem;font-weight:700;color:#0F172A;margin-bottom:8px">Consider Reducing</p>', unsafe_allow_html=True)
+                if not rebal["reduce"]:
+                    st.caption("No current holding trips a SELL signal or concentration threshold today.")
+                for r in rebal["reduce"]:
+                    card(
+                        f'<div style="display:flex;align-items:center;gap:10px">'
+                        f'<div style="font-weight:800;color:#0F172A">{ticker_label(r["ticker"])}</div>'
+                        f'<div style="margin-left:auto;font-weight:800;color:{DANGER}">-{_fmt_dollars(r["suggested_trim_dollars"])}</div>'
+                        f'</div>'
+                        f'<p style="margin:8px 0 0;font-size:0.78rem;color:#64748B;line-height:1.4">{r["rationale"]}</p>',
+                    )
+
+            before, after = rebal["impact"]["before"], rebal["impact"]["after"]
+            if before and after:
+                st.markdown('<p style="font-size:0.8rem;font-weight:700;color:#0F172A;margin:18px 0 8px">Expected Portfolio Impact</p>', unsafe_allow_html=True)
+
+                # (metric key, label, unit, format fn, lower_is_better)
+                _IMPACT_METRICS = [
+                    ("top_sector_pct", f"{before.get('top_sector') or 'Top sector'} %", True),
+                    ("weighted_beta", "Portfolio beta", True),
+                    ("portfolio_volatility_annualized", "Volatility (ann.)", True),
+                    ("expected_return_21d", "Expected 21d return", False),
+                    ("avg_pairwise_correlation", "Correlation concentration", True),
+                ]
+
+                def _fmt_metric(key: str, v) -> str:
+                    if v is None:
+                        return "—"
+                    if key in ("top_sector_pct", "expected_return_21d"):
+                        return f"{v:+.1f}%" if key == "expected_return_21d" else f"{v:.1f}%"
+                    return f"{v:.2f}"
+
+                impact_cols = st.columns(len(_IMPACT_METRICS))
+                for col, (key, label, lower_is_better) in zip(impact_cols, _IMPACT_METRICS):
+                    b_val, a_val = before.get(key), after.get(key)
+                    delta_str = "—"
+                    color = NEUTRAL
+                    if b_val is not None and a_val is not None:
+                        diff = a_val - b_val
+                        improved = (diff < 0) if lower_is_better else (diff > 0)
+                        color = SUCCESS if improved else (NEUTRAL if abs(diff) < 1e-6 else DANGER)
+                        arrow = "↓" if diff < 0 else ("↑" if diff > 0 else "→")
+                        delta_str = f"{arrow} {_fmt_metric(key, b_val)} → {_fmt_metric(key, a_val)}"
+                    with col:
+                        st.markdown(
+                            f'<div style="background:white;border:1px solid #F3F4F6;border-radius:12px;'
+                            f'padding:14px 16px;border-top:3px solid {color}">'
+                            f'<p style="margin:0;font-size:0.66rem;font-weight:700;text-transform:uppercase;'
+                            f'letter-spacing:0.06em;color:#9CA3AF">{label}</p>'
+                            f'<p style="margin:6px 0 0;font-size:0.95rem;font-weight:800;color:{color}">{delta_str}</p>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+            elif rebal["allocation"] or rebal["reduce"]:
+                st.caption("Portfolio impact projection unavailable (price history fetch failed) — allocation and reduce recommendations above are unaffected.")
 
         # ── Sync button ───────────────────────────────────────────────────────────
         st.divider()

@@ -308,6 +308,7 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
     pred_color, pred_bg = PRED_COLORS.get(pred, (NEUTRAL, NEUTRAL_LIGHT))
 
     f_score = row.get("fundamental_score")
+    v_score = row.get("valuation_score")
     r_score = row.get("research_score")
     m_score = row.get("macro_score")
     n_score = row.get("news_score")
@@ -354,7 +355,7 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
                 st.markdown(_prob_strip_html(row), unsafe_allow_html=True)
 
             driver_parts = []
-            for label, score in [("Fundamentals", f_score), ("Research", r_score), ("Macro", m_score), ("News", n_score)]:
+            for label, score in [("Fundamentals", f_score), ("Valuation", v_score), ("Research", r_score), ("Macro", m_score), ("News", n_score)]:
                 arrow = _score_arrow(score)
                 s_str = str(int(score)) if score is not None else "—"
                 driver_parts.append(f'<span style="font-size:0.72rem;color:#475569">{label} <b>{s_str}</b>{arrow}</span>')
@@ -378,6 +379,7 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
     first = horizon_rows[0]
     pred = first.get("prediction", "")
     f_score = first.get("fundamental_score")
+    v_score = first.get("valuation_score")
     r_score = first.get("research_score")
     m_score = first.get("macro_score")
     n_score = first.get("news_score")
@@ -427,7 +429,7 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
                 unsafe_allow_html=True,
             )
             driver_parts = []
-            for label, score in [("Fundamentals", f_score), ("Research", r_score), ("Macro", m_score), ("News", n_score)]:
+            for label, score in [("Fundamentals", f_score), ("Valuation", v_score), ("Research", r_score), ("Macro", m_score), ("News", n_score)]:
                 arrow = _score_arrow(score)
                 s_str = str(int(score)) if score is not None else "—"
                 driver_parts.append(
@@ -684,6 +686,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             score_breakdown = [
                 ("Composite Score",   row.get("composite_score")),
                 ("Fundamentals",      row.get("fundamental_score")),
+                ("Valuation",         row.get("valuation_score")),
                 ("Analyst Research",  row.get("research_score")),
                 ("Macro Environment", row.get("macro_score")),
                 ("News Sentiment",    row.get("news_score")),
@@ -709,14 +712,15 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         except Exception:
             panel = {}
 
-        if panel and any(panel.get(k) for k in ["chen_verdict", "webb_verdict", "varga_verdict", "park_verdict"]):
+        if panel and any(panel.get(k) for k in ["chen_verdict", "malhotra_verdict", "webb_verdict", "varga_verdict", "park_verdict"]):
             agents = [
-                ("FUNDAMENTALS",  "Earnings, balance sheet & valuation", panel.get("chen_verdict", "—"),  PRIMARY),
-                ("RESEARCH",      "Analyst targets & broker coverage",   panel.get("webb_verdict", "—"),  PURPLE),
-                ("MACRO",         "Interest rates, inflation & regime",  panel.get("varga_verdict", "—"), WARNING),
-                ("NEWS",          "Sentiment & recent headlines",        panel.get("park_verdict", "—"),  SUCCESS),
+                ("FUNDAMENTALS",  "Earnings, balance sheet & margins",       panel.get("chen_verdict", "—"),     PRIMARY),
+                ("VALUATION",     "DCF intrinsic value & margin of safety",  panel.get("malhotra_verdict", "—"), DANGER),
+                ("RESEARCH",      "Analyst targets & broker coverage",       panel.get("webb_verdict", "—"),     PURPLE),
+                ("MACRO",         "Interest rates, inflation & regime",      panel.get("varga_verdict", "—"),    WARNING),
+                ("NEWS",          "Sentiment & recent headlines",            panel.get("park_verdict", "—"),     SUCCESS),
             ]
-            pcols = st.columns(4)
+            pcols = st.columns(5)
             for pcol, (name, description, verdict, color) in zip(pcols, agents):
                 with pcol:
                     m = re.search(r"\((\d+(?:\.\d+)?)/10\)", verdict)
@@ -747,6 +751,46 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                 )
         else:
             st.caption("Agent panel summary not available for this prediction.")
+
+    # ── Why did it change? ────────────────────────────────────────────────────
+    with st.expander("🔍 Why did it change?", expanded=False):
+        from portfolio_agent.tools.prediction_db import get_score_change_breakdown
+
+        change = get_score_change_breakdown(drill_ticker)
+        if change is None:
+            st.caption("Not enough prediction history yet to show a day-over-day breakdown.")
+        else:
+            y, t = change["yesterday"], change["today"]
+            st.markdown(
+                f'<div style="font-size:0.85rem;color:#334155;margin-bottom:10px">'
+                f'<b>{y["recommendation"]} {y["composite_score"]:.1f}</b> ({y["as_of_date"]}) '
+                f'&nbsp;→&nbsp; <b>{t["recommendation"]} {t["composite_score"]:.1f}</b> ({t["as_of_date"]})'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            for b in change["breakdown"]:
+                color = SUCCESS if b["contribution"] > 0 else (DANGER if b["contribution"] < 0 else NEUTRAL)
+                sign = "+" if b["contribution"] > 0 else ""
+                st.markdown(
+                    f'<div style="display:flex;align-items:baseline;gap:10px;margin:4px 0">'
+                    f'<span style="font-weight:800;color:{color};min-width:44px">{sign}{b["contribution"]:.1f}</span>'
+                    f'<span style="font-weight:700;color:#0F172A;min-width:90px">{b["source"]}</span>'
+                    f'<span style="font-size:0.82rem;color:#64748B">{b["rationale"] or "—"}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            net = change["net_change"]
+            net_color = SUCCESS if (net or 0) > 0 else (DANGER if (net or 0) < 0 else NEUTRAL)
+            st.markdown(
+                f'<p style="margin-top:10px;font-size:0.85rem;font-weight:800;color:{net_color}">'
+                f'Net change: {net:+.1f}</p>' if net is not None else '',
+                unsafe_allow_html=True,
+            )
+            if not change["weights_available"]:
+                st.caption(
+                    "Exact weight mix wasn't recorded for one of these days — showing an "
+                    "approximate breakdown using base weights."
+                )
 
     # ── Historical predictions for this ticker ────────────────────────────────
     _drill_hist_name = _cname(drill_ticker)

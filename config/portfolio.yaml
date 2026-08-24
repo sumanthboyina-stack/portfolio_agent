@@ -22,6 +22,11 @@ holdings:
   shares: 5.25
   account: Vanguard
   broker: vanguard
+- ticker: GLD
+  shares: 15.0
+  avg_cost: 408.81
+  account: Individual - TOD
+  broker: fidelity
 - ticker: GOOG
   shares: 28.227
   account: Vanguard
@@ -78,6 +83,11 @@ holdings:
   shares: 120.0
   account: Vanguard
   broker: vanguard
+- ticker: WMT
+  shares: 4.0
+  avg_cost: 102.66
+  account: Individual - TOD
+  broker: fidelity
 - ticker: XOM
   shares: 24.833
   account: Vanguard

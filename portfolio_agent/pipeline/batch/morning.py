@@ -22,6 +22,13 @@ from portfolio_agent.pipeline.watchlist import load_all_tickers
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+# Top-N quant-screener candidates (by conviction) added to the daily
+# 'trending_opportunity' APEX run alongside news-trending tickers, so the
+# Opportunity Engine has a real fundamentals+research+macro+news synthesis
+# behind screener-discovered names too, not just a momentum signal. Each
+# addition costs one more per-ticker dual-run APEX call (~2 LLM calls).
+SCREENER_OPPORTUNITY_CAP = 10
+
 
 async def run_batch_morning(
     extra_tickers: list[str] | None = None,
@@ -108,6 +115,13 @@ async def run_batch_morning(
         if tracker:
             tracker.finish_run("error")
         return
+
+    log.info("\n── Phase 3.5: Valuation (DCF + relative, no LLM) ────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.pipeline.daily.valuation import _run_daily_valuation
+        await _run_daily_valuation(all_tickers, tracker=tracker)
+    except Exception as _val_exc:
+        log.warning(f"  [valuation] Phase skipped — {_val_exc}", event_type="warning")
 
     log.info("\n── Phase 4: APEX Predictions ───────────────────────────────────", event_type="phase_start")
 
@@ -300,13 +314,36 @@ async def _run_morning_apex_event_driven(
             t for t in dict.fromkeys(trending_tickers)
             if t not in portfolio_set and t not in existing_run_set
         ]
+
+        # Top quant-screener candidates (by conviction) join the same
+        # opportunity-discovery run — see SCREENER_OPPORTUNITY_CAP above.
+        screener_to_add: list[str] = []
+        try:
+            from portfolio_agent.tools.universe_db import (
+                get_latest_signal_date, get_signals, get_conviction_data, rank_by_conviction,
+            )
+            screen_date = get_latest_signal_date()
+            if screen_date:
+                exclude = set(all_tickers) | existing_run_set | set(trending_to_add)
+                sig_signals = get_signals(screen_date, min_score=2)
+                sig_conviction = get_conviction_data(screen_date, lookback_days=30, min_score=2)
+                ranked = rank_by_conviction(sig_signals, sig_conviction, exclude=exclude)
+                screener_to_add = [s["ticker"] for s in ranked[:SCREENER_OPPORTUNITY_CAP]]
+        except Exception as _screen_exc:
+            log.warning(
+                f"  [warn] Could not pull screener candidates for opportunity discovery: {_screen_exc}",
+                event_type="warning",
+            )
+
+        trending_to_add = trending_to_add + screener_to_add
         for ticker in trending_to_add:
             tickers_to_run.append(ticker)
             needed_horizons.update(scheduled_horizons)
             trigger_map[ticker] = ("trending_opportunity", None)
         if trending_to_add:
             log.info(
-                f"  {len(trending_to_add)} trending ticker(s) added for opportunity discovery",
+                f"  {len(trending_to_add)} trending/screener ticker(s) added for opportunity discovery "
+                f"({len(trending_to_add) - len(screener_to_add)} news-trending, {len(screener_to_add)} screener)",
                 event_type="info",
             )
 

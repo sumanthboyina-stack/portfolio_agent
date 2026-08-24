@@ -264,15 +264,19 @@ Question: Daily portfolio review — provide investment recommendation.
 {ctx_json}
 === END CONTEXT ===
 
-Using the context above (fundamentals, research, news, macro, dynamic_weights, prediction_history):
+Using the context above (fundamentals, valuation, research, news, macro, dynamic_weights, prediction_history):
 
 1. State the weight regime and signal summary (from dynamic_weights.regime and dynamic_weights.signal_strengths).
-2. Have each analyst score their domain 1-10: FUNDAMENTAL ANALYST, RESEARCH ANALYST,
+2. Have each analyst score their domain 1-10: FUNDAMENTAL ANALYST, VALUATION ANALYST (score
+   1-10 from valuation.margin_of_safety_pct: >=30% -> 9-10, 15-30% -> 7-8, -10% to 15% -> 5-6,
+   -30% to -10% -> 3-4, <-30% -> 1-2; treat the bear/base/bull spread as the model's own
+   uncertainty, not noise — do not collapse it into false precision), RESEARCH ANALYST,
    MACRO ANALYST, NEWS ANALYST.
 3. Cross-examine if scores diverge > 3 pts.
 4. Compare to prior prediction if one exists.
 5. For EACH scheduled horizon, look up its weights from dynamic_weights.weights_by_horizon[horizon_days]
-   and compute: horizon_composite = fund_w×fund_score + res_w×res_score + mac_w×mac_score + news_w×news_score.
+   and compute: horizon_composite = fund_w×fund_score + val_w×valuation_score + res_w×res_score
+   + mac_w×mac_score + news_w×news_score.
    For the top-level composite_score use the weights from the longest scheduled horizon (most balanced view).
 6. Map the overall composite to STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL.
 7. For EACH scheduled horizon below, provide direction, return range, conviction, the horizon-specific
@@ -291,14 +295,16 @@ End your response with EXACTLY this JSON block (no text after):
   "confidence": 7,
   "target_price": null,
   "fundamental_score": 7,
+  "valuation_score": 6,
   "research_score": 7,
   "macro_score": 6,
   "news_score": 6,
   "composite_score": 6.5,
   "weight_regime": "QUIET_DAY",
-  "weights_used": {{"fundamentals": 0.35, "research": 0.30, "macro": 0.20, "news": 0.15}},
+  "weights_used": {{"fundamentals": 0.28, "valuation": 0.22, "research": 0.25, "macro": 0.17, "news": 0.08}},
   "panel_summary": {{
     "chen_verdict": "BULLISH (7/10) — Fundamental Analyst one sentence",
+    "malhotra_verdict": "NEUTRAL (6/10) — Valuation Analyst one sentence citing margin_of_safety_pct",
     "webb_verdict": "BULLISH (7/10) — Research Analyst one sentence",
     "varga_verdict": "NEUTRAL (6/10) — Macro Analyst one sentence",
     "park_verdict":  "NEUTRAL (6/10) — News Analyst one sentence",
@@ -315,7 +321,7 @@ End your response with EXACTLY this JSON block (no text after):
       "predicted_return_high": 2.0,
       "conviction_score": 5,
       "horizon_composite": 5.5,
-      "weights_used": {{"news": 0.35, "research": 0.30, "macro": 0.20, "fundamentals": 0.15}},
+      "weights_used": {{"news": 0.35, "research": 0.25, "macro": 0.15, "fundamentals": 0.15, "valuation": 0.10}},
       "reasoning_text": "Replace with ticker-specific reasoning tied to this ticker's actual data above -- do not reuse this placeholder text or its numbers verbatim",
       "distribution": {{
         "strong_down": 10,
