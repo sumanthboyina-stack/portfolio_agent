@@ -42,6 +42,16 @@ def get_close(ticker: str, date_str: str) -> Optional[float]:
         return None
 
 
+def get_trailing_return(ticker: str, as_of: str, lookback_days: int = 10) -> Optional[float]:
+    """Return ticker's return over the ~lookback_days trading days before as_of."""
+    end_price = get_close(ticker, as_of)
+    start_date = (date.fromisoformat(as_of) - timedelta(days=lookback_days + 4)).isoformat()
+    start_price = get_close(ticker, start_date)
+    if not end_price or not start_price or start_price == 0:
+        return None
+    return (end_price / start_price) - 1
+
+
 def get_closes_in_range(ticker: str, start_date: str, end_date: str) -> dict[str, float]:
     """
     Return {date_iso: close} for every trading day in [start_date, end_date].

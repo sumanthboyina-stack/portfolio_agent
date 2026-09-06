@@ -22,6 +22,39 @@ def _build_horizons_instruction(horizons: list[int]) -> str:
     return "\n".join(lines) if lines else "  • 5d (~1 week) — news flow, momentum"
 
 
+def _apply_conviction_guardrails(
+    predicted_direction: str | None,
+    conviction_score: float | None,
+    has_news: bool,
+    trailing_10d_return: float | None,
+) -> tuple[float | None, list[str]]:
+    """
+    Deterministic post-hoc caps on conviction, applied after the LLM responds
+    and before the prediction is stored. Enforced in code rather than prompt
+    instructions because these are two data-confirmed money-losing patterns:
+      - "no news, bullish, high conviction" runs of positive research sentiment
+        filling a news gap (37.9% UP accuracy in the worst-miss sample)
+      - "buy the dip" bounce calls on tickers already declining sharply
+        (trailing 10d return -2.34% for wrong UP calls vs -0.32% for correct)
+    Mirrors the data_caps pattern in weight_engine.py (capping fundamentals/
+    research scores to 5 when data is missing), extended to conviction.
+    """
+    flags: list[str] = []
+    if conviction_score is None or predicted_direction != "UP":
+        return conviction_score, flags
+
+    capped = conviction_score
+    if not has_news and capped >= 7:
+        capped = min(capped, 5)
+        flags.append("no_news_bullish_capped")
+
+    if trailing_10d_return is not None and trailing_10d_return < -0.05:
+        capped = min(capped, 5)
+        flags.append("bounce_thesis_capped")
+
+    return capped, flags
+
+
 async def _run_daily_apex(
     portfolio_tickers: list[str],
     tracker=None,
@@ -41,7 +74,10 @@ async def _run_daily_apex(
         insert_prediction, get_latest_prediction,
         is_trading_day, get_scheduled_horizons, get_today_horizons,
     )
-    from portfolio_agent.tools.yfinance_tools import get_close as _get_close
+    from portfolio_agent.tools.yfinance_tools import (
+        get_close as _get_close,
+        get_trailing_return as _get_trailing_return,
+    )
     from portfolio_agent.tools.apex_dual_run import run_apex as _run_apex
 
     if trigger_map is None:
@@ -244,18 +280,36 @@ async def _run_daily_apex(
 
             _trig_type, _trig_ev_id = trigger_map.get(ticker, (None, None))
 
+            _has_news = bool(_ctx_parsed.get("news"))
+            try:
+                _trailing_10d = _get_trailing_return(ticker, today)
+            except Exception:
+                _trailing_10d = None
+
             for h_days in scheduled_horizons:
                 if h_days in done_today:
                     continue
                 h_data = horizons_by_days.get(h_days, {})
                 dist   = h_data.get("distribution") or {}
+
+                _pred_dir = h_data.get("predicted_direction")
+                _conviction, _flags = _apply_conviction_guardrails(
+                    _pred_dir, h_data.get("conviction_score"), _has_news, _trailing_10d,
+                )
+                if _flags:
+                    log.warning(
+                        f"  [guardrail] {ticker} {h_days}d — conviction capped "
+                        f"({h_data.get('conviction_score')} → {_conviction}): {', '.join(_flags)}",
+                        event_type="warning", ticker=ticker,
+                    )
+
                 save   = insert_prediction(
                     **_common,
                     horizon_days=h_days,
-                    predicted_direction=h_data.get("predicted_direction"),
+                    predicted_direction=_pred_dir,
                     predicted_return_low=h_data.get("predicted_return_low"),
                     predicted_return_high=h_data.get("predicted_return_high"),
-                    conviction_score=h_data.get("conviction_score"),
+                    conviction_score=_conviction,
                     reasoning_text=h_data.get("reasoning_text") or data.get("reasoning", ""),
                     start_price=price_map.get(ticker),
                     p_strong_down=dist.get("strong_down"),
@@ -265,6 +319,7 @@ async def _run_daily_apex(
                     p_strong_up=dist.get("strong_up"),
                     trigger_type=_trig_type,
                     trigger_event_id=_trig_ev_id,
+                    guardrail_flags=_flags or None,
                 )
                 if save.get("saved"):
                     saved_count += 1

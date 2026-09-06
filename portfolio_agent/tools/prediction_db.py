@@ -13,7 +13,9 @@ Schema (predictions table):
   risk_segment, reasoning, reasoning_text, panel_summary, data_sources,
   previous_prediction, changed_from_previous, model_name, model_provider,
   pt_mean, pt_median, pt_high, pt_low, pt_num_analysts, pt_current_price,
-  actual_return, actual_direction, outcome, error_magnitude, evaluated_at
+  actual_return, actual_direction, outcome, error_magnitude, evaluated_at,
+  guardrail_flags (deterministic post-hoc caps applied before storage, e.g.
+  'no_news_bullish_capped', 'bounce_thesis_capped')
 """
 
 from __future__ import annotations
@@ -202,6 +204,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("weight_regime",               "TEXT"),
         ("weights_used",                "TEXT"),
         ("valuation_score",             "INTEGER"),
+        ("guardrail_flags",             "TEXT"),
     ])
     # Index for per-model accuracy queries and parent linkage
     conn.execute(
@@ -370,6 +373,8 @@ def insert_prediction(
     # Dynamic weight mix actually used to compute composite_score
     weight_regime: Optional[str] = None,
     weights_used: Optional[dict] = None,
+    # Deterministic post-hoc guardrails applied before this row was stored
+    guardrail_flags: Optional[list] = None,
 ) -> dict:
     """
     Insert a new prediction row (append-only). One row per horizon per ticker per date.
@@ -423,11 +428,11 @@ def insert_prediction(
                         p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                         used_fallback, parent_merged_id,
                         trigger_type, trigger_event_id,
-                        weight_regime, weights_used, valuation_score)
+                        weight_regime, weights_used, valuation_score, guardrail_flags)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -450,6 +455,7 @@ def insert_prediction(
                     trigger_type, trigger_event_id,
                     weight_regime, json.dumps(weights_used) if weights_used else None,
                     valuation_score,
+                    json.dumps(guardrail_flags) if guardrail_flags else None,
                 ],
             )
             c.commit()

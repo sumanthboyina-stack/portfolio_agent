@@ -14,22 +14,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from datetime import date, timedelta
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from portfolio_agent.tools.prediction_db import _db
-from portfolio_agent.tools.yfinance_tools import get_close
-
-
-def trailing_return(ticker: str, as_of: str, lookback_days: int = 10) -> float | None:
-    """Return the ticker's return over the ~lookback_days trading days before as_of."""
-    end_price = get_close(ticker, as_of)
-    start_date = (date.fromisoformat(as_of) - timedelta(days=lookback_days + 4)).isoformat()
-    start_price = get_close(ticker, start_date)
-    if not end_price or not start_price or start_price == 0:
-        return None
-    return (end_price / start_price) - 1
+from portfolio_agent.tools.yfinance_tools import get_trailing_return as trailing_return
 
 
 def main():
