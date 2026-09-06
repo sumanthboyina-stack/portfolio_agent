@@ -24,10 +24,24 @@ PALETTE = [
 ]
 
 
+INDEX_META = {
+    "^GSPC": ("S&P 500", "#111827"),
+    "^IXIC": ("Nasdaq",  "#0891B2"),
+    "^DJI":  ("Dow Jones", "#D97706"),
+}
+
+
 def build_portfolio_trend_chart(
     total_dates, total_mv, total_cb, gain_abs, gain_pct_s,
     ticker_list, ticker_day,
+    index_series: dict[str, dict[str, float]] | None = None,
 ) -> go.Figure:
+    """
+    index_series: {index_symbol: {date_iso: close}} for the same date range as
+    total_dates, e.g. {"^GSPC": {...}, "^IXIC": {...}, "^DJI": {...}}. Each is
+    normalized to % change from its own first value in range and added as a
+    hidden trace shown only under the "vs Indices" toggle.
+    """
     fig = go.Figure()
 
     # Trace 0 — portfolio market value area
@@ -39,12 +53,20 @@ def build_portfolio_trend_chart(
         line=dict(color="#2563EB", width=2.5, shape="spline", smoothing=0.4),
         fill="tozeroy",
         fillcolor="rgba(37,99,235,0.07)",
-        customdata=list(zip(total_cb, gain_abs, gain_pct_s)),
+        # Plotly's hovertemplate silently drops the whole format spec (falls
+        # back to the raw float) whenever it includes a "+" sign flag on a
+        # customdata field — so the sign-bearing P&L values are pre-formatted
+        # in Python and passed as plain strings, referenced with no format spec.
+        customdata=list(zip(
+            total_cb,
+            [f"{g:+,.2f}" for g in gain_abs],
+            [f"{p:+.2f}" for p in gain_pct_s],
+        )),
         hovertemplate=(
             "<b>%{x}</b><br>"
-            "Value: <b>$%{y:,.0f}</b><br>"
-            "Cost:  $%{customdata[0]:,.0f}<br>"
-            "P&L:   <b>$%{customdata[1]:+,.0f}  (%{customdata[2]:+.1f}%)</b>"
+            "Value: <b>$%{y:,.2f}</b><br>"
+            "Cost:  $%{customdata[0]:,.2f}<br>"
+            "P&L:   <b>$%{customdata[1]}  (%{customdata[2]}%)</b>"
             "<extra></extra>"
         ),
         visible=True,
@@ -74,18 +96,58 @@ def build_portfolio_trend_chart(
             name=ticker_label(ticker, max_len=24),
             mode="lines",
             line=dict(color=PALETTE[i % len(PALETTE)], width=2, shape="spline", smoothing=0.4),
-            customdata=abs_vals,
+            # Sign-bearing % pre-formatted in Python (see note on trace 0) —
+            # Plotly's hovertemplate drops a "+"-flagged format spec entirely.
+            customdata=list(zip([f"{p:+.2f}" for p in pct_vals], abs_vals)),
             hovertemplate=(
                 f"<b>{ticker_label(ticker, max_len=30)}</b>  %{{x}}<br>"
-                "%{y:+.1f}%  ·  <b>$%{customdata:,.0f}</b>"
+                "%{customdata[0]}%  ·  <b>$%{customdata[1]:,.2f}</b>"
                 "<extra></extra>"
             ),
             visible=False,
         ))
 
     n_ticker = len(ticker_list)
-    vis_total  = [True]  * n_total + [False] * n_ticker
-    vis_ticker = [False] * n_total + [True]  * n_ticker
+
+    # Traces (n_total + n_ticker)+ — portfolio vs. index returns, all normalized
+    # to % change from the first date in range so they're directly comparable.
+    n_index = 0
+    if index_series and total_mv:
+        base_mv = total_mv[0] or 1
+        port_pct = [(v - base_mv) / base_mv * 100 for v in total_mv]
+        fig.add_trace(go.Scatter(
+            x=total_dates, y=port_pct,
+            name="Your Portfolio",
+            mode="lines",
+            line=dict(color="#2563EB", width=3, shape="spline", smoothing=0.4),
+            # Pre-formatted in Python — see note on trace 0 about Plotly
+            # dropping "+"-flagged format specs.
+            customdata=[f"{p:+.2f}" for p in port_pct],
+            hovertemplate="<b>Your Portfolio</b>  %{x}<br>%{customdata}%<extra></extra>",
+            visible=False,
+        ))
+        n_index += 1
+        for symbol, closes in index_series.items():
+            if not closes:
+                continue
+            dates = sorted(closes)
+            base_idx = closes[dates[0]] or 1
+            pct_vals = [(closes[d] - base_idx) / base_idx * 100 for d in dates]
+            label, color = INDEX_META.get(symbol, (symbol, "#6B7280"))
+            fig.add_trace(go.Scatter(
+                x=dates, y=pct_vals,
+                name=label,
+                mode="lines",
+                line=dict(color=color, width=2, dash="dash"),
+                customdata=[f"{p:+.2f}" for p in pct_vals],
+                hovertemplate=f"<b>{label}</b>  %{{x}}<br>%{{customdata}}%<extra></extra>",
+                visible=False,
+            ))
+            n_index += 1
+
+    vis_total  = [True]  * n_total + [False] * n_ticker + [False] * n_index
+    vis_ticker = [False] * n_total + [True]  * n_ticker + [False] * n_index
+    vis_index  = [False] * n_total + [False] * n_ticker + [True]  * n_index
 
     # ── Layout with in-chart controls ─────────────────────────────────────────
     fig.update_layout(
@@ -126,7 +188,7 @@ def build_portfolio_trend_chart(
                         {
                             "yaxis.tickprefix": "$",
                             "yaxis.ticksuffix": "",
-                            "yaxis.tickformat": ",.0f",
+                            "yaxis.tickformat": ",.2f",
                             "yaxis.zeroline": False,
                             "hovermode": "x unified",
                         },
@@ -140,13 +202,28 @@ def build_portfolio_trend_chart(
                         {
                             "yaxis.tickprefix": "",
                             "yaxis.ticksuffix": "%",
-                            "yaxis.tickformat": "+.0f",
+                            "yaxis.tickformat": "+.2f",
                             "yaxis.zeroline": True,
                             "hovermode": "closest",
                         },
                     ],
                 ),
-            ],
+            ] + ([
+                dict(
+                    label="vs Indices  (%)",
+                    method="update",
+                    args=[
+                        {"visible": vis_index},
+                        {
+                            "yaxis.tickprefix": "",
+                            "yaxis.ticksuffix": "%",
+                            "yaxis.tickformat": "+.2f",
+                            "yaxis.zeroline": True,
+                            "hovermode": "x unified",
+                        },
+                    ],
+                ),
+            ] if n_index else []),
             bgcolor="#F9FAFB",
             bordercolor="#E5E7EB",
             borderwidth=1,
@@ -186,7 +263,7 @@ def build_portfolio_trend_chart(
             zerolinewidth=1,
             tickprefix="$",
             tickfont=dict(size=11, color="#9CA3AF"),
-            tickformat=",.0f",
+            tickformat=",.2f",
             side="right",
         ),
     )

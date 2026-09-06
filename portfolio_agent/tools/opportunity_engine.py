@@ -123,24 +123,52 @@ def _why(row: dict, impact: Optional[dict]) -> str:
     return f"{narrative} {fit_sentence}".strip()
 
 
-def get_daily_opportunities(top_n: int = 10) -> list[dict]:
+def _score_candidate(
+    row: dict, conviction_by_ticker: dict[str, float], holdings: list[dict],
+) -> dict:
     """
-    Rank today's trending_opportunity APEX predictions into a portfolio-aware
-    top *top_n* list. Returns [] if the morning batch hasn't produced any
-    trending_opportunity predictions yet today.
+    Score one prediction row regardless of its call — classification (BUY/WATCH/
+    dropped) is a separate concern from scoring, so callers that need the full
+    universe (e.g. the calibration snapshot) aren't limited to already-filtered
+    winners. Reused by both get_daily_opportunities() and score_all_scored_tickers().
+    """
+    from portfolio_agent.tools.portfolio_risk import compute_hypothetical_addition_impact
 
-    Each item: {ticker, rank, opportunity_score, call (BUY|WATCH), why,
-                composite_score, recommendation, portfolio_impact}
-    """
+    ticker = row["ticker"]
+    composite_score = row.get("composite_score")
+    call = _classify(row.get("recommendation") or "", composite_score)
+
+    impact: Optional[dict] = None
+    if holdings:
+        try:
+            impact = compute_hypothetical_addition_impact(ticker, holdings)
+        except Exception:
+            impact = None
+
+    base = (composite_score or 0) / 10 * 70
+    opportunity_score = round(min(100, max(0, (
+        base + _conviction_bonus(ticker, conviction_by_ticker) + _portfolio_fit_bonus(impact)
+    ))))
+
+    return {
+        "ticker": ticker,
+        "opportunity_score": opportunity_score,
+        "call": call,
+        "why": _why(row, impact),
+        "composite_score": composite_score,
+        "recommendation": row.get("recommendation"),
+        "panel_summary": (
+            json.loads(row["panel_summary"]) if row.get("panel_summary") else {}
+        ),
+        "portfolio_impact": impact,
+    }
+
+
+def _load_conviction_and_holdings() -> tuple[dict[str, float], list[dict]]:
     from portfolio_agent.tools.universe_db import (
         get_latest_signal_date, get_signals, get_conviction_data, rank_by_conviction,
     )
-    from portfolio_agent.tools.portfolio_risk import compute_hypothetical_addition_impact
     from portfolio_agent.tools.portfolio_tools import get_portfolio_holdings
-
-    predictions = _latest_trending_opportunity_predictions()
-    if not predictions:
-        return []
 
     screen_date = get_latest_signal_date()
     conviction_by_ticker: dict[str, float] = {}
@@ -155,41 +183,93 @@ def get_daily_opportunities(top_n: int = 10) -> list[dict]:
     except Exception:
         holdings = []
 
-    scored: list[dict] = []
-    for row in predictions:
-        ticker = row["ticker"]
-        composite_score = row.get("composite_score")
-        call = _classify(row.get("recommendation") or "", composite_score)
-        if call is None:
-            continue
+    return conviction_by_ticker, holdings
 
-        impact: Optional[dict] = None
-        if holdings:
-            try:
-                impact = compute_hypothetical_addition_impact(ticker, holdings)
-            except Exception:
-                impact = None
 
-        base = (composite_score or 0) / 10 * 70
-        opportunity_score = round(min(100, max(0, (
-            base + _conviction_bonus(ticker, conviction_by_ticker) + _portfolio_fit_bonus(impact)
-        ))))
+def get_opportunity_history(ticker: str, window_days: int = 30) -> dict:
+    """
+    How many distinct days in the trailing *window_days* this ticker qualified
+    as BUY/WATCH among trending_opportunity predictions, plus the first
+    qualifying day in that window and its composite_score then vs. now —
+    "has this been flagged before, and did anything change since." Mirrors
+    the persistence concept universe_db already tracks for raw screener
+    signals, applied here to APEX-vetted opportunities instead.
+    """
+    from datetime import date, timedelta
 
-        scored.append({
-            "ticker": ticker,
-            "opportunity_score": opportunity_score,
-            "call": call,
-            "why": _why(row, impact),
-            "composite_score": composite_score,
-            "recommendation": row.get("recommendation"),
-            "panel_summary": (
-                json.loads(row["panel_summary"]) if row.get("panel_summary") else {}
-            ),
-            "portfolio_impact": impact,
-        })
+    cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+    with db_conn() as conn:
+        rows = conn.execute(
+            """SELECT as_of_date, composite_score, recommendation
+               FROM predictions
+               WHERE trigger_type = 'trending_opportunity' AND ticker = ?
+                 AND as_of_date >= ?
+               ORDER BY as_of_date ASC""",
+            (ticker, cutoff),
+        ).fetchall()
+
+    all_rows = [dict(r) for r in rows]
+    qualifying = [
+        d for d in all_rows
+        if _classify(d.get("recommendation") or "", d.get("composite_score")) is not None
+    ]
+    if not qualifying:
+        return {
+            "times_identified": 0,
+            "first_identified_date": None,
+            "first_composite_score": None,
+            "current_composite_score": None,
+            "score_change": None,
+        }
+
+    first, current = qualifying[0], qualifying[-1]
+    first_cs, current_cs = first.get("composite_score"), current.get("composite_score")
+    score_change = (current_cs - first_cs) if first_cs is not None and current_cs is not None else None
+
+    return {
+        "times_identified": len(qualifying),
+        "first_identified_date": first["as_of_date"],
+        "first_composite_score": first_cs,
+        "current_composite_score": current_cs,
+        "score_change": score_change,
+    }
+
+
+def get_daily_opportunities(top_n: int = 10) -> list[dict]:
+    """
+    Rank today's trending_opportunity APEX predictions into a portfolio-aware
+    top *top_n* list. Returns [] if the morning batch hasn't produced any
+    trending_opportunity predictions yet today.
+
+    Each item: {ticker, rank, opportunity_score, call (BUY|WATCH), why,
+                composite_score, recommendation, portfolio_impact}
+    """
+    predictions = _latest_trending_opportunity_predictions()
+    if not predictions:
+        return []
+
+    conviction_by_ticker, holdings = _load_conviction_and_holdings()
+
+    scored = [_score_candidate(row, conviction_by_ticker, holdings) for row in predictions]
+    scored = [s for s in scored if s["call"] is not None]
 
     scored.sort(key=lambda s: s["opportunity_score"], reverse=True)
     top = scored[:top_n]
     for i, item in enumerate(top, 1):
         item["rank"] = i
     return top
+
+
+def score_all_scored_tickers() -> list[dict]:
+    """
+    Same scoring as get_daily_opportunities(), but every trending_opportunity
+    ticker today — including SELL/low-HOLD names get_daily_opportunities()
+    would drop. Used by the calibration snapshot so the sample isn't biased
+    toward names the Opportunity Engine already picked as winners.
+    """
+    predictions = _latest_trending_opportunity_predictions()
+    if not predictions:
+        return []
+
+    conviction_by_ticker, holdings = _load_conviction_and_holdings()
+    return [_score_candidate(row, conviction_by_ticker, holdings) for row in predictions]

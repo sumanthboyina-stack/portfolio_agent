@@ -91,7 +91,7 @@ The pipeline is designed to run on a daily cadence. Suggested cron schedule (CST
 
 ```cron
 30  6  * * 1-5   /path/to/portfolio-agent/run_daily.sh        # morning batch
-0   17 * * 1-5   /path/to/portfolio-agent/run_validate.sh     # after-close validation
+0   17 * * 1-5   /path/to/portfolio-agent/run_validate.sh     # evening batch (validation + calibration + snapshot)
 ```
 
 The web UI Schedule page can also trigger manual runs directly from the browser.

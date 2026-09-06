@@ -189,9 +189,20 @@ else:
 
     ticker_list = sorted(ticker_day.keys())
 
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _load_index_series(start_date: str, end_date: str) -> dict[str, dict[str, float]]:
+        from portfolio_agent.tools.yfinance_tools import get_closes_in_range
+        return {
+            symbol: get_closes_in_range(symbol, start_date, end_date)
+            for symbol in ("^GSPC", "^IXIC", "^DJI")
+        }
+
+    index_series = _load_index_series(total_dates[0], total_dates[-1]) if total_dates else {}
+
     fig = build_portfolio_trend_chart(
         total_dates, total_mv, total_cb, gain_abs, gain_pct_s,
         ticker_list, ticker_day,
+        index_series=index_series,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -215,9 +226,9 @@ else:
             f'<b style="color:#374151">{first_date} → {last_date}</b>'
             f'<span style="color:#D1D5DB"> · {days_tracked}d</span></span>'
             f'<span style="color:#9CA3AF">Value&nbsp;&nbsp;'
-            f'<b style="color:#111827">${last_mv:,.0f}</b></span>'
+            f'<b style="color:#111827">${last_mv:,.2f}</b></span>'
             f'<span style="color:#9CA3AF">Unrealized&nbsp;&nbsp;'
-            f'<b style="color:{gain_col}">{sign}${gain:,.0f}&nbsp;({sign}{gain_pct:.1f}%)</b></span>'
+            f'<b style="color:{gain_col}">{sign}${gain:,.2f}&nbsp;({sign}{gain_pct:.2f}%)</b></span>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -324,7 +335,7 @@ with st.expander("➕ Add holding manually"):
     with mc1:
         m_ticker = st.text_input("Ticker", placeholder="AAPL", key="m_ticker").upper().strip()
     with mc2:
-        m_shares = st.number_input("Shares", min_value=0.0, step=0.001, format="%.4f", key="m_shares")
+        m_shares = st.number_input("Shares", min_value=0.0, step=0.001, format="%.2f", key="m_shares")
     with mc3:
         m_cost   = st.number_input("Avg cost / share ($)", min_value=0.0, step=0.01, key="m_cost")
     with mc4:
@@ -452,9 +463,9 @@ if all_holdings:
                         f'{_fmt_dollars(val)}</div>'
                         f'<div style="background:#E2E8F0;border-radius:4px;height:4px;margin-top:6px">'
                         f'<div style="background:{PRIMARY};border-radius:4px;height:4px;'
-                        f'width:{min(pct, 100):.0f}%"></div></div>'
+                        f'width:{min(pct, 100):.2f}%"></div></div>'
                         f'<div style="font-size:0.72rem;color:#94A3B8;margin-top:3px">'
-                        f'{pct:.1f}% of portfolio</div>'
+                        f'{pct:.2f}% of portfolio</div>'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
@@ -546,7 +557,7 @@ if all_holdings:
                     if v is None:
                         return "—"
                     if key in ("top_sector_pct", "expected_return_21d"):
-                        return f"{v:+.1f}%" if key == "expected_return_21d" else f"{v:.1f}%"
+                        return f"{v:+.2f}%" if key == "expected_return_21d" else f"{v:.2f}%"
                     return f"{v:.2f}"
 
                 impact_cols = st.columns(len(_IMPACT_METRICS))

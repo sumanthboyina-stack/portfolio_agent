@@ -39,7 +39,7 @@ _METRIC_CFG = {
     "directional_accuracy": dict(
         label="Directional Accuracy",
         higher=True, bar_max=1.0, bar_min=0.0,
-        fmt=lambda v: f"{v*100:.1f}%",
+        fmt=lambda v: f"{v*100:.2f}%",
         defn="% of predictions where the model's UP / DOWN / FLAT direction matched the actual market move.",
         tiers=[
             (0.75, "#059669", "🌟 Exceptional  (≥ 75%)"),
@@ -53,7 +53,7 @@ _METRIC_CFG = {
     "in_range_pct": dict(
         label="In-Range %",
         higher=True, bar_max=1.0, bar_min=0.0,
-        fmt=lambda v: f"{v*100:.1f}%",
+        fmt=lambda v: f"{v*100:.2f}%",
         defn="% of predictions where the actual return landed inside the model's predicted return range [low, high].",
         tiers=[
             (0.80, "#059669", "🌟 Excellent calibration  (≥ 80%)"),
@@ -81,7 +81,7 @@ _METRIC_CFG = {
     "high_conviction_accuracy": dict(
         label="Hi-Conv Accuracy  (≥ 7/10)",
         higher=True, bar_max=1.0, bar_min=0.0,
-        fmt=lambda v: f"{v*100:.1f}%",
+        fmt=lambda v: f"{v*100:.2f}%",
         defn="Directional accuracy for predictions with conviction score ≥ 7/10. High-conviction calls should outperform average.",
         tiers=[
             (0.75, "#059669", "🌟 Exceptional  (≥ 75%)"),
@@ -95,7 +95,7 @@ _METRIC_CFG = {
     "low_conviction_accuracy": dict(
         label="Lo-Conv Accuracy  (< 7/10)",
         higher=True, bar_max=1.0, bar_min=0.0,
-        fmt=lambda v: f"{v*100:.1f}%",
+        fmt=lambda v: f"{v*100:.2f}%",
         defn="Directional accuracy for predictions with conviction score < 7/10. Low-conviction should be closer to random.",
         tiers=[
             (0.70, "#059669", "🌟 Exceptional  (≥ 70%)"),
@@ -109,7 +109,7 @@ _METRIC_CFG = {
     "brier_score": dict(
         label="Brier Score  ↓ lower = better",
         higher=False, bar_max=0.30, bar_min=0.0,
-        fmt=lambda v: f"{v:.4f}",
+        fmt=lambda v: f"{v:.2f}",
         defn="Mean squared error of probability forecasts across 5 return buckets (▼▼ / ▼ / → / ▲ / ▲▲). Perfect = 0.0 · Coin flip = 0.25.",
         tiers=[
             (0.15, "#059669", "🌟 Exceptional     (< 0.15)"),
@@ -123,7 +123,7 @@ _METRIC_CFG = {
     "mean_log_loss": dict(
         label="Log-Loss  ↓ lower = better",
         higher=False, bar_max=1.0, bar_min=0.0,
-        fmt=lambda v: f"{v:.4f}",
+        fmt=lambda v: f"{v:.2f}",
         defn="Cross-entropy loss. Penalises overconfident wrong predictions more than Brier. Perfect = 0.0 · Coin flip ≈ 0.693.",
         tiers=[
             (0.30,  "#059669", "🌟 Excellent    (< 0.30)"),
@@ -205,7 +205,8 @@ def _brier_tier(b):
 # ── Metric trend charts ────────────────────────────────────────────────────────
 
 def build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                             h_colors, h_labels) -> go.Figure:
+                             h_colors, h_labels, show_points: bool = True,
+                             show_aggregate: bool = True) -> go.Figure:
     fig_brier = go.Figure()
 
     # Horizontal reference lines
@@ -228,18 +229,19 @@ def build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rol
         label = h_labels.get(int(h), f"{int(h)}d")
 
         # Scatter: individual points
-        fig_brier.add_trace(go.Scatter(
-            x=sub["prediction_date"], y=sub["brier_score"],
-            mode="markers",
-            name=f"{label} — each prediction",
-            marker=dict(size=7, color=color, opacity=0.5,
-                        line=dict(color=color, width=1)),
-            hovertemplate=(
-                "<b>%{x|%Y-%m-%d}</b><br>"
-                f"Horizon: {label}<br>"
-                "Brier: %{y:.4f}<extra></extra>"
-            ),
-        ))
+        if show_points:
+            fig_brier.add_trace(go.Scatter(
+                x=sub["prediction_date"], y=sub["brier_score"],
+                mode="markers",
+                name=f"{label} — each prediction",
+                marker=dict(size=7, color=color, opacity=0.5,
+                            line=dict(color=color, width=1)),
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    f"Horizon: {label}<br>"
+                    "Brier: %{y:.2f}<extra></extra>"
+                ),
+            ))
 
         # Rolling mean
         if len(sub) >= 3:
@@ -251,12 +253,12 @@ def build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rol
                 line=dict(color=color, width=2.5),
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
-                    f"Rolling avg ({roll_window}): %{{y:.4f}}<extra></extra>"
+                    f"Rolling avg ({roll_window}): %{{y:.2f}}<extra></extra>"
                 ),
             ))
 
     # Overlay rolling metrics if available
-    if not rolling_df.empty and "brier_score" in rolling_df.columns:
+    if show_aggregate and not rolling_df.empty and "brier_score" in rolling_df.columns:
         for h in sorted(horizons_present):
             rsub = rolling_df[rolling_df["horizon_days"] == h].dropna(subset=["brier_score"])
             if rsub.empty:
@@ -271,7 +273,7 @@ def build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rol
                 marker=dict(size=5, symbol="diamond"),
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
-                    f"Aggregate Brier ({label}): %{{y:.4f}}<extra></extra>"
+                    f"Aggregate Brier ({label}): %{{y:.2f}}<extra></extra>"
                 ),
             ))
 
@@ -289,13 +291,14 @@ def build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rol
 
 
 def build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                               h_colors, h_labels) -> go.Figure:
+                               h_colors, h_labels, show_points: bool = True,
+                               show_aggregate: bool = True) -> go.Figure:
     fig_ll = go.Figure()
     ll_baseline = _math.log(2)
 
     fig_ll.add_hline(
         y=ll_baseline, line_dash="dot", line_color="#94A3B8", opacity=0.6,
-        annotation_text=f"Coin-flip baseline ({ll_baseline:.3f})",
+        annotation_text=f"Coin-flip baseline ({ll_baseline:.2f})",
         annotation_font_size=10, annotation_position="right",
     )
     fig_ll.add_hline(
@@ -313,18 +316,19 @@ def build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, r
         color = h_colors.get(int(h), "#64748B")
         label = h_labels.get(int(h), f"{int(h)}d")
 
-        fig_ll.add_trace(go.Scatter(
-            x=sub["prediction_date"], y=sub["log_loss"],
-            mode="markers",
-            name=f"{label} — each prediction",
-            marker=dict(size=7, color=color, opacity=0.5,
-                        line=dict(color=color, width=1)),
-            hovertemplate=(
-                "<b>%{x|%Y-%m-%d}</b><br>"
-                f"Horizon: {label}<br>"
-                "Log-Loss: %{y:.4f}<extra></extra>"
-            ),
-        ))
+        if show_points:
+            fig_ll.add_trace(go.Scatter(
+                x=sub["prediction_date"], y=sub["log_loss"],
+                mode="markers",
+                name=f"{label} — each prediction",
+                marker=dict(size=7, color=color, opacity=0.5,
+                            line=dict(color=color, width=1)),
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    f"Horizon: {label}<br>"
+                    "Log-Loss: %{y:.2f}<extra></extra>"
+                ),
+            ))
 
         if len(sub) >= 3:
             roll = sub["log_loss"].rolling(roll_window, min_periods=2).mean()
@@ -335,11 +339,11 @@ def build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, r
                 line=dict(color=color, width=2.5),
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
-                    f"Rolling avg ({roll_window}): %{{y:.4f}}<extra></extra>"
+                    f"Rolling avg ({roll_window}): %{{y:.2f}}<extra></extra>"
                 ),
             ))
 
-    if not rolling_df.empty and "mean_log_loss" in rolling_df.columns:
+    if show_aggregate and not rolling_df.empty and "mean_log_loss" in rolling_df.columns:
         for h in sorted(horizons_present):
             rsub = rolling_df[rolling_df["horizon_days"] == h].dropna(subset=["mean_log_loss"])
             if rsub.empty:
@@ -354,7 +358,7 @@ def build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, r
                 marker=dict(size=5, symbol="diamond"),
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
-                    f"Aggregate Log-Loss ({label}): %{{y:.4f}}<extra></extra>"
+                    f"Aggregate Log-Loss ({label}): %{{y:.2f}}<extra></extra>"
                 ),
             ))
 
@@ -372,7 +376,7 @@ def build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, r
 
 
 def build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                      h_colors, h_labels) -> go.Figure:
+                                      h_colors, h_labels, show_aggregate: bool = True) -> go.Figure:
     fig_dir = go.Figure()
     fig_dir.add_hline(
         y=0.5, line_dash="dot", line_color="#EF4444", opacity=0.6,
@@ -405,11 +409,11 @@ def build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_wi
             marker=dict(size=5, color=color),
             hovertemplate=(
                 "<b>%{x|%Y-%m-%d}</b><br>"
-                f"Rolling dir accuracy ({label}): %{{y:.1%}}<extra></extra>"
+                f"Rolling dir accuracy ({label}): %{{y:.2%}}<extra></extra>"
             ),
         ))
 
-    if not rolling_df.empty and "directional_accuracy" in rolling_df.columns:
+    if show_aggregate and not rolling_df.empty and "directional_accuracy" in rolling_df.columns:
         for h in sorted(horizons_present):
             rsub = rolling_df[rolling_df["horizon_days"] == h].dropna(subset=["directional_accuracy"])
             if rsub.empty:
@@ -424,13 +428,13 @@ def build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_wi
                 marker=dict(size=5, symbol="diamond"),
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
-                    f"Aggregate dir acc ({label}): %{{y:.1%}}<extra></extra>"
+                    f"Aggregate dir acc ({label}): %{{y:.2%}}<extra></extra>"
                 ),
             ))
 
     fig_dir.update_layout(
         height=320,
-        yaxis=dict(range=[0, 1.05], title="Directional Accuracy", tickformat=".0%", gridcolor="#F1F5F9"),
+        yaxis=dict(range=[0, 1.05], title="Directional Accuracy", tickformat=".2%", gridcolor="#F1F5F9"),
         xaxis=dict(title="Prediction Date"),
         margin=dict(t=20, b=50, l=60, r=120),
         plot_bgcolor="rgba(0,0,0,0)",
@@ -487,9 +491,9 @@ def build_predicted_vs_actual_scatter(scatter_df: pd.DataFrame) -> go.Figure:
             ),
             hovertemplate=(
                 "<b>%{customdata[0]}</b> — %{customdata[1]}<br>"
-                "Predicted: %{x:.1f}%<br>"
-                "Actual: %{y:.1f}%<br>"
-                "Conviction: %{customdata[2]:.0f}/10<extra></extra>"
+                "Predicted: %{x:.2f}%<br>"
+                "Actual: %{y:.2f}%<br>"
+                "Conviction: %{customdata[2]:.2f}/10<extra></extra>"
             ),
             customdata=list(zip(
                 grp["ticker"].fillna("?"),
@@ -526,7 +530,7 @@ def build_accuracy_heatmap(heatmap_data: list[dict]) -> go.Figure:
             if cell and (cell.get("n") or 0) >= 5:
                 acc = cell["dir_acc"]
                 z_row.append(acc if acc is not None else None)
-                t_row.append(f"{(acc or 0)*100:.0f}%\nN={cell['n']}")
+                t_row.append(f"{(acc or 0)*100:.2f}%\nN={cell['n']}")
             else:
                 z_row.append(None)
                 t_row.append("N/A")
@@ -582,7 +586,7 @@ def build_reliability_diagram(reliability: list[dict]) -> go.Figure:
             line=dict(color="#1D4ED8", width=1),
         ),
         line=dict(color="#2563EB", width=2),
-        text=[f"bin {d['bin_label']}<br>N={d['n']}<br>stated {d['mean_stated']:.0%}<br>actual {d['actual_hit_rate']:.0%}"
+        text=[f"bin {d['bin_label']}<br>N={d['n']}<br>stated {d['mean_stated']:.2%}<br>actual {d['actual_hit_rate']:.2%}"
               for d in reliability],
         hovertemplate="%{text}<extra></extra>",
         name="APEX calibration",
@@ -590,8 +594,8 @@ def build_reliability_diagram(reliability: list[dict]) -> go.Figure:
     fig.update_layout(
         xaxis_title="Stated p_up Confidence",
         yaxis_title="Actual 'Up' Hit Rate",
-        xaxis=dict(range=[-0.02, 1.02], tickformat=".0%"),
-        yaxis=dict(range=[-0.02, 1.12], tickformat=".0%"),
+        xaxis=dict(range=[-0.02, 1.02], tickformat=".2%"),
+        yaxis=dict(range=[-0.02, 1.12], tickformat=".2%"),
         height=480,
         legend=dict(orientation="h", y=-0.18),
         margin=dict(t=20),
@@ -624,7 +628,7 @@ def build_conviction_calibration_chart(conviction_cal: list[dict]) -> go.Figure:
     fig2.update_layout(
         xaxis_title="Conviction Score Bucket (0–10)",
         yaxis_title="Directional Accuracy",
-        yaxis=dict(range=[0, 1.15], tickformat=".0%"),
+        yaxis=dict(range=[0, 1.15], tickformat=".2%"),
         xaxis=dict(range=[0, 10]),
         height=360,
         legend=dict(orientation="h", y=-0.2),
@@ -639,7 +643,7 @@ def build_brier_histogram(b_vals: list[float]) -> go.Figure:
     fig_bh = go.Figure(go.Histogram(
         x=b_vals, nbinsx=20,
         marker_color="#2563EB", opacity=0.75,
-        hovertemplate="Brier: %{x:.3f}<br>Count: %{y}<extra></extra>",
+        hovertemplate="Brier: %{x:.2f}<br>Count: %{y}<extra></extra>",
     ))
     fig_bh.add_vline(x=0.20, line_dash="dot", line_color="#D97706",
                      annotation_text="0.20 threshold")
@@ -658,7 +662,7 @@ def build_logloss_histogram(ll_vals: list[float]) -> go.Figure:
     fig_llh = go.Figure(go.Histogram(
         x=ll_vals, nbinsx=20,
         marker_color="#7C3AED", opacity=0.75,
-        hovertemplate="Log-Loss: %{x:.3f}<br>Count: %{y}<extra></extra>",
+        hovertemplate="Log-Loss: %{x:.2f}<br>Count: %{y}<extra></extra>",
     ))
     fig_llh.add_vline(x=_math.log(2), line_dash="dot", line_color="#94A3B8",
                       annotation_text="Coin-flip baseline")
@@ -689,13 +693,13 @@ def build_drift_accuracy_chart(drift_5d: list[dict]) -> go.Figure:
         x=dates, y=accs,
         mode="lines+markers",
         text=[f"N={n}" for n in ns],
-        hovertemplate="%{x}<br>Accuracy: %{y:.1%}<br>%{text}",
+        hovertemplate="%{x}<br>Accuracy: %{y:.2%}<br>%{text}",
         marker=dict(size=6, color="#2563EB"),
         line=dict(color="#2563EB", width=2),
         name="Rolling accuracy",
     ))
     fig.update_layout(
-        yaxis=dict(range=[0, 1], tickformat=".0%"),
+        yaxis=dict(range=[0, 1], tickformat=".2%"),
         height=350, margin=dict(t=20, b=40),
     )
     return fig

@@ -100,7 +100,6 @@ async def run_batch_intraday(
         current_watchlist: list[str] = [str(t).upper() for t in (wl_data or {}).get("tickers", [])]
     except Exception:
         current_watchlist = []
-    watchlist_set = set(current_watchlist)
 
     log.info(f"\n{'━' * 64}", event_type="separator")
     log.info(
@@ -138,6 +137,9 @@ async def run_batch_intraday(
         if tracker:
             tracker.finish_run("completed")
         return
+
+    from portfolio_agent.pipeline.batch.morning import ensure_morning_ran_today
+    await ensure_morning_ran_today(extra_tickers=extra_tickers)
 
     if not config.get("enabled", True):
         log.info("  event_driven disabled in config — skipping.", event_type="info")
@@ -227,35 +229,15 @@ async def run_batch_intraday(
             event_type="summary",
         )
 
-        # Only promote severity-3 trending tickers to the permanent watchlist.
-        # Pass the real current_watchlist so _run_news_phase's update_watchlist
-        # correctly deduplicates and doesn't re-add existing entries.
-        wl_threshold = config.get("watchlist_severity_threshold", 3)
-        severity_promoted = [
-            t for t in trending_with_events
-            if t not in watchlist_set
-            and event_by_ticker[t].get("severity", 0) >= wl_threshold
-        ]
-        if severity_promoted:
-            from portfolio_agent.pipeline.watchlist import update_watchlist
-            update_watchlist(wp, severity_promoted)
-            log.info(
-                f"  [Track B] Promoted {len(severity_promoted)} ticker(s) to watchlist "
-                f"(severity≥{wl_threshold}): {severity_promoted}",
-                event_type="info",
-            )
-
-        # News phase — pass real watchlist so update_watchlist inside doesn't double-add.
-        # trending_from_news carries only the severity-3 ones not already on watchlist,
-        # so the existing update_watchlist call inside _run_news_phase becomes a no-op
-        # (severity_promoted tickers were just added above; others are already on watchlist).
+        # News phase for trending/event-triggered tickers. The watchlist itself is
+        # manual-only (Watchlist Manager screen / Opportunity Engine "Add to
+        # Watchlist") — trending tickers get same-day News/Research/Fundamentals/
+        # APEX coverage here but are never auto-promoted onto watchlist.yaml.
         await _run_news_phase(
             all_tickers=research_tickers,
             watchlist=current_watchlist,
             portfolio_tickers=[],
-            trending_from_news=severity_promoted,  # only newly-promoted ones
             extra_tickers=None,
-            watchlist_path=wp,
             tracker=tracker,
         )
 

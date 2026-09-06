@@ -161,21 +161,6 @@ def _load() -> dict:
         else:
             d["wl_opps"] = []
 
-        # ── Trending opportunity discoveries ────────────────────────────────
-        rows = c.execute("""
-            SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
-                   p.news_score, p.research_score, p.fundamental_score, p.created_at
-            FROM predictions p
-            JOIN (
-                SELECT ticker, MAX(created_at) dt
-                FROM predictions WHERE trigger_type='trending_opportunity'
-                GROUP BY ticker
-            ) x ON p.ticker=x.ticker AND p.created_at=x.dt
-            WHERE p.trigger_type='trending_opportunity'
-            ORDER BY p.composite_score DESC NULLS LAST LIMIT 8
-        """).fetchall()
-        d["trending_opps"] = [dict(r) for r in rows]
-
         # ── Freshness ────────────────────────────────────────────────────────
         def _latest(tbl, col="updated_at"):
             try:
@@ -239,7 +224,7 @@ def _macro() -> dict:
         t2v  = t2.get("value")    if "error" not in t2  else None
         ffv  = ff.get("value")    if "error" not in ff  else None
         cpiv = cpi.get("yoy_pct") if "error" not in cpi else None
-        hyv  = round(hy.get("value") * 100) if ("error" not in hy and hy.get("value")) else None
+        hyv  = round(hy.get("value") * 100, 2) if ("error" not in hy and hy.get("value")) else None
         spr  = round(t10v - t2v, 2) if (t10v and t2v) else None
 
         regime = "NEUTRAL"
@@ -251,6 +236,24 @@ def _macro() -> dict:
                 "cpi": cpiv, "hy": hyv, "spread": spr, "regime": regime}
     except Exception:
         return {}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _trending_opportunities(top_n: int = 8) -> list[dict]:
+    """
+    Portfolio-fit-aware ranking from opportunity_engine.py — same source data
+    the old raw composite_score query used (trigger_type='trending_opportunity'
+    predictions), but with the actual portfolio-fit math applied, not just a
+    re-sort. Cached separately from _load() (30min, not 2min) since this does
+    live yfinance correlation/concentration calls per candidate, matching the
+    Opportunity Engine page's own cache TTL rather than hammering it every
+    dashboard refresh.
+    """
+    try:
+        from portfolio_agent.tools.opportunity_engine import get_daily_opportunities
+        return get_daily_opportunities(top_n=top_n)
+    except Exception:
+        return []
 
 
 # ── Attention queue builder ───────────────────────────────────────────────────
@@ -275,7 +278,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = hmap.get(ev["ticker"], {}).get("weight_pct", 0)
             _item("critical", ev["ticker"],
                   ev.get("summary") or f"Severity-3 {ev['event_type'].replace('_',' ')}",
-                  f"Portfolio weight {w:.1f}% — pipeline has not yet processed this event. "
+                  f"Portfolio weight {w:.2f}% — pipeline has not yet processed this event. "
                   f"Open Chat and ask APEX to analyze {ev['ticker']}.",
                   "chat")
 
@@ -284,14 +287,14 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = hmap.get(t, {}).get("weight_pct", 0)
             _item("critical", t,
                   f"{p['recommendation']} — confidence {p.get('confidence','?')}/10",
-                  f"Portfolio weight {w:.1f}%. Review the reasoning before holding further. "
+                  f"Portfolio weight {w:.2f}%. Review the reasoning before holding further. "
                   f"Check the Predictions page for the full analyst breakdown.",
                   "predictions")
 
     for h in d.get("holdings", []):
         if h["weight_pct"] > 20:
             _item("critical", h["ticker"],
-                  f"Concentration {h['weight_pct']:.1f}% of portfolio",
+                  f"Concentration {h['weight_pct']:.2f}% of portfolio",
                   "Single name above 20%. Consider whether the position sizing still matches "
                   "your original thesis. See the Portfolio page for full breakdown.",
                   "portfolio")
@@ -310,10 +313,10 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             rd = {}
         bits = []
         if (rd.get("sector_concentration_pct") or 0) > 25:
-            bits.append(f"{rd.get('sector','sector')} at {rd['sector_concentration_pct']:.0f}% of portfolio")
+            bits.append(f"{rd.get('sector','sector')} at {rd['sector_concentration_pct']:.2f}% of portfolio")
         if (rd.get("issuer_concentration_pct") or 0) > 15:
             peers = ", ".join(rd.get("issuer_peers") or [])
-            bits.append(f"issuer concentration {rd['issuer_concentration_pct']:.0f}%" + (f" (with {peers})" if peers else ""))
+            bits.append(f"issuer concentration {rd['issuer_concentration_pct']:.2f}%" + (f" (with {peers})" if peers else ""))
         if abs(rd.get("beta_vs_spy") or 0) > 1.5:
             bits.append(f"beta {rd['beta_vs_spy']:.2f} vs SPY")
         detail = "; ".join(bits) if bits else (rf.get("summary") or "Risk specialist flagged this position")
@@ -356,8 +359,8 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
     n5   = v5.get("num_predictions") or 0
     if n5 >= 30 and acc5 < 0.45:
         _item("watch", None,
-              f"5-day accuracy {acc5*100:.0f}% over {n5} evaluated predictions",
-              f"Below coin-flip baseline (50%). Brier score {v5.get('brier_score',0):.3f} "
+              f"5-day accuracy {acc5*100:.2f}% over {n5} evaluated predictions",
+              f"Below coin-flip baseline (50%). Brier score {v5.get('brier_score',0):.2f} "
               f"vs 0.250 baseline. Treat 5-day signals as research prompts only — "
               f"not trade signals. See Validation for breakdown by ticker and horizon.",
               "validation", requires_action=False)
@@ -373,7 +376,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
     for h in d.get("holdings", []):
         if 15 <= h["weight_pct"] < 20:
             _item("watch", h["ticker"],
-                  f"Concentration {h['weight_pct']:.1f}% — approaching single-name limit",
+                  f"Concentration {h['weight_pct']:.2f}% — approaching single-name limit",
                   "No immediate action required. Monitor — further appreciation will push "
                   "this past 20%.",
                   "portfolio", requires_action=False)
@@ -385,7 +388,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = hmap.get(ev["ticker"], {}).get("weight_pct", 0)
             _item("watch", ev["ticker"],
                   ev.get("summary") or f"Material event: {ev['event_type'].replace('_',' ')}",
-                  f"Portfolio weight {w:.1f}%. APEX already processed this — check the updated "
+                  f"Portfolio weight {w:.2f}%. APEX already processed this — check the updated "
                   f"prediction on the Predictions page.",
                   "predictions", requires_action=False)
 
@@ -396,14 +399,14 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = h.get("weight_pct", 0)
             if w < 10 and (p.get("confidence") or 0) >= 7:
                 _item("opportunity", t,
-                      f"{p['recommendation']} — {w:.1f}% weight, room to add",
+                      f"{p['recommendation']} — {w:.2f}% weight, room to add",
                       f"Confidence {p.get('confidence','?')}/10. Candidate for adding to an "
                       f"existing position. Verify the thesis independently before acting.",
                       "predictions")
 
     for wl in d.get("wl_opps", [])[:3]:
         sc = wl.get("composite_score")
-        sc_str = f"{sc:.1f}" if sc is not None else "?"
+        sc_str = f"{sc:.2f}" if sc is not None else "?"
         _item("opportunity", wl["ticker"],
               f"Watchlist {wl['recommendation']} — score {sc_str}, conf {wl.get('confidence','?')}/10",
               "Not currently owned. Review setup, check valuation independently, "
@@ -411,25 +414,18 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
               "chat")
 
     # ── DISCOVERY (trending opportunity) ─────────────────────────────────────
+    # Sourced from opportunity_engine.get_daily_opportunities() — the
+    # portfolio-fit-aware ranking (correlation, sector-concentration impact,
+    # conviction), not a raw composite_score re-sort.
     for td in d.get("trending_opps", []):
-        rec = td.get("recommendation", "")
-        if rec not in ("BUY", "STRONG_BUY"):
+        if td.get("call") != "BUY":
             continue
-        sc  = td.get("composite_score")
-        sc_str = f"{sc:.1f}" if sc is not None else "?"
-        ns  = td.get("news_score")
-        rs  = td.get("research_score")
-        fs  = td.get("fundamental_score")
-        score_parts = []
-        if ns is not None: score_parts.append(f"News {ns:.1f}")
-        if rs is not None: score_parts.append(f"Research {rs:.1f}")
-        if fs is not None: score_parts.append(f"Fundamentals {fs:.1f}")
-        score_detail = " · ".join(score_parts) if score_parts else ""
+        sc = td.get("opportunity_score")
+        sc_str = f"{sc:.2f}" if sc is not None else "?"
         _item("discovery", td["ticker"],
-              f"Trending {rec} — composite score {sc_str}, conf {td.get('confidence','?')}/10",
-              f"Discovered via trending analysis. Full pipeline run: {score_detail}. "
-              f"Not in current portfolio — see Predictions page for full APEX breakdown.",
-              "predictions")
+              f"Opportunity Engine BUY — score {sc_str}/100",
+              td.get("why") or "Discovered via trending analysis — not in current portfolio.",
+              "opportunity_engine")
 
     return items
 
@@ -455,7 +451,7 @@ def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
         if ev["severity"] != 3:
             continue
         w = hmap.get(ev["ticker"], {}).get("weight_pct")
-        held_tag = f" · {w:.1f}% of portfolio" if w else ""
+        held_tag = f" · {w:.2f}% of portfolio" if w else ""
         if not ev.get("processed"):
             _add(100, "🔴", ev["ticker"],
                  f"{ev.get('summary') or ev['event_type'].replace('_',' ')}{held_tag} — not yet processed",
@@ -517,7 +513,7 @@ def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
 def _fmt_val(v):
     if v is None: return "—"
     if v >= 1_000_000: return f"${v/1_000_000:.2f}M"
-    if v >= 1_000:     return f"${v:,.0f}"
+    if v >= 1_000:     return f"${v:,.2f}"
     return f"${v:.2f}"
 
 PRIORITY_STYLE = {
@@ -528,20 +524,22 @@ PRIORITY_STYLE = {
 }
 
 PAGE_MAP = {
-    "chat":        "pages/4_🤖_Chat.py",
-    "predictions": "pages/7_🔮_Predictions.py",
-    "portfolio":   "pages/5_💼_Portfolio.py",
-    "validation":  "pages/6_🎯_Validation.py",
+    "chat":               "pages/4_🤖_Chat.py",
+    "predictions":        "pages/7_🔮_Predictions.py",
+    "portfolio":          "pages/5_💼_Portfolio.py",
+    "validation":         "pages/6_🎯_Validation.py",
+    "opportunity_engine": "pages/9_🎯_Opportunity_Engine.py",
 }
 
 # Streamlit's actual page URL is the filename with the leading number, the
 # emoji, and their separators all stripped — NOT "emoji + space + Name" and
 # NOT "emoji_Name". e.g. "6_🎯_Validation.py" resolves to "/Validation".
 PAGE_URL = {
-    "chat":        "Chat",
-    "predictions": "Predictions",
-    "portfolio":   "Portfolio",
-    "validation":  "Validation",
+    "chat":               "Chat",
+    "predictions":        "Predictions",
+    "portfolio":          "Portfolio",
+    "validation":         "Validation",
+    "opportunity_engine": "Opportunity_Engine",
 }
 
 
@@ -572,6 +570,7 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) 
 # ═══════════════════════════════════════════════════════════════════════════════
 
 d     = _load()
+d["trending_opps"] = _trending_opportunities()
 macro = _macro()
 queue = _build_queue(d, macro)
 
@@ -609,7 +608,7 @@ regime     = macro.get("regime", "—")
 regime_col = DANGER if regime in ("HIGH VOL","INVERTED") else (SUCCESS if regime == "RISK-ON" else WARNING)
 rev_color  = DANGER if n_critical > 0 else (WARNING if n_watch > 0 else SUCCESS)
 upr_col    = SUCCESS if (upr or 0) >= 0 else DANGER
-upr_str    = f"{upr:+.1f}%" if upr is not None else "—"
+upr_str    = f"{upr:+.2f}%" if upr is not None else "—"
 rev_sub    = (f"{n_critical} critical" if n_critical else "") + (f", {n_watch} watch" if n_watch else "")
 disc_col   = PURPLE if n_discovery > 0 else NEUTRAL
 disc_sub   = f"{n_discovery} BUY/STRONG_BUY" if n_discovery > 0 else "none today"
@@ -619,11 +618,11 @@ st.markdown(
     'margin-bottom:18px;display:flex;align-items:stretch">'
     + _tile("Portfolio",        _fmt_val(tv))
     + _tile("Unrealized P&L",   upr_str, upr_col,
-            f"vs ${tc:,.0f} cost" if tc else "")
+            f"vs ${tc:,.2f} cost" if tc else "")
     + _tile("Review Queue",     f"{n_review} items", rev_color, rev_sub or "nothing urgent")
     + _tile("New Discoveries",  f"{n_discovery}", disc_col, disc_sub)
     + _tile("Regime",           regime, regime_col,
-            f"VIX {macro['vix']:.0f}" if macro.get("vix") else "")
+            f"VIX {macro['vix']:.2f}" if macro.get("vix") else "")
     + _tile("Last Run",         run_tx, run_sc, run.get("job_type","").title())
     + '</div>',
     unsafe_allow_html=True,
@@ -809,10 +808,10 @@ with right:
             f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:8px">System Health</div>'
             f'<div style="display:flex;gap:20px">'
             f'<div><div style="font-size:1.05rem;font-weight:800;color:{_acc_col}">'
-            f'{acc5*100:.0f}%</div>'
+            f'{acc5*100:.2f}%</div>'
             f'<div style="font-size:0.63rem;color:#9CA3AF">5d accuracy</div></div>'
             f'<div><div style="font-size:1.05rem;font-weight:800;color:{_br_col}">'
-            f'{br5:.3f}</div>'
+            f'{br5:.2f}</div>'
             f'<div style="font-size:0.63rem;color:#9CA3AF">Brier</div></div>'
             f'<div><div style="font-size:1.05rem;font-weight:800;color:#374151">{n5}</div>'
             f'<div style="font-size:0.63rem;color:#9CA3AF">Evaluated</div></div>'
@@ -868,42 +867,45 @@ with right:
         f'<div style="font-size:0.76rem;color:#6B7280">CPI YoY</div>'
         f'<div style="font-size:0.76rem;font-weight:700;'
         f'color:{DANGER if (macro.get("cpi") or 0)>3.5 else WARNING if (macro.get("cpi") or 0)>2.5 else SUCCESS};'
-        f'text-align:right">{_mv(macro.get("cpi"), ".1f", "%")}</div>'
+        f'text-align:right">{_mv(macro.get("cpi"), ".2f", "%")}</div>'
         f'<div style="font-size:0.76rem;color:#6B7280">HY Spread</div>'
         f'<div style="font-size:0.76rem;font-weight:700;'
         f'color:{DANGER if (macro.get("hy") or 0)>450 else "#374151"};text-align:right">'
-        f'{_mv(macro.get("hy"), ".0f", "bps")}</div>'
+        f'{_mv(macro.get("hy"), ".2f", "bps")}</div>'
         f'</div>'
     )
 
     # ── New Opportunities panel ───────────────────────────────────────────────
+    # Sourced from opportunity_engine.get_daily_opportunities() — same
+    # portfolio-fit-aware ranking the Opportunity Engine page shows, not a
+    # raw composite_score re-sort.
     _topp = d.get("trending_opps", [])
     if _topp:
         opp_rows = ""
         for _op in _topp[:5]:
-            _rec  = _op.get("recommendation", "")
-            _rec_col = {"STRONG_BUY": SUCCESS, "BUY": SUCCESS}.get(_rec, WARNING)
-            _sc   = _op.get("composite_score")
-            _sc_str = f"{_sc:.1f}" if _sc is not None else "?"
-            _ns   = _op.get("news_score")
-            _rs   = _op.get("research_score")
-            _fs   = _op.get("fundamental_score")
+            _call = _op.get("call", "")
+            _call_col = {"BUY": SUCCESS}.get(_call, WARNING)
+            _sc = _op.get("opportunity_score")
+            _sc_str = f"{_sc:.2f}" if _sc is not None else "?"
+            _impact = _op.get("portfolio_impact") or {}
+            _corr = _impact.get("correlation_with_portfolio")
             _sub_parts = []
-            if _fs is not None: _sub_parts.append(f"F:{_fs:.0f}")
-            if _rs is not None: _sub_parts.append(f"R:{_rs:.0f}")
-            if _ns is not None: _sub_parts.append(f"N:{_ns:.0f}")
+            if _op.get("composite_score") is not None:
+                _sub_parts.append(f"APEX {_op['composite_score']:.2f}")
+            if _corr is not None:
+                _sub_parts.append(f"corr {_corr:.2f}")
             _sub = " · ".join(_sub_parts)
             opp_rows += (
                 f'<div style="display:flex;justify-content:space-between;align-items:center;'
                 f'padding:7px 0;border-bottom:1px solid #EDE9FE">'
                 f'<div>'
                 f'<span style="font-size:0.82rem;font-weight:700;color:#111827">{_op["ticker"]}</span>'
-                f'<span style="font-size:0.72rem;color:#7C3AED;font-weight:600;margin-left:6px">'
-                f'{_rec.replace("_"," ")}</span>'
+                f'<span style="font-size:0.72rem;color:{_call_col};font-weight:600;margin-left:6px">'
+                f'{_call}</span>'
                 f'<div style="font-size:0.68rem;color:#9CA3AF;margin-top:1px">{_sub}</div>'
                 f'</div>'
-                f'<span style="font-size:0.88rem;font-weight:800;color:{_rec_col}">'
-                f'{_sc_str}<span style="font-size:0.65rem;color:#9CA3AF">/10</span></span>'
+                f'<span style="font-size:0.88rem;font-weight:800;color:{_call_col}">'
+                f'{_sc_str}<span style="font-size:0.65rem;color:#9CA3AF">/100</span></span>'
                 f'</div>'
             )
         opp_panel = (
@@ -914,7 +916,7 @@ with right:
             f'🌟 New Opportunities · Trending</div>'
             f'{opp_rows}'
             f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-            f'→ <a href="/Predictions" target="_self">Full analysis on Predictions page</a></div>'
+            f'→ <a href="/Opportunity_Engine" target="_self">Full ranking on Opportunity Engine</a></div>'
             f'</div>'
         )
     else:

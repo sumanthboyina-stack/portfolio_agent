@@ -331,11 +331,11 @@ with tab1:
         st.info(f"No fundamentals data between {_DATE_FROM} and {_DATE_TO}.", icon="💡")
     else:
         df = raw_df.copy()
-        df["revenue_growth_yoy_pct"] = pd.to_numeric(df["revenue_growth_yoy_pct"], errors="coerce").round(1)
-        df["net_margin"]             = pd.to_numeric(df["net_margin"],             errors="coerce").round(1)
-        df["fcf"]                    = pd.to_numeric(df["fcf"],                    errors="coerce").round(0)
+        df["revenue_growth_yoy_pct"] = pd.to_numeric(df["revenue_growth_yoy_pct"], errors="coerce").round(2)
+        df["net_margin"]             = pd.to_numeric(df["net_margin"],             errors="coerce").round(2)
+        df["fcf"]                    = pd.to_numeric(df["fcf"],                    errors="coerce").round(2)
         df["debt_to_equity"]         = pd.to_numeric(df["debt_to_equity"],         errors="coerce").round(2)
-        df["fundamental_score"]      = pd.to_numeric(df["fundamental_score"],      errors="coerce").round(1)
+        df["fundamental_score"]      = pd.to_numeric(df["fundamental_score"],      errors="coerce").round(2)
 
         df["top_strength"] = df["key_strengths"].apply(
             lambda v: (_pj(v, []) or [""])[0][:60] if v else ""
@@ -373,8 +373,8 @@ with tab1:
             {"field": "Ticker",       "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
             {"field": "Filing",       "width": 80,  "filter": "agTextColumnFilter"},
             {"field": "Filing Date",  "width": 110, "filter": "agDateColumnFilter"},
-            {"field": "Rev Gth %",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) + '%' : '—'"},
-            {"field": "Net Margin %", "width": 110, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) + '%' : '—'"},
+            {"field": "Rev Gth %",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
+            {"field": "Net Margin %", "width": 110, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
             {"field": "FCF ($)",      "width": 110, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + (value/1e9).toFixed(2) + 'B' : '—'"},
             {"field": "D/E",          "width": 80,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
             {"field": "Score",        "width": 80,  "filter": "agNumberColumnFilter"},
@@ -445,7 +445,7 @@ with tab2:
         st.info(f"No news records between {_DATE_FROM} and {_DATE_TO}.", icon="📰")
     else:
         df = raw_df.copy()
-        df["sentiment_score"] = pd.to_numeric(df["sentiment_score"], errors="coerce").round(3)
+        df["sentiment_score"] = pd.to_numeric(df["sentiment_score"], errors="coerce").round(2)
         df["themes_str"] = df["top_themes"].apply(
             lambda v: ", ".join(_pj(v, [])[:4]) if v else ""
         )
@@ -477,7 +477,7 @@ with tab2:
             {"field": "As Of Date",      "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
             {"field": "Ticker",     "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
             {"field": "Sentiment",  "width": 110, "filter": "agTextColumnFilter"},
-            {"field": "Score",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(3) : '—'"},
+            {"field": "Score",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
             {"field": "Headline 1", "width": 280, "filter": "agTextColumnFilter"},
             {"field": "Headline 2", "width": 280, "filter": "agTextColumnFilter"},
             {"field": "Themes",     "width": 200, "filter": "agTextColumnFilter"},
@@ -505,7 +505,7 @@ with tab2:
                 st.markdown(
                     f'<span style="background:{sent_col};color:white;padding:3px 10px;'
                     f'border-radius:12px;font-size:0.8rem;font-weight:700">{sent}</span>'
-                    f'&nbsp; Score: <strong>{f"{score:+.3f}" if score is not None else "—"}</strong>',
+                    f'&nbsp; Score: <strong>{f"{score:+.2f}" if score is not None else "—"}</strong>',
                     unsafe_allow_html=True,
                 )
                 if row.get("headline_1"): st.markdown(f"**►** {row['headline_1']}")
@@ -556,8 +556,8 @@ with tab3:
                     "price_target_low","current_price","upside_to_mean_pct","research_score"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["num_analysts"]   = df["num_analysts"].round(0)
-        df["research_score"] = df["research_score"].round(1)
-        df["upside_to_mean_pct"] = df["upside_to_mean_pct"].round(1)
+        df["research_score"] = df["research_score"].round(2)
+        df["upside_to_mean_pct"] = df["upside_to_mean_pct"].round(2)
         for c in ["price_target_avg","price_target_high","price_target_low","current_price"]:
             df[c] = df[c].round(2)
 
@@ -599,14 +599,14 @@ with tab3:
             {"field": "Ticker",        "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
             {"field": "Consensus",     "width": 110, "filter": "agTextColumnFilter"},
             {"field": "Rec Trend",     "width": 105, "filter": "agTextColumnFilter"},
-            {"field": "Mean Rtg",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) : '—'"},
+            {"field": "Mean Rtg",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
             {"field": "Analysts",      "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? Math.round(value) : '—'"},
             {"field": "Target Avg",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
             {"field": "Target Med",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
             {"field": "Target High",   "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
             {"field": "Target Low",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
             {"field": "Price",         "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Upside %",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(1) + '%' : '—'"},
+            {"field": "Upside %",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
             {"field": "Last Upgrade",  "width": 110, "filter": "agDateColumnFilter"},
             {"field": "Score",         "width": 80,  "filter": "agNumberColumnFilter"},
             {"field": "Model",         "width": 160, "filter": "agTextColumnFilter"},
@@ -680,7 +680,7 @@ with tab4:
         df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
         for col in ["confidence","composite_score","fundamental_score",
                     "research_score","macro_score","news_score"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").round(1)
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(2)
         df["changed_from_previous"] = df["changed_from_previous"].apply(
             lambda v: "Yes" if v else "No"
         )
@@ -825,16 +825,16 @@ with tab5:
         for col in ["shares", "avg_cost", "cost_basis_total", "current_price", "current_value"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["gain_loss"]     = df["current_value"] - df["cost_basis_total"]
-        df["gain_loss_pct"] = ((df["current_value"] - df["cost_basis_total"]) / df["cost_basis_total"] * 100).round(1)
+        df["gain_loss_pct"] = ((df["current_value"] - df["cost_basis_total"]) / df["cost_basis_total"] * 100).round(2)
         total_value     = df["current_value"].sum()
         total_cost      = df["cost_basis_total"].sum()
         total_gain_loss = total_value - total_cost
 
         mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Portfolio Value",  f"${total_value:,.0f}")
-        mc2.metric("Total Cost Basis", f"${total_cost:,.0f}")
-        mc3.metric("Total Gain/Loss",  f"${total_gain_loss:+,.0f}",
-                   delta=f"{total_gain_loss / total_cost * 100:+.1f}%" if total_cost else None)
+        mc1.metric("Portfolio Value",  f"${total_value:,.2f}")
+        mc2.metric("Total Cost Basis", f"${total_cost:,.2f}")
+        mc3.metric("Total Gain/Loss",  f"${total_gain_loss:+,.2f}",
+                   delta=f"{total_gain_loss / total_cost * 100:+.2f}%" if total_cost else None)
         mc4.metric("Positions", str(len(df)))
         st.divider()
 
@@ -867,13 +867,13 @@ with tab5:
             {"field": "As Of Date",      "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
             {"field": "Ticker",     "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
             {"field": "Name",       "width": 200, "filter": "agTextColumnFilter"},
-            {"field": "Shares",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(3) : '—'"},
+            {"field": "Shares",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
             {"field": "Avg Cost",   "width": 95,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
             {"field": "Cost Basis", "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
             {"field": "Price",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
             {"field": "Value",      "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
             {"field": "Gain/Loss",  "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value >= 0 ? '+$' : '-$') + Math.abs(value).toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
-            {"field": "G/L %",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value >= 0 ? '+' : '') + value.toFixed(1) + '%' : '—'"},
+            {"field": "G/L %",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value >= 0 ? '+' : '') + value.toFixed(2) + '%' : '—'"},
             {"field": "Account",    "width": 120, "filter": "agTextColumnFilter"},
             {"field": "Type",       "width": 100, "filter": "agTextColumnFilter"},
             {"field": "Broker",     "width": 100, "filter": "agTextColumnFilter"},
@@ -894,13 +894,13 @@ with tab5:
                 dc1, dc2 = st.columns(2)
                 with dc1:
                     _detail_card("Position", [
-                        ("Shares",      f"{row.get('shares') or '—':.3f}" if row.get('shares') else "—"),
+                        ("Shares",      f"{row.get('shares') or '—':.2f}" if row.get('shares') else "—"),
                         ("Avg Cost",    f"${row.get('avg_cost') or '—':.2f}" if row.get('avg_cost') else "—"),
                         ("Cost Basis",  f"${(row.get('cost_basis_total') or 0):,.2f}"),
                         ("Price",       f"${row.get('current_price') or '—':.2f}" if row.get('current_price') else "—"),
                         ("Value",       f"${(row.get('current_value') or 0):,.2f}"),
                         ("Gain/Loss",   f"{gl_icon} ${(row.get('gain_loss') or 0):+,.2f}"),
-                        ("G/L %",       f"{(row.get('gain_loss_pct') or 0):+.1f}%"),
+                        ("G/L %",       f"{(row.get('gain_loss_pct') or 0):+.2f}%"),
                     ])
                 with dc2:
                     _detail_card("Account", [
@@ -1096,7 +1096,7 @@ with tab7:
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Total Events", len(ev_df))
                     m2.metric("Severity 3", sev_counts.get(3, 0))
-                    m3.metric("Processed", f"{proc_pct:.0f}%")
+                    m3.metric("Processed", f"{proc_pct:.2f}%")
                     m4.metric("Unique Tickers", ev_df["ticker"].nunique())
 
                     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)

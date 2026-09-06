@@ -42,6 +42,25 @@ def get_close(ticker: str, date_str: str) -> Optional[float]:
         return None
 
 
+def get_closes_in_range(ticker: str, start_date: str, end_date: str) -> dict[str, float]:
+    """
+    Return {date_iso: close} for every trading day in [start_date, end_date].
+
+    Uses auto_adjust=True so splits/dividends don't distort a return comparison.
+    yfinance's `end` is exclusive, so it's padded by one day to include end_date itself.
+    """
+    try:
+        end_incl = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
+        hist = yf.Ticker(ticker).history(start=start_date, end=end_incl, auto_adjust=True)
+        if hist.empty:
+            return {}
+        return {str(idx.date()): float(row["Close"]) for idx, row in hist.iterrows()}
+    except Exception as exc:
+        _log.warning("yfinance get_closes_in_range failed for %s [%s, %s]: %s",
+                     ticker, start_date, end_date, exc)
+        return {}
+
+
 def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> str:
     """
     Return OHLCV price history for a ticker.

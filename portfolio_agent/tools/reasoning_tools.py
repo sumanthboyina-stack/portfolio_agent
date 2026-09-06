@@ -1,7 +1,6 @@
 """
 Context loader and live-fallback helpers for the APEX reasoning agent.
 
-load_ticker_context(ticker)        — reads all DBs; reports data_gaps
 fill_data_gaps(ticker, ctx)        — runs live specialist agents for any missing data
 get_macro_snapshot()               — lightweight yfinance pull of key macro indicators (no LLM)
 get_full_analysis_context(ticker)  — combined single-call: all DB data + macro + dynamic weights
@@ -361,49 +360,6 @@ def _get_recent_news(ticker: str, days: int = 7) -> list[dict]:
 
 
 # ── public API ────────────────────────────────────────────────────────────────
-
-def load_ticker_context(ticker: str, news_days: int = 7) -> str:
-    """
-    Load all stored data for *ticker* from the database.
-
-    Returns JSON string with keys:
-        ticker, fundamentals, research, news (list, last N days),
-        prediction_history (list, last 5), data_gaps (list)
-    """
-    from portfolio_agent.tools.fundamentals_db import get_stored_fundamentals
-    from portfolio_agent.tools.research_db import get_stored_research
-    from portfolio_agent.tools.prediction_db import get_prediction_history
-
-    ticker = ticker.upper()
-    data_gaps: list[str] = []
-
-    fundamentals = get_stored_fundamentals(ticker)
-    if not fundamentals:
-        data_gaps.append("fundamentals")
-
-    research = get_stored_research(ticker)
-    if not research:
-        data_gaps.append("research")
-
-    news = _get_recent_news(ticker, days=news_days)
-    if not news:
-        data_gaps.append("news")
-
-    prediction_history = get_prediction_history(ticker, limit=5)
-
-    return json.dumps({
-        "ticker":             ticker,
-        "fundamentals":       _safe_to_dict(fundamentals),
-        "research":           _safe_to_dict(research),
-        "news":               news,
-        "prediction_history": [_safe_to_dict(p) for p in prediction_history],
-        "data_gaps":          data_gaps,
-        "data_gap_note":      (
-            "The reasoning agent will attempt to fill gaps by running live specialist "
-            "agents before producing its recommendation." if data_gaps else "All data sources available."
-        ),
-    }, default=str)
-
 
 def fill_data_gaps(ticker: str, context: dict) -> tuple[dict, list[str]]:
     """

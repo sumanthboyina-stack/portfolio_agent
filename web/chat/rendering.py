@@ -177,11 +177,11 @@ def _render_plan_card(plan: dict) -> None:
         rc, rb = regime_colors.get(regime, ("#64748B", "#F8FAFC"))
 
         def _delta(key: str) -> str:
-            diff = round((w.get(key, 0) - BASE.get(key, 0)) * 100)
+            diff = (w.get(key, 0) - BASE.get(key, 0)) * 100
             if diff > 0:
-                return f'<span style="color:#059669;font-size:0.7rem"> +{diff}%</span>'
+                return f'<span style="color:#059669;font-size:0.7rem"> +{diff:.2f}%</span>'
             elif diff < 0:
-                return f'<span style="color:#DC2626;font-size:0.7rem"> {diff}%</span>'
+                return f'<span style="color:#DC2626;font-size:0.7rem"> {diff:.2f}%</span>'
             return ""
 
         weight_badge = (
@@ -196,7 +196,7 @@ def _render_plan_card(plan: dict) -> None:
             + "".join(
                 f'<span style="font-size:0.8rem;color:#374151">'
                 f'<strong style="color:#0F172A">{lbl}</strong> '
-                f'{round(w.get(key,0)*100)}%{_delta(key)}</span>'
+                f'{w.get(key,0)*100:.2f}%{_delta(key)}</span>'
                 for lbl, key in [
                     ("📋 Fundamentals", "fundamentals"), ("🔬 Research", "research"),
                     ("🌐 Macro", "macro"), ("📰 News", "news"),
@@ -260,7 +260,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
     wu = data.get("weights_used") or {}
     def _wpct(key: str, fallback: float) -> str:
         v = wu.get(key)
-        return f"{round(v*100)}%" if v is not None else f"{round(fallback*100)}%"
+        return f"{v*100:.2f}%" if v is not None else f"{fallback*100:.2f}%"
 
     scores_html = "".join(
         f'<div class="pred-score-item">'
@@ -318,7 +318,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
                 pct = (v - cur) / cur * 100
                 sign = "+" if pct >= 0 else ""
                 color = "#059669" if pct >= 0 else "#DC2626"
-                s += f' <span style="color:{color};font-size:0.75rem">({sign}{pct:.1f}%)</span>'
+                s += f' <span style="color:{color};font-size:0.75rem">({sign}{pct:.2f}%)</span>'
             return s
         _n_str = f"{_pt_n} analyst{'s' if _pt_n and _pt_n != 1 else ''}" if _pt_n else ""
         _n_chip = (
@@ -370,7 +370,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
             _dico = _dir_icon.get(_dir, "?")
             _range_str = (
                 f'<span style="color:{_dcol};font-weight:700">'
-                f'{_dico} {_rlo:+.1f}% to {_rhi:+.1f}%</span>'
+                f'{_dico} {_rlo:+.2f}% to {_rhi:+.2f}%</span>'
                 if _rlo is not None and _rhi is not None
                 else f'<span style="color:{_dcol};font-weight:700">{_dico} {_dir}</span>'
                 if _dir else '<span style="color:#94A3B8">--</span>'
@@ -461,7 +461,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         f'{changed_html}'
         f'{reasoning_html}'
         f'<div style="margin:10px 0 0;font-size:0.75rem;color:#94A3B8">'
-        f'Generated in {elapsed:.1f}s{data_sources_html}</div>'
+        f'Generated in {elapsed:.2f}s{data_sources_html}</div>'
         f'</div></div>'
     )
     st.markdown(card_html, unsafe_allow_html=True)
@@ -491,7 +491,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
                      "Recommendation": h.get("recommendation",""),
                      "Direction": h.get("predicted_direction","--"),
                      "Return Range": (
-                         f"{h['predicted_return_low']:+.1f}% to {h['predicted_return_high']:+.1f}%"
+                         f"{h['predicted_return_low']:+.2f}% to {h['predicted_return_high']:+.2f}%"
                          if h.get("predicted_return_low") is not None and h.get("predicted_return_high") is not None
                          else "--"
                      ),

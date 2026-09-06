@@ -83,12 +83,6 @@ def clear_phase(phase: str) -> None:
     _CHECKPOINT_PATH.write_text(json.dumps(existing, indent=2))
 
 
-def clear_checkpoint() -> None:
-    """Delete the checkpoint file entirely (called when both phases succeed)."""
-    if _CHECKPOINT_PATH.exists():
-        _CHECKPOINT_PATH.unlink()
-
-
 def pending_from_yesterday(phase: str) -> list[str]:
     """
     Return pending tickers saved from a *previous* run for *phase*.

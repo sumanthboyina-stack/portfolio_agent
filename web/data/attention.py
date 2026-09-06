@@ -75,7 +75,7 @@ def get_critical_nudge_items(limit: int = 3) -> list[dict]:
         if p.get("recommendation") in ("SELL", "STRONG_SELL"):
             items.append({
                 "ticker": t,
-                "title": f"{p['recommendation']} on {t} ({weight.get(t, 0):.1f}% of portfolio)",
+                "title": f"{p['recommendation']} on {t} ({weight.get(t, 0):.2f}% of portfolio)",
                 "query": f"Why is APEX recommending {p['recommendation']} on {t}? Walk me through the reasoning.",
             })
 
@@ -83,7 +83,7 @@ def get_critical_nudge_items(limit: int = 3) -> list[dict]:
         if w > 20:
             items.append({
                 "ticker": t,
-                "title": f"{t} is {w:.1f}% of your portfolio",
+                "title": f"{t} is {w:.2f}% of your portfolio",
                 "query": f"How concentrated am I in {t} and what's the risk?",
             })
 

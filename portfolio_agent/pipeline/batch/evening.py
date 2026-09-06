@@ -1,8 +1,8 @@
 """
-Evening batch pipeline (--batch evening).
+Evening batch pipeline (--batch evening, also aliased as --validate).
 
-Runs validation (Layer 1 + Layer 2) and optionally refreshes slow-moving data.
-Does NOT generate new predictions.
+Runs validation (Layer 1 + Layer 2), Score Calibration outcome-fill, and
+optionally refreshes slow-moving data. Does NOT generate new predictions.
 """
 
 from __future__ import annotations
@@ -19,7 +19,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 async def run_batch_evening(
     extra_tickers: list[str] | None = None,
 ) -> None:
-    """Evening batch: validate matured predictions + recompute rolling metrics."""
+    """Evening batch: validate matured predictions, recompute rolling metrics,
+    fill matured Score Calibration outcomes, snapshot portfolio prices, and
+    score screener outcomes."""
     log = _get_logger("batch.evening")
 
     log.info(f"\n{'━' * 64}", event_type="separator")
@@ -48,6 +50,9 @@ async def run_batch_evening(
             tracker.finish_run("completed")
         return
 
+    from portfolio_agent.pipeline.batch.morning import ensure_morning_ran_today
+    await ensure_morning_ran_today(extra_tickers=extra_tickers)
+
     log.info("\n── Layer 1: Outcome Assignment ─────────────────────────────────", event_type="phase_start")
     if tracker:
         tracker.start_phase("l1_outcome", total=1)
@@ -69,6 +74,24 @@ async def run_batch_evening(
     log.info(f"  L2: {_l2_note}", event_type="summary")
     if tracker:
         tracker.finish_phase("l2_metrics", 1, 0, note=_l2_note)
+
+    log.info("\n── Layer 2.5: Score Calibration — Outcome Fill (30/60/90/250d) ──", event_type="phase_start")
+    if tracker:
+        tracker.start_phase("calibration_outcome", total=1)
+    try:
+        from portfolio_agent.tools.scoring_snapshot_db import fill_matured_outcomes
+        r_calib = fill_matured_outcomes()
+        _calib_note = "  ".join(
+            f"{h}d: {v['evaluated']} evaluated, {v['data_missing']} missing"
+            for h, v in r_calib.items()
+        )
+        log.info(f"  L2.5: {_calib_note}", event_type="summary")
+        if tracker:
+            tracker.finish_phase("calibration_outcome", 1, 0, note=_calib_note)
+    except Exception as e:
+        log.warning(f"  L2.5: Score calibration outcome-fill failed — {e}", event_type="warning")
+        if tracker:
+            tracker.finish_phase("calibration_outcome", 0, 1, note=str(e)[:120])
 
     log.info("\n── Layer 3: Portfolio Price Snapshot ───────────────────────────", event_type="phase_start")
     if tracker:

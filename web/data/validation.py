@@ -8,16 +8,12 @@ Contains:
   - _compute_filtered_metrics    : rolling metrics recomputed from predictions table
   - _load_rolling_metrics_series : historical rows from metrics_rolling table
   - _directional_correct         : outcome -> bool correctness helper
-  - _start_subprocess            : launch main.py --validate / --weekly-analysis
-  - _read_log                    : tail a subprocess log file
 """
 
 from __future__ import annotations
 
 import sqlite3
-import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import yaml as _yaml
@@ -28,37 +24,12 @@ sys.path.insert(0, str(_ROOT))
 import pandas as pd
 
 _DB = _ROOT / "data" / "portfolio.db"
-_LOGS = _ROOT / "logs"
-_LOGS.mkdir(parents=True, exist_ok=True)
-_MAIN = _ROOT / "main.py"
-
-
-def _start_subprocess(flag: str, label: str) -> tuple[int, Path]:
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = _LOGS / f"{ts}_{label}.log"
-    lf       = open(log_path, "w", buffering=1)
-    proc     = subprocess.Popen(
-        ["python", "-u", str(_MAIN), flag],
-        cwd=str(_ROOT),
-        stdout=lf,
-        stderr=subprocess.STDOUT,
-    )
-    return proc.pid, log_path
-
-
-def _read_log(path) -> str:
-    if not path or not Path(path).exists():
-        return ""
-    text = Path(path).read_text(errors="replace")
-    if len(text) > 8000:
-        lines = text.splitlines()
-        return f"[… {len(lines) - 200} earlier lines omitted …]\n" + "\n".join(lines[-200:])
-    return text
 
 
 def _load_metric_series(
     segment: str = "All",
     portfolio_tickers: list[str] | None = None,
+    watchlist_tickers: list[str] | None = None,
 ) -> pd.DataFrame:
     """Per-prediction brier_score + log_loss for evaluated rows, optionally filtered by segment."""
     if not _DB.exists():
@@ -70,6 +41,10 @@ def _load_metric_series(
         ph = ",".join("?" * len(portfolio_tickers))
         seg_clause = f"AND ticker IN ({ph})"
         seg_params = list(portfolio_tickers)
+    elif segment == "Watchlist" and watchlist_tickers:
+        ph = ",".join("?" * len(watchlist_tickers))
+        seg_clause = f"AND ticker IN ({ph})"
+        seg_params = list(watchlist_tickers)
     elif segment == "New Opportunities":
         seg_clause = "AND trigger_type = 'trending_opportunity'"
 
@@ -107,6 +82,16 @@ def _load_portfolio_tickers() -> list[str]:
         return []
 
 
+def _load_watchlist_tickers() -> list[str]:
+    """Return unique watchlist ticker symbols from watchlist.yaml (excludes holdings)."""
+    try:
+        data = _yaml.safe_load((_ROOT / "config" / "watchlist.yaml").read_text()) or {}
+        watchlist = {str(t).upper() for t in data.get("tickers", [])}
+        return list(watchlist - set(_load_portfolio_tickers()))
+    except Exception:
+        return []
+
+
 def _get_model_names() -> list[str]:
     """Return distinct model_name values from predictions table, sorted by count desc."""
     if not _DB.exists():
@@ -125,10 +110,12 @@ def _compute_filtered_metrics(
     lookback: int,
     segment: str = "All",
     portfolio_tickers: list[str] | None = None,
+    watchlist_tickers: list[str] | None = None,
 ) -> list[dict]:
     """
     Recompute rolling metrics directly from the predictions table, optionally
-    filtered by model_name list and/or prediction segment (Portfolio / New Opportunities).
+    filtered by model_name list and/or prediction segment (Portfolio / Watchlist /
+    New Opportunities).
     """
     if not _DB.exists():
         return []
@@ -145,6 +132,10 @@ def _compute_filtered_metrics(
         ph = ",".join("?" * len(portfolio_tickers))
         seg_clause = f"AND ticker IN ({ph})"
         seg_params = list(portfolio_tickers)
+    elif segment == "Watchlist" and watchlist_tickers:
+        ph = ",".join("?" * len(watchlist_tickers))
+        seg_clause = f"AND ticker IN ({ph})"
+        seg_params = list(watchlist_tickers)
     elif segment == "New Opportunities":
         seg_clause = "AND trigger_type = 'trending_opportunity'"
 
@@ -188,6 +179,7 @@ def _compute_filtered_metrics(
 _SEGMENT_TO_BUCKET = {
     "All": "all",
     "Portfolio": "portfolio",
+    "Watchlist": "watchlist",
     "New Opportunities": "opportunity",
 }
 
@@ -195,8 +187,8 @@ _SEGMENT_TO_BUCKET = {
 def _load_rolling_metrics_series(segment: str = "All") -> pd.DataFrame:
     """
     Historical rolling metrics from metrics_rolling table, filtered to the
-    'all' / 'portfolio' / 'opportunity' bucket recompute_rolling_metrics()
-    writes per (horizon, lookback, version).
+    'all' / 'portfolio' / 'watchlist' / 'opportunity' bucket
+    recompute_rolling_metrics() writes per (horizon, lookback, version).
     """
     if not _DB.exists():
         return pd.DataFrame()

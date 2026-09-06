@@ -124,7 +124,7 @@ def render_system_strip(df_all: pd.DataFrame, selected_date: date) -> None:
         dot = "🔴"
         status_text = f"No predictions for {selected_date}"
 
-    brier_str = f"{stats['brier_5d']:.3f}" if stats["brier_5d"] is not None else "—"
+    brier_str = f"{stats['brier_5d']:.2f}" if stats["brier_5d"] is not None else "—"
     last_run = stats["latest_created_at"]
     version = stats["system_version"] or "v1.0"
     n_pred = stats["total_today"]
@@ -165,13 +165,13 @@ def render_action_item_card(row: dict, card_key: str) -> None:
     conf = row.get("confidence") or row.get("conviction_score")
     conf_str = str(int(conf)) if conf is not None else "—"
     comp = row.get("composite_score")
-    comp_str = f"{comp:.1f}" if comp is not None else "—"
+    comp_str = f"{comp:.2f}" if comp is not None else "—"
     lo = row.get("predicted_return_low")
     hi = row.get("predicted_return_high")
-    ret_str = f"{lo:+.1f}% to {hi:+.1f}%" if lo is not None and hi is not None else "—"
+    ret_str = f"{lo:+.2f}% to {hi:+.2f}%" if lo is not None and hi is not None else "—"
     conv = row.get("conviction_score")
     meter = _conviction_meter(conv)
-    conv_disp = f"{conv:.0f}" if conv is not None else "—"
+    conv_disp = f"{conv:.2f}" if conv is not None else "—"
     pred = row.get("prediction", "")
     rec = row.get("recommendation", "")
     pred_icon = _pred_icon(pred)
@@ -283,11 +283,11 @@ def render_edge_indicator(row: dict) -> str:
     if acc < 0.52:
         return (
             f'<span style="font-size:0.72rem;color:{WARNING}">⚠ no edge '
-            f'({h_days}d segment {acc*100:.0f}%)</span>'
+            f'({h_days}d segment {acc*100:.2f}%)</span>'
         )
     return (
         f'<span style="font-size:0.72rem;color:{SUCCESS}">✓ {h_days}d segment '
-        f'{acc*100:.0f}% (n={n})</span>'
+        f'{acc*100:.2f}% (n={n})</span>'
     )
 
 
@@ -299,12 +299,12 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
     pred = row.get("prediction", "")
     pred_icon = _pred_icon(pred)
     conf = row.get("conviction_score")
-    conf_str = f"{conf:.0f}" if conf is not None else "—"
+    conf_str = f"{conf:.2f}" if conf is not None else "—"
     lo = row.get("predicted_return_low")
     hi = row.get("predicted_return_high")
-    ret_str = f"{lo:+.1f}% to {hi:+.1f}%" if lo is not None and hi is not None else "—"
+    ret_str = f"{lo:+.2f}% to {hi:+.2f}%" if lo is not None and hi is not None else "—"
     comp = row.get("composite_score")
-    comp_str = f"{comp:.1f}" if comp is not None else "—"
+    comp_str = f"{comp:.2f}" if comp is not None else "—"
     pred_color, pred_bg = PRED_COLORS.get(pred, (NEUTRAL, NEUTRAL_LIGHT))
 
     f_score = row.get("fundamental_score")
@@ -318,7 +318,7 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
     upside_str = ""
     if cp and pt and cp > 0:
         upside = (pt - cp) / cp * 100
-        upside_str = f"${cp:.2f} → PT ${pt:.2f} ({upside:+.1f}%)"
+        upside_str = f"${cp:.2f} → PT ${pt:.2f} ({upside:+.2f}%)"
 
     edge_html = render_edge_indicator(row)
 
@@ -405,10 +405,10 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
                 p_icon = _pred_icon(p)
                 p_color, p_bg = PRED_COLORS.get(p, (NEUTRAL, NEUTRAL_LIGHT))
                 c = row.get("conviction_score")
-                c_str = f"{c:.0f}" if c is not None else "—"
+                c_str = f"{c:.2f}" if c is not None else "—"
                 lo = row.get("predicted_return_low")
                 hi = row.get("predicted_return_high")
-                ret_str = f"{lo:+.1f}% / {hi:+.1f}%" if lo is not None and hi is not None else "—"
+                ret_str = f"{lo:+.2f}% / {hi:+.2f}%" if lo is not None and hi is not None else "—"
                 meter = _conviction_meter(c)
                 st.markdown(
                     f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0;'
@@ -565,7 +565,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         f'<span style="background:{PRIMARY_LIGHT};color:{PRIMARY};padding:4px 10px;'
         f'border-radius:6px;font-size:0.82rem;font-weight:600">⏱ {h_str}</span>'
         + (f'<span style="background:{NEUTRAL_LIGHT};color:#334155;padding:4px 10px;'
-           f'border-radius:6px;font-size:0.82rem;font-weight:600">Conviction {conv:.1f}/10</span>'
+           f'border-radius:6px;font-size:0.82rem;font-weight:600">Conviction {conv:.2f}/10</span>'
            if conv is not None else "")
         + (f'<span style="background:{PURPLE_LIGHT};color:{PURPLE};padding:4px 10px;'
            f'border-radius:6px;font-size:0.82rem;font-weight:600">Composite Score {comp:.2f}</span>'
@@ -598,7 +598,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         pt = row.get("pt_mean")
         cp = row.get("start_price") or row.get("pt_current_price")
         upside = ((pt - cp) / cp * 100) if (pt and cp and cp > 0) else None
-        upside_str = f"(+{upside:.1f}%)" if upside is not None else ""
+        upside_str = f"(+{upside:.2f}%)" if upside is not None else ""
 
         ic1, ic2, ic3, ic4 = st.columns(4)
         score_items = [
@@ -658,13 +658,13 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                     f'<div style="display:flex;flex-direction:column;gap:8px;margin-top:20px">'
                     f'<div style="background:{SUCCESS_LIGHT};color:{SUCCESS};padding:8px 14px;'
                     f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'📈 Bullish {bull_pct:.0f}%</div>'
+                    f'📈 Bullish {bull_pct:.2f}%</div>'
                     f'<div style="background:{NEUTRAL_LIGHT};color:{NEUTRAL};padding:8px 14px;'
                     f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'➡️ Flat {flat_pct:.0f}%</div>'
+                    f'➡️ Flat {flat_pct:.2f}%</div>'
                     f'<div style="background:{DANGER_LIGHT};color:{DANGER};padding:8px 14px;'
                     f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'📉 Bearish {bear_pct:.0f}%</div>'
+                    f'📉 Bearish {bear_pct:.2f}%</div>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
@@ -692,14 +692,14 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                 ("News Sentiment",    row.get("news_score")),
             ]
             for lbl, val in score_breakdown:
-                s_str = f"{val:.1f}" if val is not None else "—"
+                s_str = f"{val:.2f}" if val is not None else "—"
                 pct = min(100, (val / 10) * 100) if val is not None else 0
                 bar_color = _score_color(val)
                 st.markdown(
                     f'<div style="display:flex;align-items:center;gap:8px;margin:4px 0">'
                     f'<span style="width:90px;font-size:0.75rem;color:#475569">{lbl}</span>'
                     f'<div style="flex:1;height:6px;background:#E2E8F0;border-radius:3px">'
-                    f'<div style="width:{pct:.0f}%;height:100%;background:{bar_color};border-radius:3px"></div></div>'
+                    f'<div style="width:{pct:.2f}%;height:100%;background:{bar_color};border-radius:3px"></div></div>'
                     f'<span style="font-size:0.78rem;font-weight:700;color:{bar_color};min-width:30px">{s_str}</span>'
                     f'</div>',
                     unsafe_allow_html=True,
@@ -712,16 +712,40 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         except Exception:
             panel = {}
 
+        # The Valuation card gets a second badge (UNDERVALUED/FAIRLY_VALUED/
+        # OVERVALUED) alongside its 1-10 score — unlike the other 4 analysts,
+        # valuation has a natural cheap/fair/expensive framing that the raw
+        # score alone doesn't convey, and it's the same label the Valuation
+        # page shows as its headline. Best-effort: absent if not yet computed.
+        _VALUATION_LABEL_STYLE = {
+            "UNDERVALUED":   (SUCCESS, SUCCESS_LIGHT, "🟢 UNDERVALUED"),
+            "FAIRLY_VALUED": (WARNING, WARNING_LIGHT, "🟡 FAIRLY VALUED"),
+            "OVERVALUED":    (DANGER, DANGER_LIGHT, "🔴 OVERVALUED"),
+        }
+        valuation_label_badge = ""
+        try:
+            from portfolio_agent.tools.valuation_db import get_stored_valuation
+            _stored_valuation = get_stored_valuation(drill_ticker)
+            _val_label = _stored_valuation.get("valuation_label") if _stored_valuation else None
+            if _val_label in _VALUATION_LABEL_STYLE:
+                _vl_color, _vl_bg, _vl_text = _VALUATION_LABEL_STYLE[_val_label]
+                valuation_label_badge = (
+                    f'<span style="background:{_vl_bg};color:{_vl_color};padding:2px 8px;'
+                    f'border-radius:10px;font-weight:700;font-size:0.72rem;margin-left:4px">{_vl_text}</span>'
+                )
+        except Exception:
+            pass
+
         if panel and any(panel.get(k) for k in ["chen_verdict", "malhotra_verdict", "webb_verdict", "varga_verdict", "park_verdict"]):
             agents = [
-                ("FUNDAMENTALS",  "Earnings, balance sheet & margins",       panel.get("chen_verdict", "—"),     PRIMARY),
-                ("VALUATION",     "DCF intrinsic value & margin of safety",  panel.get("malhotra_verdict", "—"), DANGER),
-                ("RESEARCH",      "Analyst targets & broker coverage",       panel.get("webb_verdict", "—"),     PURPLE),
-                ("MACRO",         "Interest rates, inflation & regime",      panel.get("varga_verdict", "—"),    WARNING),
-                ("NEWS",          "Sentiment & recent headlines",            panel.get("park_verdict", "—"),     SUCCESS),
+                ("FUNDAMENTALS",  "Earnings, balance sheet & margins",       panel.get("chen_verdict", "—"),     PRIMARY, ""),
+                ("VALUATION",     "DCF intrinsic value & margin of safety",  panel.get("malhotra_verdict", "—"), DANGER,  valuation_label_badge),
+                ("RESEARCH",      "Analyst targets & broker coverage",       panel.get("webb_verdict", "—"),     PURPLE,  ""),
+                ("MACRO",         "Interest rates, inflation & regime",      panel.get("varga_verdict", "—"),    WARNING, ""),
+                ("NEWS",          "Sentiment & recent headlines",            panel.get("park_verdict", "—"),     SUCCESS, ""),
             ]
             pcols = st.columns(5)
-            for pcol, (name, description, verdict, color) in zip(pcols, agents):
+            for pcol, (name, description, verdict, color, extra_badge) in zip(pcols, agents):
                 with pcol:
                     m = re.search(r"\((\d+(?:\.\d+)?)/10\)", verdict)
                     score_val = m.group(1) if m else None
@@ -734,9 +758,9 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                     st.markdown(
                         f'<div style="border:1px solid {color}44;border-top:3px solid {color};'
                         f'padding:10px 12px;border-radius:8px;background:{color}08;min-height:100px">'
-                        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">'
                         f'<span style="font-size:0.68rem;font-weight:700;color:{color};letter-spacing:0.06em">'
-                        f'{name}</span>{score_badge}</div>'
+                        f'{name}</span><span>{score_badge}{extra_badge}</span></div>'
                         f'<div style="font-size:0.68rem;color:#64748B;margin-bottom:4px">{description}</div>'
                         f'<div style="font-size:0.8rem;color:#1E293B;line-height:1.4">{clean_verdict}</div>'
                         f'</div>',
@@ -763,8 +787,8 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             y, t = change["yesterday"], change["today"]
             st.markdown(
                 f'<div style="font-size:0.85rem;color:#334155;margin-bottom:10px">'
-                f'<b>{y["recommendation"]} {y["composite_score"]:.1f}</b> ({y["as_of_date"]}) '
-                f'&nbsp;→&nbsp; <b>{t["recommendation"]} {t["composite_score"]:.1f}</b> ({t["as_of_date"]})'
+                f'<b>{y["recommendation"]} {y["composite_score"]:.2f}</b> ({y["as_of_date"]}) '
+                f'&nbsp;→&nbsp; <b>{t["recommendation"]} {t["composite_score"]:.2f}</b> ({t["as_of_date"]})'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -773,7 +797,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                 sign = "+" if b["contribution"] > 0 else ""
                 st.markdown(
                     f'<div style="display:flex;align-items:baseline;gap:10px;margin:4px 0">'
-                    f'<span style="font-weight:800;color:{color};min-width:44px">{sign}{b["contribution"]:.1f}</span>'
+                    f'<span style="font-weight:800;color:{color};min-width:44px">{sign}{b["contribution"]:.2f}</span>'
                     f'<span style="font-weight:700;color:#0F172A;min-width:90px">{b["source"]}</span>'
                     f'<span style="font-size:0.82rem;color:#64748B">{b["rationale"] or "—"}</span>'
                     f'</div>',
@@ -783,7 +807,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             net_color = SUCCESS if (net or 0) > 0 else (DANGER if (net or 0) < 0 else NEUTRAL)
             st.markdown(
                 f'<p style="margin-top:10px;font-size:0.85rem;font-weight:800;color:{net_color}">'
-                f'Net change: {net:+.1f}</p>' if net is not None else '',
+                f'Net change: {net:+.2f}</p>' if net is not None else '',
                 unsafe_allow_html=True,
             )
             if not change["weights_available"]:
@@ -819,7 +843,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                 lambda h: f"{int(h)}d" if pd.notna(h) else "—"
             )
             hist_display["Composite Score"] = hist_display["Composite Score"].round(2)
-            hist_display["Conviction"]       = hist_display["Conviction"].round(1)
+            hist_display["Conviction"]       = hist_display["Conviction"].round(2)
             hist_display["Status"]           = hist_display["Status"].fillna("pending")
             hist_display["Outcome"]          = hist_display["Outcome"].fillna("—")
             st.dataframe(hist_display, use_container_width=True, hide_index=True)
@@ -832,7 +856,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         if edge:
             acc = edge.get("directional_accuracy")
             n = edge.get("num_predictions", 0)
-            acc_str = f"{acc*100:.1f}%" if acc is not None else "—"
+            acc_str = f"{acc*100:.2f}%" if acc is not None else "—"
             edge_html = (
                 f'<div style="background:{SUCCESS_LIGHT};border:1px solid {SUCCESS}44;'
                 f'padding:12px 16px;border-radius:8px;">'

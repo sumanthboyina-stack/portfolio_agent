@@ -30,6 +30,42 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SCREENER_OPPORTUNITY_CAP = 10
 
 
+async def ensure_morning_ran_today(extra_tickers: list[str] | None = None) -> bool:
+    """Run the Morning batch first if it hasn't completed yet today.
+
+    Intraday and Evening both depend on data Morning produces same-day
+    (universe screen signals, fresh predictions). Called at the top of each
+    so a missed/failed Morning run (cron hiccup, laptop asleep) self-heals
+    instead of silently operating on stale or absent data.
+
+    Returns True if Morning was run here.
+    """
+    from portfolio_agent.tools.progress_tracker import has_completed_today
+    if has_completed_today("morning"):
+        return False
+
+    log = _get_logger("batch.morning")
+    log.info(
+        "  Morning batch hasn't completed today — running it first…",
+        event_type="info",
+    )
+
+    # Run under its own run_id so it tracks as a separate "morning" row in
+    # pipeline_runs instead of colliding with (and overwriting) the caller's
+    # own in-progress run_id/job_type.
+    from datetime import datetime as _dt
+    _orig_run_id = os.environ.get("PIPELINE_RUN_ID", "")
+    os.environ["PIPELINE_RUN_ID"] = f"{_dt.now():%Y%m%d_%H%M%S}_morning"
+    try:
+        await run_batch_morning(extra_tickers=extra_tickers)
+    finally:
+        if _orig_run_id:
+            os.environ["PIPELINE_RUN_ID"] = _orig_run_id
+        else:
+            os.environ.pop("PIPELINE_RUN_ID", None)
+    return True
+
+
 async def run_batch_morning(
     extra_tickers: list[str] | None = None,
     force_all: bool = False,
@@ -76,8 +112,8 @@ async def run_batch_morning(
 
     log.info("\n── Phase 1: News ───────────────────────────────────────────────", event_type="phase_start")
     if not await _run_news_phase(
-        all_tickers, watchlist, portfolio_tickers, trending,
-        extra_tickers, wp, tracker=tracker,
+        all_tickers, watchlist, portfolio_tickers,
+        extra_tickers, tracker=tracker,
     ):
         log.info("\n  ⛔ News phase exhausted all models — stopping.", event_type="phase_end")
         if tracker:
@@ -116,13 +152,6 @@ async def run_batch_morning(
             tracker.finish_run("error")
         return
 
-    log.info("\n── Phase 3.5: Valuation (DCF + relative, no LLM) ────────────────", event_type="phase_start")
-    try:
-        from portfolio_agent.pipeline.daily.valuation import _run_daily_valuation
-        await _run_daily_valuation(all_tickers, tracker=tracker)
-    except Exception as _val_exc:
-        log.warning(f"  [valuation] Phase skipped — {_val_exc}", event_type="warning")
-
     log.info("\n── Phase 4: APEX Predictions ───────────────────────────────────", event_type="phase_start")
 
     # restricted_list.yaml's pipeline_skip "phases: [all]" only ever covered
@@ -149,6 +178,18 @@ async def run_batch_morning(
         )
 
     GEMINI_COUNTER.print_stats(prefix=" (end of morning batch)")
+
+    # Valuation — deliberately runs AFTER APEX, not before: it needs to see
+    # today's trigger_type='trending_opportunity' predictions (screener/news
+    # candidates APEX just decided on above) in addition to the static
+    # watchlist+portfolio list, or Opportunity Engine candidates would never
+    # get a DCF (see _run_daily_valuation's own ticker-list merge).
+    log.info("\n── Phase 4.2: Valuation (DCF + relative, no LLM) ────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.pipeline.daily.valuation import _run_daily_valuation
+        await _run_daily_valuation(all_tickers, tracker=tracker)
+    except Exception as _val_exc:
+        log.warning(f"  [valuation] Phase skipped — {_val_exc}", event_type="warning")
 
     # Risk + Technical flags — decoupled from APEX/weight engine (Approach B).
     # Portfolio holdings only; writes to risk_flags, feeds the dashboard's
@@ -202,6 +243,13 @@ async def run_batch_morning(
         log.warning(f"  [universe] Screen skipped — {_univ_exc}", event_type="warning")
         if tracker:
             tracker.finish_phase("universe_screen", 0, 1, note=str(_univ_exc)[:120])
+
+    log.info("\n── Phase 5.5: Score Calibration Snapshot ────────────────────────", event_type="phase_start")
+    try:
+        from portfolio_agent.pipeline.daily.scoring_snapshot import _run_daily_scoring_snapshot
+        await _run_daily_scoring_snapshot(tracker=tracker)
+    except Exception as _snap_exc:
+        log.warning(f"  [scoring_snapshot] Phase skipped — {_snap_exc}", event_type="warning")
 
     log.info("\n── Price History Backfill ──────────────────────────────────────", event_type="phase_start")
     if tracker:

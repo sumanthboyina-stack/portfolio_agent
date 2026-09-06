@@ -632,7 +632,6 @@ def inject_global_css() -> None:
 _NAV_PRIMARY = [
     ("dashboard",         "🏠", "Today",             "app.py"),
     ("opportunity_engine", "🚀", "Opportunity Engine", "pages/9_🎯_Opportunity_Engine.py"),
-    ("opportunities",     "🧭", "Opportunities",     "pages/8_🧭_Opportunities.py"),
     ("predictions",       "🔮", "Predictions",       "pages/7_🔮_Predictions.py"),
     ("portfolio",         "💼", "Portfolio",         "pages/5_💼_Portfolio.py"),
 ]

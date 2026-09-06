@@ -378,6 +378,11 @@ def compute_hypothetical_addition_impact(
     from portfolio_agent.tools.prediction_db import get_all_latest_predictions
 
     ticker = ticker.upper()
+    # Excluding the ticker from its own comparison set matters when it's already a
+    # holding (e.g. scoring an existing position's fit) — otherwise it's compared
+    # against a portfolio that includes itself, degenerately inflating its own
+    # correlation to 1.0. Harmless no-op when the ticker isn't currently held.
+    holdings = [h for h in holdings if str(h.get("ticker", "")).upper() != ticker]
     holding_tickers = sorted({str(h["ticker"]).upper() for h in holdings if h.get("ticker")})
     if not holding_tickers:
         return None
@@ -498,3 +503,66 @@ def compute_hypothetical_addition_impact(
         # shares without a second yfinance fetch (see portfolio_optimizer.py).
         "candidate_price": float(closes[ticker].iloc[-1]),
     }
+
+
+_FIT_CORR_MAX_POINTS = 40.0
+_FIT_CORR_NEUTRAL = 0.6          # correlation at/above this earns no diversification points
+_FIT_CORR_RANGE = 1.2            # points scale linearly from _FIT_CORR_NEUTRAL down to -0.6
+_FIT_CONCENTRATION_MAX_POINTS = 30.0
+_FIT_CONCENTRATION_SCALE = 15.0  # percentage-point relief -> points
+_FIT_RISK_ADJUSTED_MAX_POINTS = 30.0
+_FIT_RISK_ADJUSTED_CENTER = 15.0  # parity with the weakest holding
+_FIT_RISK_ADJUSTED_SCALE = 100.0
+
+
+def compute_portfolio_fit_score(ticker: str, holdings: list[dict], position_pct: float = 0.02) -> Optional[float]:
+    """
+    Standalone 0-100 "how well does this ticker fit the portfolio" score — a
+    full-range companion to opportunity_engine's small 0-15 fit *bonus* (which
+    stays as-is; this is a separate, independently-legible metric for the
+    scoring-calibration snapshot, not a replacement).
+
+    Works uniformly whether *ticker* is already a holding or a new candidate —
+    compute_hypothetical_addition_impact excludes the ticker from its own
+    comparison set, so "fit" always means "vs. the rest of the portfolio."
+
+    Three components, each contributing points independently (not multiplied):
+      - correlation (0-40): lower correlation to current holdings scores higher
+      - sector-concentration relief (0-30): how much this dilutes the portfolio's
+        most-concentrated sector (0 if it doesn't, never negative)
+      - risk-adjusted return vs. the weakest current holding (0-30, centered at
+        15 = parity; missing data defaults to the neutral center, not 0)
+
+    Returns None if compute_hypothetical_addition_impact can't compute anything
+    (same degrade-gracefully contract as the rest of this module).
+    """
+    impact = compute_hypothetical_addition_impact(ticker, holdings, position_pct=position_pct)
+    if impact is None:
+        return None
+
+    corr = impact.get("correlation_with_portfolio")
+    corr_points = (
+        min(_FIT_CORR_MAX_POINTS, max(0.0, (_FIT_CORR_NEUTRAL - corr) * (_FIT_CORR_MAX_POINTS / _FIT_CORR_RANGE)))
+        if corr is not None else _FIT_CORR_MAX_POINTS / 2
+    )
+
+    top_before = impact.get("top_sector_before_pct")
+    top_after = impact.get("top_sector_after_pct")
+    concentration_points = 0.0
+    if top_before is not None and top_after is not None and top_before > top_after:
+        relief = top_before - top_after
+        concentration_points = min(_FIT_CONCENTRATION_MAX_POINTS, relief * _FIT_CONCENTRATION_SCALE)
+
+    weakest = impact.get("weakest_holding") or {}
+    candidate_rar = impact.get("candidate_risk_adjusted_return")
+    weakest_rar = weakest.get("risk_adjusted_return")
+    if candidate_rar is not None and weakest_rar is not None:
+        diff = candidate_rar - weakest_rar
+        risk_adjusted_points = min(
+            _FIT_RISK_ADJUSTED_MAX_POINTS,
+            max(0.0, _FIT_RISK_ADJUSTED_CENTER + diff * _FIT_RISK_ADJUSTED_SCALE),
+        )
+    else:
+        risk_adjusted_points = _FIT_RISK_ADJUSTED_CENTER
+
+    return round(min(100.0, corr_points + concentration_points + risk_adjusted_points), 1)

@@ -23,7 +23,6 @@ from portfolio_agent.pipeline.prompt_templates import (
     _NEWS_PUB_TIER1,
     _NEWS_PUB_TIER2,
 )
-from portfolio_agent.pipeline.watchlist import update_watchlist
 
 
 def _rank_articles(articles: list[dict], top_n: int = 5) -> list[dict]:
@@ -601,9 +600,7 @@ async def _run_news_phase(
     all_tickers: list[str],
     watchlist: list[str],
     portfolio_tickers: list[str],
-    trending_from_news: list[str],
     extra_tickers: list[str] | None,
-    watchlist_path,
     tracker=None,
 ) -> bool:
     """
@@ -625,10 +622,6 @@ async def _run_news_phase(
 
     always_run = set((extra_tickers or []) + portfolio_tickers)
 
-    new_for_watchlist = [t for t in trending_from_news if t not in set(watchlist)]
-    if new_for_watchlist:
-        update_watchlist(watchlist_path, new_for_watchlist)
-
     # --- Stage 1+2+3: triage, materiality scoring, hash dedup, resume ---
     (
         tickers_with_news,
@@ -642,7 +635,7 @@ async def _run_news_phase(
 
     wl_count  = len(watchlist)
     port_new  = len([t for t in portfolio_tickers if t not in set(watchlist)])
-    trend_new = len(new_for_watchlist)
+    trend_new = len([t for t in all_tickers if t not in set(watchlist) and t not in set(portfolio_tickers)])
 
     log.info(f"\n{'━' * 64}", event_type="separator")
     log.info(

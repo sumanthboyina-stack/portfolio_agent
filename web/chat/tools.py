@@ -475,15 +475,15 @@ def _chat_tool_get_prediction_accuracy(ticker: str) -> dict:
             horizon_summary.append({
                 "horizon_days": h,
                 "evaluated_count": b["count"],
-                "directional_accuracy_pct": round(b["correct"] / b["count"] * 100, 1),
-                "avg_brier_score": round(sum(b["briers"]) / len(b["briers"]), 3) if b["briers"] else None,
+                "directional_accuracy_pct": round(b["correct"] / b["count"] * 100, 2),
+                "avg_brier_score": round(sum(b["briers"]) / len(b["briers"]), 2) if b["briers"] else None,
             })
         latest = rows[0]
         return {
             "ticker": ticker.upper(),
             "evaluated_count": len(rows),
             "overall_directional_accuracy_pct": round(
-                sum(1 for r in rows if r.get("outcome") in _correct_labels) / len(rows) * 100, 1
+                sum(1 for r in rows if r.get("outcome") in _correct_labels) / len(rows) * 100, 2
             ),
             "by_horizon": horizon_summary,
             "most_recent_outcome": {
@@ -712,7 +712,7 @@ def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: i
             d = dict(r)
             upside = (d["pt_mean"] / d["pt_current_price"] - 1) * 100
             if upside >= min_upside_pct:
-                d["upside_to_target_pct"] = round(upside, 1)
+                d["upside_to_target_pct"] = round(upside, 2)
                 candidates.append(d)
         candidates.sort(key=lambda d: d["upside_to_target_pct"], reverse=True)
         candidates = candidates[:limit]
@@ -749,9 +749,9 @@ def _chat_tool_get_portfolio_summary() -> dict:
         tv = sum(h["current_value"] for h in holdings)
         tc = sum(h["cost_basis"] for h in holdings)
         for h in holdings:
-            h["weight_pct"] = round(h["current_value"] / tv * 100, 1) if tv else 0
+            h["weight_pct"] = round(h["current_value"] / tv * 100, 2) if tv else 0
             h["unrealized_pct"] = (
-                round((h["current_value"] - h["cost_basis"]) / h["cost_basis"] * 100, 1)
+                round((h["current_value"] - h["cost_basis"]) / h["cost_basis"] * 100, 2)
                 if h["cost_basis"] else None
             )
         ht = [h["ticker"] for h in holdings]
@@ -775,7 +775,7 @@ def _chat_tool_get_portfolio_summary() -> dict:
             "source": "db",
             "total_value": round(tv, 2),
             "total_cost": round(tc, 2),
-            "unrealized_pct": round((tv - tc) / tc * 100, 1) if tc else None,
+            "unrealized_pct": round((tv - tc) / tc * 100, 2) if tc else None,
             "day_change_dollar": day_perf.get("day_change_dollar"),
             "day_change_pct": day_perf.get("day_change_pct"),
             "day_change_as_of": day_perf.get("as_of"),
@@ -952,7 +952,7 @@ def _chat_tool_get_portfolio_sector_allocation() -> dict:
             (
                 {
                     "sector": s,
-                    "weight_pct": round(v / tv * 100, 1),
+                    "weight_pct": round(v / tv * 100, 2),
                     "value": round(v, 2),
                     "tickers": sector_tickers[s],
                 }

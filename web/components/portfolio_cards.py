@@ -32,7 +32,7 @@ def _fmt_shares(v) -> str:
         return "—"
     try:
         f = float(v)
-        return f"{f:,.4f}".rstrip("0").rstrip(".")
+        return f"{f:,.2f}".rstrip("0").rstrip(".")
     except Exception:
         return "—"
 
@@ -45,7 +45,7 @@ def _pnl_html(cost_total, current_val) -> str:
         sign = "+" if gain >= 0 else ""
         return (
             f'<span style="color:{col};font-weight:600">'
-            f'{sign}${gain:,.0f} ({sign}{pct:.1f}%)</span>'
+            f'{sign}${gain:,.2f} ({sign}{pct:.2f}%)</span>'
         )
     except Exception:
         return "—"

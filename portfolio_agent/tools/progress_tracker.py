@@ -143,3 +143,18 @@ class PipelineProgressTracker:
                 "UPDATE pipeline_runs SET status = ?, finished_at = ? WHERE run_id = ?",
                 (status, _now(), self.run_id),
             )
+
+
+def has_completed_today(job_type: str) -> bool:
+    """True if a `job_type` run finished successfully today (America/Chicago)."""
+    ensure_tables()
+    today = datetime.now(_CST).date().isoformat()
+    with _get_conn() as conn:
+        row = conn.execute(
+            """SELECT 1 FROM pipeline_runs
+               WHERE job_type = ? AND status = 'completed'
+                 AND substr(started_at, 1, 10) = ?
+               LIMIT 1""",
+            (job_type, today),
+        ).fetchone()
+    return row is not None

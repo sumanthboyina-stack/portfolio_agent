@@ -107,7 +107,7 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Run a named batch job: morning (news+research+fundamentals+event-driven APEX), "
             "intraday (severity-3 event check + APEX if triggered), "
-            "evening (validation + slow-data refresh)."
+            "evening (validation + Score Calibration outcome-fill + slow-data refresh)."
         ),
     )
     p.add_argument(
@@ -122,7 +122,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--validate",
         action="store_true",
-        help="Layer 1+2: evaluate matured predictions and recompute rolling metrics",
+        help="Alias for --batch evening: evaluate matured predictions, recompute "
+             "rolling metrics, fill Score Calibration outcomes, snapshot portfolio "
+             "prices, and score screener outcomes.",
     )
     p.add_argument(
         "--weekly-analysis",
@@ -157,7 +159,7 @@ async def _main() -> None:
         await _run_batch_intraday(extra_tickers=tickers or None)
         return
 
-    if args.batch == "evening":
+    if args.batch == "evening" or args.validate:
         await _run_batch_evening(extra_tickers=tickers or None)
         return
 
@@ -176,47 +178,6 @@ async def _main() -> None:
 
     if args.daily_research:
         await _run_daily_research_only(extra_tickers=tickers or None)
-        return
-
-    if args.validate:
-        import os
-        from portfolio_agent.tools.validation_engine import (
-            evaluate_matured_predictions, recompute_rolling_metrics,
-        )
-        from portfolio_agent.tools.progress_tracker import PipelineProgressTracker
-        _run_id = os.environ.get("PIPELINE_RUN_ID", "")
-        _tracker = PipelineProgressTracker(_run_id, "validation", os.getpid()) if _run_id else None
-        log.info("=" * 60, event_type="separator")
-        log.info("=== APEX Validation — Layer 1: Outcome Assignment ===", event_type="phase_start")
-        log.info("=" * 60, event_type="separator")
-        if _tracker:
-            _tracker.start_phase("l1_outcome", total=1)
-        r1 = evaluate_matured_predictions(force=True)
-        _l1_note = (
-            f"{r1.get('evaluated',0)} evaluated  "
-            f"{r1.get('data_missing',0)} data_missing  "
-            f"{r1.get('errors',0)} errors"
-        )
-        if _tracker:
-            _tracker.finish_phase("l1_outcome", 1, 0, note=_l1_note)
-        log.info("", event_type="info")
-        log.info("=" * 60, event_type="separator")
-        log.info("=== APEX Validation — Layer 2: Rolling Metrics ===", event_type="phase_start")
-        log.info("=" * 60, event_type="separator")
-        if _tracker:
-            _tracker.start_phase("l2_metrics", total=1)
-        r2 = recompute_rolling_metrics()
-        _l2_note = f"{r2.get('metrics_written',0)} metric rows written"
-        if _tracker:
-            _tracker.finish_phase("l2_metrics", 1, 0, note=_l2_note)
-        log.info("", event_type="info")
-        log.info("=" * 60, event_type="separator")
-        log.info(f"  L1: {_l1_note}", event_type="summary")
-        log.info(f"  L2: {_l2_note}", event_type="summary")
-        log.info("=" * 60, event_type="separator")
-        if _tracker:
-            _tracker.finish_run("completed")
-        log.info("Validation complete.", event_type="phase_end")
         return
 
     if args.weekly_analysis:

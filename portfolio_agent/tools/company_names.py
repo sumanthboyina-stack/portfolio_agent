@@ -80,3 +80,35 @@ def get_company_names(tickers: list[str]) -> dict[str, str]:
     """Batch lookup — one cache load regardless of how many tickers are asked for."""
     name_map = _load_name_map()
     return {t.upper(): name_map[t.upper()] for t in tickers if t.upper() in name_map}
+
+
+def search_companies(query: str, limit: int = 8) -> list[tuple[str, str]]:
+    """Search tickers and company names for a fragment, e.g. "nvid" -> [("NVDA", "NVIDIA CORP")].
+
+    Ranked ticker-prefix matches first, then company-name-starts-with, then
+    company-name-contains — each group alphabetical by ticker so results are
+    stable across reruns.
+    """
+    q = query.strip().upper()
+    if not q:
+        return []
+    name_map = _load_name_map()
+
+    ticker_matches: list[tuple[str, str]] = []
+    name_starts: list[tuple[str, str]] = []
+    name_contains: list[tuple[str, str]] = []
+
+    for ticker, name in name_map.items():
+        name_upper = name.upper()
+        if ticker.startswith(q):
+            ticker_matches.append((ticker, name))
+        elif name_upper.startswith(q):
+            name_starts.append((ticker, name))
+        elif q in name_upper:
+            name_contains.append((ticker, name))
+
+    ticker_matches.sort()
+    name_starts.sort()
+    name_contains.sort()
+
+    return (ticker_matches + name_starts + name_contains)[:limit]

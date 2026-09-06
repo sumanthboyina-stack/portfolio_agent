@@ -148,7 +148,7 @@ def _start_job(flag: str) -> tuple[int, Path, str]:
         "--daily-fundamentals":  "fundamentals",
         "--daily-research":      "research",
         "--daily-news":          "news",
-        "--validate":            "validation",
+        "--weekly-analysis":     "weekly",
     }.get(flag, flag.replace("-", "").replace(" ", "_")[:20])
     run_id    = f"{ts}_{job_label}"
     log_path  = _LOGS / f"{run_id}.log"
@@ -172,7 +172,7 @@ def _scan_logs() -> list[dict]:
     for log in _LOGS.glob("*.log"):
         name = log.stem
         # New format:  YYYYMMDD_HHMMSS_daily / _news / _fundamentals / _research / _validation
-        m = re.match(r"^(\d{8})_(\d{6})_(daily|news|fundamentals|research|validation)$", name)
+        m = re.match(r"^(\d{8})_(\d{6})_(daily|news|fundamentals|research|validation|weekly)$", name)
         if m:
             try:
                 run_dt   = datetime.strptime(f"{m.group(1)}_{m.group(2)}", "%Y%m%d_%H%M%S")
@@ -205,6 +205,8 @@ def _scan_logs() -> list[dict]:
             has_fin = "research phase done" in lower or "finished :" in lower
         elif job_type == "validation":
             has_fin = "validation complete." in lower or "finished :" in lower
+        elif job_type == "weekly":
+            has_fin = "weekly analysis complete" in lower or "finished :" in lower
         else:
             has_fin = "finished :" in lower
         # has_err only flags pipeline-stopping failures — transient provider
@@ -260,8 +262,8 @@ def _phase_ticker_counts(log_text: str, job_type: str) -> dict:
             base += " (" + ", ".join(parts) + ")"
         return base
 
-    # Validation has no ticker phases — show dashes everywhere
-    if job_type == "validation":
+    # Validation/weekly-analysis have no ticker phases — show dashes everywhere
+    if job_type in ("validation", "weekly"):
         return {"News": "—", "Research": "—", "Fundamentals": "—", "Predictions": "—"}
     # For single-phase jobs only populate the relevant column
     if job_type in ("news", "research", "fundamentals"):
@@ -291,6 +293,7 @@ def _db_status_label(s: str, log_file: str = "", job_type: str = "daily") -> str
                 else "evening batch complete" in txt   if job == "evening"
                 else f"{job} phase done" in txt        if job in ("news", "research", "fundamentals")
                 else "validation complete." in txt     if job == "validation"
+                else "weekly analysis complete" in txt if job == "weekly"
                 else "batch complete" in txt or "pipeline complete" in txt
             )
             if done:
@@ -330,7 +333,7 @@ def _phase_badge(text: str) -> str:
 # invocation) — rendered as a single done/pending indicator, not a X/Y bar.
 _BINARY_PHASES = {
     "short_interest", "universe_screen", "price_backfill",
-    "l1_outcome", "l2_metrics", "l3_snapshot",
+    "l1_outcome", "l2_metrics", "calibration_outcome", "l3_snapshot", "l4_screener_outcomes",
 }
 
 
@@ -349,7 +352,9 @@ def _new_phases_dict() -> dict[str, dict]:
         "price_backfill":  dict(base),
         "l1_outcome":      dict(base),
         "l2_metrics":      dict(base),
+        "calibration_outcome": dict(base),
         "l3_snapshot":     dict(base),
+        "l4_screener_outcomes": dict(base),
     }
 
 
@@ -539,11 +544,23 @@ def _parse_progress(log_text: str) -> dict:
             phases["l2_metrics"]["status"] = "running"
             if phases["l1_outcome"]["status"] == "running":
                 phases["l1_outcome"]["status"] = "done"
+        if re.search(r"── Layer 2\.5: Score Calibration|Score Calibration — Outcome Fill ===", line):
+            current = "calibration_outcome"
+            phases["calibration_outcome"]["status"] = "running"
+            if phases["l2_metrics"]["status"] == "running":
+                phases["l2_metrics"]["status"] = "done"
         if re.search(r"── Layer 3: Portfolio Price Snapshot", line):
             current = "l3_snapshot"
             phases["l3_snapshot"]["status"] = "running"
-            if phases["l2_metrics"]["status"] == "running":
+            if phases["calibration_outcome"]["status"] == "running":
+                phases["calibration_outcome"]["status"] = "done"
+            elif phases["l2_metrics"]["status"] == "running":
                 phases["l2_metrics"]["status"] = "done"
+        if re.search(r"── Layer 4: Screener Outcome Scoring", line):
+            current = "l4_screener_outcomes"
+            phases["l4_screener_outcomes"]["status"] = "running"
+            if phases["l3_snapshot"]["status"] == "running":
+                phases["l3_snapshot"]["status"] = "done"
         m = re.search(r"L1: (\d+) evaluated\s+(\d+) data_missing\s+(\d+) errors", line)
         if m:
             phases["l1_outcome"].update(
@@ -555,10 +572,21 @@ def _parse_progress(log_text: str) -> dict:
             phases["l2_metrics"].update(
                 note=f"{m.group(1)} metric rows written", status="done", completed=1, total=1,
             )
+        m = re.search(r"L2\.5: (.+)|Calibration: (.+)", line)
+        if m:
+            phases["calibration_outcome"].update(
+                note=(m.group(1) or m.group(2))[:160], status="done", completed=1, total=1,
+            )
         m = re.search(r"L3: (\d+) holdings snapped", line)
         if m:
             phases["l3_snapshot"].update(
                 note=f"{m.group(1)} holdings snapped", status="done", completed=1, total=1,
+            )
+        m = re.search(r"L4: (\d+) evaluated\s+(\d+) data_missing\s+(\d+) errors", line)
+        if m:
+            phases["l4_screener_outcomes"].update(
+                note=f"{m.group(1)} evaluated · {m.group(2)} missing · {m.group(3)} errors",
+                status="done", completed=1, total=1,
             )
 
         # ── exhausted / checkpoint ────────────────────────────────────────────
@@ -639,8 +667,9 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         "daily":      _DAILY_PHASES,
         "morning":    _DAILY_PHASES,
         "intraday":   ["news", "research", "fundamentals", "apex", "price_backfill"],
-        "evening":    ["l1_outcome", "l2_metrics", "l3_snapshot"],
-        "validation": ["l1_outcome", "l2_metrics"],
+        "evening":    ["l1_outcome", "l2_metrics", "calibration_outcome", "l3_snapshot", "l4_screener_outcomes"],
+        "validation": ["l1_outcome", "l2_metrics", "calibration_outcome"],
+        "weekly":     [],
     }.get(job_type, _DAILY_PHASES)
 
     # A finished run with every tracked phase still "pending" genuinely has
@@ -669,7 +698,9 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         "price_backfill":  ("🧮", "Price Backfill",    "6 ·"),
         "l1_outcome":      ("✅", "Outcome Scoring",   "1 ·"),
         "l2_metrics":      ("📈", "Rolling Metrics",   "2 ·"),
+        "calibration_outcome": ("📐", "Score Calibration", "2.5 ·"),
         "l3_snapshot":     ("📸", "Portfolio Snapshot","3 ·"),
+        "l4_screener_outcomes": ("🧪", "Screener Outcomes", "4 ·"),
     }
     STATUS_COLOR = {
         "pending":   "#475569",
@@ -712,6 +743,7 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         "morning":  "MORNING BATCH",
         "intraday": "INTRADAY BATCH",
         "daily":    "FULL DAILY",
+        "weekly":   "WEEKLY ANALYSIS",
     }.get(job_type, job_type.upper())
     total_label = f"· {total} tickers" if total else ""
     st.markdown(
@@ -828,6 +860,8 @@ if st.session_state.active_pid:
             log_done = "news phase done" in _log_txt
         elif job == "validation":
             log_done = "validation complete." in _log_txt
+        elif job == "weekly":
+            log_done = "weekly analysis complete" in _log_txt
         else:
             log_done = "pipeline complete" in _log_txt or "batch complete" in _log_txt
     if pid_done or db_done or log_done:
@@ -853,10 +887,10 @@ with st.sidebar:
 
     _JOB_DEFS = [
         ("--batch morning",      "🌅  Morning",    "morning",    "Event detection + scheduled/event APEX predictions"),
-        ("--batch intraday",     "⚡  Intraday",   "intraday",   "Event check + News/Research/Fundamentals/APEX for trending tickers"),
-        ("--batch evening",      "🌆  Evening",    "evening",    "Validate matured predictions + recompute metrics"),
+        ("--batch intraday",     "⚡  Intraday",   "intraday",   "Event check + News/Research/Fundamentals/APEX for trending tickers (runs Morning first if it hasn't completed today)"),
+        ("--batch evening",      "🌆  Evening",    "evening",    "Validate matured predictions + recompute metrics + calibration outcome-fill + portfolio snapshot (runs Morning first if it hasn't completed today)"),
         ("--daily --force-all",  "▶  Full Daily", "daily",      "News + Research + Fundamentals + APEX (all tickers)"),
-        ("--validate",           "✅  Validate",   "validation", "Score matured predictions + recompute metrics"),
+        ("--weekly-analysis",    "🔬  Weekly Analysis", "weekly", "LLM pattern analysis of wrong predictions (Layer 3 post-mortem)"),
     ]
 
     for flag, run_label, job_key, help_text in _JOB_DEFS:
@@ -922,10 +956,10 @@ page_header(
 
 _SCHEDULE_DEF = [
     ("morning",    "🌅 Morning",  "Mon–Fri  06:30 CST",                       "News + Research + Fundamentals + APEX predictions"),
-    ("intraday",   "⚡ Intraday", "Mon–Fri  11:00 / 13:00 / 15:00 CST",       "Event check + full pipeline (News/Research/Fundamentals/APEX 5d) for trending tickers"),
-    ("evening",    "🌆 Evening",  "Mon–Fri  17:30 CST",                        "Validate matured predictions + recompute metrics"),
-    ("validation", "✅ Validate", "Mon–Fri  17:30 CST (part of evening batch)", "Rolling accuracy, Brier, log-loss"),
+    ("intraday",   "⚡ Intraday", "Mon–Fri  11:00 / 13:00 / 15:00 CST",       "Event check + full pipeline (News/Research/Fundamentals/APEX 5d) for trending tickers · auto-runs Morning first if needed"),
+    ("evening",    "🌆 Evening",  "Mon–Fri  17:30 CST",                        "Validate matured predictions + recompute metrics + calibration outcome-fill + portfolio snapshot · auto-runs Morning first if needed"),
     ("daily",      "▶ Full Daily","Manual trigger only",                        "Force-all: all phases for all tickers"),
+    ("weekly",     "🔬 Weekly Analysis","Manual trigger only",                  "LLM post-mortem analysis of wrong predictions (Layer 3)"),
 ]
 
 # Last run per job_type
@@ -1019,6 +1053,7 @@ if job_is_alive:
         "intraday":   "Intraday Batch",
         "evening":    "Evening Batch",
         "validation": "Validation",
+        "weekly":     "Weekly Analysis",
     }.get(st.session_state.active_job or "", "Pipeline")
     st.markdown(
         f'<div style="background:#DBEAFE;border:1px solid #93C5FD;border-radius:10px;'
@@ -1126,6 +1161,7 @@ _BATCH_LABEL = {
     "news":         "📰 News",
     "research":     "🔬 Research",
     "fundamentals": "📄 Fundamentals",
+    "weekly":       "🔬 Weekly Analysis",
 }
 
 # Pre-fetch metrics_rolling: metric_date → {horizon_days: num_predictions}
@@ -1202,6 +1238,9 @@ def _run_summary(phases: dict, job_type: str,
     if jt == "fundamentals":
         v = _p("fundamentals") or _lp("Fundamentals")
         return f"Fundamentals updated — {v} tickers" if v else "Fundamentals phase"
+
+    if jt == "weekly":
+        return "LLM post-mortem on wrong predictions"
 
     return "—"
 

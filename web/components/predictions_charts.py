@@ -48,16 +48,16 @@ def _prob_strip_html(row: dict, height: int = 14) -> str:
 
     # Build strip segments
     segments = "".join(
-        f'<div title="{label} ({range_}): {v:.0f}%" '
-        f'style="width:{pct:.1f}%;background:{color};height:{height}px"></div>'
+        f'<div title="{label} ({range_}): {v:.2f}%" '
+        f'style="width:{pct:.2f}%;background:{color};height:{height}px"></div>'
         for (_, color, label, range_), pct, v in zip(_PROB_BUCKETS, pcts, vals)
     )
 
     # Percentage labels below the strip
     label_cells = "".join(
-        f'<div style="width:{pct:.1f}%;text-align:center;font-size:0.6rem;'
+        f'<div style="width:{pct:.2f}%;text-align:center;font-size:0.6rem;'
         f'color:{color};font-weight:{"700" if i == max_idx else "400"}">'
-        f'{v:.0f}%</div>'
+        f'{v:.2f}%</div>'
         for i, ((_, color, *_rest), pct, v) in enumerate(zip(_PROB_BUCKETS, pcts, vals))
     )
 
@@ -71,9 +71,9 @@ def _prob_strip_html(row: dict, height: int = 14) -> str:
         f'<div style="display:flex;border-radius:6px;overflow:hidden">{segments}</div>'
         f'<div style="display:flex;margin-top:1px">{label_cells}</div>'
         f'<div style="display:flex;gap:8px;margin-top:4px">'
-        f'<span style="font-size:0.65rem;color:#059669">📈 {p_up:.0f}% bullish</span>'
-        f'<span style="font-size:0.65rem;color:#94A3B8">➡ {p_flat:.0f}% flat</span>'
-        f'<span style="font-size:0.65rem;color:#EF4444">📉 {p_down:.0f}% bearish</span>'
+        f'<span style="font-size:0.65rem;color:#059669">📈 {p_up:.2f}% bullish</span>'
+        f'<span style="font-size:0.65rem;color:#94A3B8">➡ {p_flat:.2f}% flat</span>'
+        f'<span style="font-size:0.65rem;color:#EF4444">📉 {p_down:.2f}% bearish</span>'
         f'</div>'
         f'</div>'
     )
@@ -94,11 +94,11 @@ def _plot_prob_full(row: dict) -> go.Figure:
             orientation="h",
             marker_color=color,
             marker_line=dict(color=color, width=0),
-            text=[f"<b>{val:.0f}%</b>"],
+            text=[f"<b>{val:.2f}%</b>"],
             textposition="outside",
             textfont=dict(size=12, color="#1E293B"),
             showlegend=False,
-            hovertemplate=f"<b>{y_label}</b>: {val:.0f}%<extra></extra>",
+            hovertemplate=f"<b>{y_label}</b>: {val:.2f}%<extra></extra>",
         ))
 
     p_up   = (row.get("p_moderate_up") or 0) + (row.get("p_strong_up") or 0)
@@ -113,7 +113,7 @@ def _plot_prob_full(row: dict) -> go.Figure:
         yaxis=dict(showgrid=False, tickfont=dict(size=11, color="#334155")),
         bargap=0.3,
         title=dict(
-            text=f"📈 <b>{p_up:.0f}%</b> bullish   ➡ <b>{row.get('p_flat') or 0:.0f}%</b> flat   📉 <b>{p_down:.0f}%</b> bearish",
+            text=f"📈 <b>{p_up:.2f}%</b> bullish   ➡ <b>{row.get('p_flat') or 0:.2f}%</b> flat   📉 <b>{p_down:.2f}%</b> bearish",
             font=dict(size=12, color="#475569"),
             x=0, xanchor="left",
         ),
@@ -141,7 +141,7 @@ def _plot_score_radar(row: dict) -> go.Figure:
         fillcolor="rgba(37, 99, 235, 0.12)",
         line=dict(color="#2563EB", width=2),
         marker=dict(size=5, color="#2563EB"),
-        hovertemplate="<b>%{theta}</b>: %{r:.1f}/10<extra></extra>",
+        hovertemplate="<b>%{theta}</b>: %{r:.2f}/10<extra></extra>",
     ))
     fig.update_layout(
         height=220,

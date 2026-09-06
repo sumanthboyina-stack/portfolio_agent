@@ -13,6 +13,34 @@ from __future__ import annotations
 from portfolio_agent.log import get_logger as _get_logger
 
 
+def _todays_trending_opportunity_tickers() -> list[str]:
+    """
+    Screener/news candidates APEX ran under trigger_type='trending_opportunity'
+    (see pipeline/batch/morning.py::_run_morning_apex_event_driven) — these change
+    daily and are never part of the static watchlist+portfolio list, so they must be
+    pulled in separately or the Opportunity Engine's candidates never get a DCF at all.
+
+    Matches the most recent as_of_date on record rather than requiring an exact
+    match to date.today() — same pattern opportunity_engine.get_daily_opportunities()
+    already uses, so this stays correct even if called hours after the batch that
+    generated it (or, in a dev/manual run, days after).
+    """
+    from portfolio_agent.tools.db import db_conn
+
+    with db_conn() as conn:
+        latest = conn.execute(
+            "SELECT MAX(as_of_date) AS d FROM predictions WHERE trigger_type = 'trending_opportunity'"
+        ).fetchone()
+        latest_date = latest["d"] if latest else None
+        if not latest_date:
+            return []
+        rows = conn.execute(
+            "SELECT DISTINCT ticker FROM predictions WHERE trigger_type = 'trending_opportunity' AND as_of_date = ?",
+            (latest_date,),
+        ).fetchall()
+    return [r["ticker"] for r in rows]
+
+
 async def _run_daily_valuation(all_tickers: list[str], tracker=None) -> None:
     log = _get_logger("valuation")
     from portfolio_agent.tools.valuation_db import needs_refresh, upsert_valuation
@@ -24,6 +52,14 @@ async def _run_daily_valuation(all_tickers: list[str], tracker=None) -> None:
     from portfolio_agent.tools.valuation_engine import (
         run_dcf_scenarios, sensitivity_grid, relative_valuation,
     )
+
+    opportunity_tickers = _todays_trending_opportunity_tickers()
+    all_tickers = list(dict.fromkeys(list(all_tickers) + opportunity_tickers))
+    if opportunity_tickers:
+        log.info(
+            f"  +{len(opportunity_tickers)} today's Opportunity Engine candidate(s) added to the valuation universe",
+            event_type="info",
+        )
 
     to_refresh = [t for t in dict.fromkeys(all_tickers) if needs_refresh(t)]
     if not to_refresh:

@@ -131,6 +131,40 @@ def get_stored_valuation(ticker: str) -> Optional[dict]:
     return d
 
 
+def get_valuations_for_tickers(tickers: list[str]) -> dict[str, dict]:
+    """
+    Most recent valuation row per ticker, for a whole list at once — one query
+    instead of N calls to get_stored_valuation(). Tickers with no stored
+    valuation are simply absent from the returned dict (not an error).
+    """
+    tickers = sorted({t.upper() for t in tickers if t})
+    if not tickers:
+        return {}
+    placeholders = ",".join("?" * len(tickers))
+    with _db() as c:
+        rows = c.execute(
+            f"""
+            SELECT v.* FROM valuation v
+            INNER JOIN (
+                SELECT ticker, MAX(as_of_date) AS max_date
+                FROM valuation WHERE ticker IN ({placeholders})
+                GROUP BY ticker
+            ) latest ON v.ticker = latest.ticker AND v.as_of_date = latest.max_date
+            """,
+            tickers,
+        ).fetchall()
+    result: dict[str, dict] = {}
+    for row in rows:
+        d = dict(row)
+        for key in ("assumptions", "relative_valuation", "sensitivity_grid"):
+            try:
+                d[key] = json.loads(d.get(key) or "{}")
+            except (TypeError, ValueError):
+                d[key] = {}
+        result[d["ticker"]] = d
+    return result
+
+
 def needs_refresh(ticker: str, max_age_days: int = 95) -> bool:
     """True if there's no stored valuation, or it's older than max_age_days."""
     stored = get_stored_valuation(ticker)

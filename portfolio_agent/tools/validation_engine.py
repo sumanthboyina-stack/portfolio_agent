@@ -289,6 +289,18 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
 
 # ── Layer 2: Rolling metrics ───────────────────────────────────────────────────
 
+def _portfolio_tickers_for_segmentation() -> set[str]:
+    """Portfolio-holding tickers from config/portfolio.yaml, for segment bucketing."""
+    import yaml
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[2] / "config" / "portfolio.yaml"
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+        return {h["ticker"].upper() for h in data.get("holdings", []) if "ticker" in h}
+    except Exception:
+        return set()
+
+
 def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
     """
     Layer 2 — Recompute rolling accuracy metrics grouped by (horizon, segment, version).
@@ -303,6 +315,7 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
     _log.info(f"  [validation/L2] Recomputing rolling metrics for {today_str}…",
               event_type="phase_start", date=today_str)
     metrics_written = 0
+    portfolio_set = _portfolio_tickers_for_segmentation()
 
     for lookback_days in [30, 90, 365]:
         _log.info(f"  [validation/L2] Processing {lookback_days}-day lookback window…",
@@ -311,7 +324,7 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
 
         with _db() as c:
             rows = c.execute(
-                """SELECT horizon_days,
+                """SELECT horizon_days, ticker,
                           COALESCE(system_version, 'v1.0')  AS sys_ver,
                           trigger_type,
                           actual_direction, predicted_direction,
@@ -326,20 +339,25 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
             ).fetchall()
 
         # Group by (horizon_days, segment, system_version). Every row lands in the
-        # blended 'all' bucket, and also in 'opportunity' or 'portfolio' depending
-        # on how it was discovered -- trending-opportunity picks are validated
-        # separately from portfolio-holding predictions so accuracy on discovery
-        # calls doesn't get diluted by (or hide behind) the much larger holdings
-        # population. (risk_segment is unused/always NULL -- it never carried a
-        # real bucketing signal, so it's dropped here rather than kept as dead
-        # weight alongside the new opportunity/portfolio split.)
+        # blended 'all' bucket, plus exactly one of 'opportunity' (discovered via
+        # trending_opportunity), 'portfolio' (an actual holding), or 'watchlist'
+        # (tracked but not held -- scheduled/event-driven predictions for plain
+        # watchlist tickers) -- so accuracy on discovery calls and holdings don't
+        # get diluted by (or hidden behind) each other. (risk_segment is unused/
+        # always NULL -- it never carried a real bucketing signal, so it's dropped
+        # here rather than kept as dead weight.)
         from collections import defaultdict
         groups: dict[tuple, list] = defaultdict(list)
         for r in rows:
             d = dict(r)
-            opp_seg = "opportunity" if d.get("trigger_type") == "trending_opportunity" else "portfolio"
+            if d.get("trigger_type") == "trending_opportunity":
+                seg = "opportunity"
+            elif (d.get("ticker") or "").upper() in portfolio_set:
+                seg = "portfolio"
+            else:
+                seg = "watchlist"
             groups[(d["horizon_days"], "all", d["sys_ver"])].append(d)
-            groups[(d["horizon_days"], opp_seg, d["sys_ver"])].append(d)
+            groups[(d["horizon_days"], seg, d["sys_ver"])].append(d)
 
         def _dir_acc_for(subset: list) -> Optional[float]:
             if not subset:

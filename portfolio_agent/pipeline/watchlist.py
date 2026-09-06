@@ -1,5 +1,9 @@
 """
-Watchlist management helpers — read/write config/watchlist.yaml.
+Watchlist loading helper — reads config/watchlist.yaml.
+
+The watchlist is manual-only: tickers are added/removed via the Watchlist
+Manager screen or the Opportunity Engine's "Add to Watchlist" button
+(web/data/watchlist.py). Nothing in the pipeline auto-promotes tickers here.
 """
 
 from __future__ import annotations
@@ -10,50 +14,6 @@ from pathlib import Path
 import yaml
 
 from portfolio_agent.log import get_logger as _get_logger
-
-_WATCHLIST_MAX = 70
-
-
-def update_watchlist(watchlist_path: Path, new_tickers: list[str]) -> None:
-    """
-    Append genuinely new tickers to watchlist.yaml, capped at _WATCHLIST_MAX total.
-
-    Trending tickers are added at the end, so the base lists always take priority.
-    """
-    log = _get_logger("main")
-    with open(watchlist_path) as f:
-        data = yaml.safe_load(f) or {}
-    current = list(data.get("tickers", []))
-    existing = {str(t).upper() for t in current}
-    to_add = [t for t in new_tickers if t not in existing]
-    if not to_add:
-        return
-
-    available_slots = max(0, _WATCHLIST_MAX - len(current))
-    if available_slots == 0:
-        log.warning(
-            f"  Watchlist at cap ({_WATCHLIST_MAX}) — skipping {len(to_add)} trending ticker(s)",
-            event_type="warning",
-        )
-        return
-
-    adding  = to_add[:available_slots]
-    dropped = to_add[available_slots:]
-
-    data["tickers"] = current + adding
-    with open(watchlist_path, "w") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    log.info(
-        f"  Watchlist updated — added {len(adding)} ticker(s): "
-        f"{', '.join(adding[:15])}{'...' if len(adding) > 15 else ''}",
-        event_type="info",
-    )
-    if dropped:
-        log.info(
-            f"  Watchlist cap reached — dropped {len(dropped)} ticker(s): "
-            f"{', '.join(dropped[:10])}",
-            event_type="info",
-        )
 
 
 def load_all_tickers(

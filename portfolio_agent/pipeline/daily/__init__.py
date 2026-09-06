@@ -101,8 +101,8 @@ async def run_daily_news(extra_tickers: list[str] | None = None) -> None:
     _tracker = _Tracker(_RUN_ID, "news", _os.getpid(), _LOG_FILE)
     _tracker.set_total(len(all_tickers))
     await _run_news_phase(
-        all_tickers, watchlist, portfolio_tickers, trending,
-        extra_tickers, wp, tracker=_tracker,
+        all_tickers, watchlist, portfolio_tickers,
+        extra_tickers, tracker=_tracker,
     )
     _tracker.finish_run("completed")
 
@@ -149,8 +149,8 @@ async def run_daily(extra_tickers: list[str] | None = None) -> None:
 
     log.info("\n── Phase 1: News ───────────────────────────────────────────────", event_type="phase_start")
     if not await _run_news_phase(
-        all_tickers, watchlist, portfolio_tickers, trending,
-        extra_tickers, wp, tracker=_tracker,
+        all_tickers, watchlist, portfolio_tickers,
+        extra_tickers, tracker=_tracker,
     ):
         log.info("\n  ⛔ News phase exhausted all models — stopping pipeline.", event_type="phase_end")
         _tracker.finish_run("error")
