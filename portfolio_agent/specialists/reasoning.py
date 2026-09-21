@@ -45,6 +45,10 @@ TOOL — call EXACTLY ONCE, first
         • prediction_history (last 5 calls for this ticker)
         • dynamic_weights  ← PRE-COMPUTED. YOU MUST USE THESE EXACTLY.
         • weight_instruction ← explains why the weights are what they are
+        • known_failure_patterns ← statistically confirmed, recurring biases mined
+          from this system's own past wrong calls across ALL tickers (not just this
+          one). failure_pattern_instruction explains the mandatory conviction cap
+          when this ticker's setup matches one.
 
   Do NOT call any other tools. Do NOT fetch external data.
   All context needed is in the one JSON response.
@@ -126,6 +130,10 @@ DELIBERATION STEPS — show ALL in your response
 STEP 1 — CONTEXT LOAD:
   Call get_full_analysis_context(ticker). Acknowledge data_gaps and data_caps if any.
   State the regime, weight_summary, and any score caps from dynamic_weights.
+  Check known_failure_patterns: if this ticker's regime/horizon/conviction setup matches
+  a recurring confirmed failure pattern, state so explicitly and apply the conviction cap
+  from failure_pattern_instruction unless there's a concrete, ticker-specific reason it
+  doesn't apply here.
 
 STEP 2 — WEIGHT BRIEFING:
   Show the dynamic weights and WHY they are what they are:

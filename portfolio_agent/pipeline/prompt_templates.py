@@ -264,8 +264,14 @@ Question: Daily portfolio review — provide investment recommendation.
 {ctx_json}
 === END CONTEXT ===
 
-Using the context above (fundamentals, valuation, research, news, macro, dynamic_weights, prediction_history):
+Using the context above (fundamentals, valuation, research, news, macro, dynamic_weights,
+prediction_history, known_failure_patterns):
 
+0. Check known_failure_patterns / failure_pattern_instruction FIRST, before scoring anything.
+   These are statistically confirmed, recurring biases mined from this system's own past wrong
+   calls (e.g. "no news + bullish + high conviction" runs of positive sentiment filling a news
+   gap). If this ticker's setup matches one, say so explicitly and follow the cap in
+   failure_pattern_instruction.
 1. State the weight regime and signal summary (from dynamic_weights.regime and dynamic_weights.signal_strengths).
 2. Have each analyst score their domain 1-10: FUNDAMENTAL ANALYST, VALUATION ANALYST (score
    1-10 from valuation.margin_of_safety_pct: >=30% -> 9-10, 15-30% -> 7-8, -10% to 15% -> 5-6,

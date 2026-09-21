@@ -600,6 +600,7 @@ def get_full_analysis_context(
     from portfolio_agent.tools.prediction_db import get_prediction_history
     from portfolio_agent.tools.valuation_db import get_stored_valuation
     from portfolio_agent.tools.weight_engine import compute_dynamic_weights
+    from portfolio_agent.tools.validation_engine import get_active_failure_patterns
 
     if horizons is None:
         horizons = [5, 21, 63]
@@ -668,6 +669,33 @@ def get_full_analysis_context(
     ]
     horizon_weight_str = "\n".join(horizon_weight_lines) if horizon_weight_lines else "(none)"
 
+    # ── 4. Known system-wide failure patterns (Layer 3 validation output) ────
+    # Segments that recurred across >=2 weekly validation reports (see
+    # validation_engine.get_active_failure_patterns) — statistically confirmed
+    # biases from past predictions across ALL tickers, not just this one.
+    try:
+        known_failure_patterns = get_active_failure_patterns()
+    except Exception:
+        known_failure_patterns = []
+
+    if known_failure_patterns:
+        failure_pattern_instruction = (
+            "MANDATORY — KNOWN RECURRING FAILURE PATTERNS (statistically confirmed "
+            "across multiple weekly validation reports): check whether this ticker's "
+            "current weight_regime, horizon, or conviction band matches any pattern below. "
+            "If it matches, say so explicitly and do not exceed conviction 5 for that "
+            "horizon unless you can articulate a concrete, ticker-specific reason this "
+            "case differs from the historical pattern.\n"
+            + "\n".join(
+                f"  - {p['description']} (seen in {p['weeks_seen']} weekly reports; "
+                f"accuracy {p.get('latest_accuracy', '?')} vs baseline "
+                f"{p.get('latest_baseline_accuracy', '?')})"
+                for p in known_failure_patterns
+            )
+        )
+    else:
+        failure_pattern_instruction = "No recurring system-wide failure patterns currently flagged."
+
     return json.dumps({
         "ticker":             ticker,
         "fundamentals":       _safe_to_dict(fundamentals),
@@ -678,6 +706,8 @@ def get_full_analysis_context(
         "prediction_history": [_safe_to_dict(p) for p in prediction_history],
         "data_gaps":          data_gaps,
         "dynamic_weights":    weight_data,
+        "known_failure_patterns":     known_failure_patterns,
+        "failure_pattern_instruction": failure_pattern_instruction,
         "weight_instruction": (
             f"CRITICAL: Use the exact per-horizon weights from "
             f"dynamic_weights.weights_by_horizon for each horizon's composite score. "

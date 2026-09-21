@@ -433,11 +433,201 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
     return {"metrics_written": metrics_written}
 
 
-# ── Layer 3: Weekly LLM pattern analysis ──────────────────────────────────────
+# ── Layer 3: Weekly statistical pattern mining + LLM narration ────────────────
+#
+# A segment must clear a real statistical bar (n>=20, |gap|>=15pts vs. the
+# rest of the population, p<0.05 two-proportion z-test) before it's treated
+# as a confirmed failure mode -- the same style of check that surfaced the
+# no-news-bullish and bounce-thesis guardrails in apex.py by hand, done
+# generically so new confirmed biases surface on their own instead of
+# needing another one-off script each time. The LLM's job is narrating
+# confirmed segments, not discovering patterns from a handful of examples
+# (free-form pattern-spotting over 5-30 wrong calls/week is exactly the
+# setup that produces plausible-sounding but spurious narratives).
+#
+# A segment is only promoted to "candidate_guardrails" -- and only
+# candidate_guardrails get surfaced to future APEX calls via
+# get_active_failure_patterns() -- once it recurs in RECURRENCE_MIN of the
+# last RECURRENCE_LOOKBACK weekly reports, so a single noisy week can't
+# get wired into every future prediction's context.
+
+RECURRENCE_MIN = 2
+RECURRENCE_LOOKBACK = 4
+_SEGMENT_MIN_N = 20
+_SEGMENT_MIN_GAP = 0.15
+_SEGMENT_MAX_P = 0.05
+
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def _two_proportion_p_value(x1: int, n1: int, x2: int, n2: int) -> Optional[float]:
+    """Two-tailed p-value for a two-proportion z-test (pooled variance)."""
+    if n1 == 0 or n2 == 0:
+        return None
+    p1, p2 = x1 / n1, x2 / n2
+    p_pool = (x1 + x2) / (n1 + n2)
+    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+    if se == 0:
+        return 1.0
+    z = (p1 - p2) / se
+    return 2 * (1 - _norm_cdf(abs(z)))
+
+
+def _dir_correct(row: dict) -> bool:
+    return (row.get("actual_direction") or "").upper() == (row.get("predicted_direction") or "").upper()
+
+
+def _segment_stats(
+    rows: list[dict],
+    key_fn,
+    min_n: int = _SEGMENT_MIN_N,
+    min_gap: float = _SEGMENT_MIN_GAP,
+    max_p: float = _SEGMENT_MAX_P,
+) -> list[dict]:
+    """
+    Group rows by key_fn(row) (None excludes a row from this dimension),
+    compare each group's directional accuracy against every OTHER classified
+    row, and keep only groups where n>=min_n on both sides, |gap|>=min_gap,
+    and p<max_p.
+    """
+    from collections import defaultdict
+    groups: dict = defaultdict(list)
+    for r in rows:
+        k = key_fn(r)
+        if k is None:
+            continue
+        groups[k].append(r)
+
+    classified = [r for grp in groups.values() for r in grp]
+    total_n = len(classified)
+    total_x = sum(_dir_correct(r) for r in classified)
+
+    out = []
+    for key, subset in groups.items():
+        n = len(subset)
+        if n < min_n:
+            continue
+        n_rest = total_n - n
+        if n_rest < min_n:
+            continue
+        x_seg = sum(_dir_correct(r) for r in subset)
+        x_rest = total_x - x_seg
+        acc_seg, acc_rest = x_seg / n, x_rest / n_rest
+        gap = acc_seg - acc_rest
+        if abs(gap) < min_gap:
+            continue
+        p = _two_proportion_p_value(x_seg, n, x_rest, n_rest)
+        if p is None or p >= max_p:
+            continue
+        out.append({
+            "key": key, "n": n, "accuracy": round(acc_seg, 3),
+            "baseline_accuracy": round(acc_rest, 3), "gap": round(gap, 3),
+            "p_value": round(p, 4),
+        })
+    return out
+
+
+def _mine_segment_patterns(rows: list[dict]) -> list[dict]:
+    """Run _segment_stats across the dimensions with reliable columns on every row."""
+    def _conv_bucket(r):
+        h, c = r.get("horizon_days"), r.get("conviction_score")
+        if h is None or c is None:
+            return None
+        return ("conviction", h, "high" if c >= 7 else "low")
+
+    def _regime(r):
+        h, reg = r.get("horizon_days"), r.get("weight_regime")
+        if h is None or not reg:
+            return None
+        return ("weight_regime", h, reg)
+
+    def _model(r):
+        m = r.get("model_name")
+        return ("model", m) if m else None
+
+    def _trigger(r):
+        return ("trigger_type", r.get("trigger_type") or "scheduled")
+
+    found: list[dict] = []
+    for key_fn in (_conv_bucket, _regime, _model, _trigger):
+        found.extend(_segment_stats(rows, key_fn))
+    return found
+
+
+def _describe_segment(key: tuple) -> str:
+    dim = key[0]
+    if dim == "conviction":
+        _, h, bucket = key
+        return f"{bucket}-conviction ({'>=7' if bucket == 'high' else '<7'}) calls at {h}d horizon"
+    if dim == "weight_regime":
+        _, h, regime = key
+        return f"{regime} regime at {h}d horizon"
+    if dim == "model":
+        _, model = key
+        return f"model={model}"
+    if dim == "trigger_type":
+        _, trig = key
+        return f"trigger_type={trig}"
+    return str(key)
+
+
+def _segment_key_str(key: tuple) -> str:
+    return "|".join(str(x) for x in key)
+
+
+def _promote_recurring_segments(current_flags: list[dict]) -> list[dict]:
+    """
+    Promote a segment to a "candidate guardrail" once it has shown up (by
+    key) in >= RECURRENCE_MIN of the last RECURRENCE_LOOKBACK weekly
+    reports, this week included.
+    """
+    with _db() as c:
+        rows = c.execute(
+            """SELECT patterns_identified FROM validation_reports
+               WHERE period = 'weekly'
+               ORDER BY report_date DESC LIMIT ?""",
+            [RECURRENCE_LOOKBACK - 1],
+        ).fetchall()
+
+    from collections import defaultdict
+    occurrences: dict[str, list[dict]] = defaultdict(list)
+    for flag in current_flags:
+        occurrences[flag["key"]].append(flag)
+
+    for row in rows:
+        try:
+            prior = json.loads(row["patterns_identified"] or "{}")
+        except Exception:
+            continue
+        for flag in prior.get("segment_flags", []):
+            if flag.get("key"):
+                occurrences[flag["key"]].append(flag)
+
+    candidates = []
+    for key, flags in occurrences.items():
+        weeks_seen = len(flags)
+        if weeks_seen >= RECURRENCE_MIN:
+            latest = flags[0]
+            candidates.append({
+                "key": key,
+                "description": latest.get("description", key),
+                "weeks_seen": weeks_seen,
+                "latest_n": latest.get("n"),
+                "latest_accuracy": latest.get("accuracy"),
+                "latest_baseline_accuracy": latest.get("baseline_accuracy"),
+                "latest_gap": latest.get("gap"),
+            })
+    candidates.sort(key=lambda c: c["weeks_seen"], reverse=True)
+    return candidates
+
 
 def weekly_pattern_analysis() -> dict:
     """
-    Layer 3 — One LLM call per week summarising failure patterns in wrong predictions.
+    Layer 3 — statistically mine failure segments from the past week's
+    evaluated predictions, gate recurring ones into candidate_guardrails,
+    and use one LLM call to narrate (not discover) the confirmed segments.
     """
     from portfolio_agent.tools.prediction_db import insert_validation_report
 
@@ -454,23 +644,48 @@ def weekly_pattern_analysis() -> dict:
 
     with _db() as c:
         rows = c.execute(
-            """SELECT ticker, horizon_days, predicted_direction,
+            """SELECT ticker, horizon_days, predicted_direction, actual_direction,
                       predicted_return_low, predicted_return_high,
-                      actual_return, outcome, conviction_score,
-                      risk_segment, evaluated_at, error_magnitude
+                      actual_return, outcome, conviction_score, weight_regime,
+                      model_name, trigger_type, evaluated_at, error_magnitude
                FROM predictions
                WHERE evaluation_status = 'evaluated'
                  AND evaluated_at >= ?
-                 AND outcome IN ('wrong_significant', 'wrong_minor')
-               ORDER BY ABS(error_magnitude) DESC LIMIT 30""",
+                 AND horizon_days IS NOT NULL
+                 AND actual_direction IS NOT NULL""",
             [_week_ago],
         ).fetchall()
+    rows = [dict(r) for r in rows]
 
-    wrong = [dict(r) for r in rows]
-    if len(wrong) < 5:
-        return {"skipped": True, "reason": f"insufficient data ({len(wrong)} wrong predictions)"}
+    if len(rows) < 30:
+        return {"skipped": True, "reason": f"insufficient data ({len(rows)} evaluated predictions)"}
 
-    prompt = _build_postmortem_prompt(wrong)
+    segments = _mine_segment_patterns(rows)
+    segment_flags = [
+        {
+            "key": _segment_key_str(seg["key"]),
+            "description": _describe_segment(seg["key"]),
+            "n": seg["n"], "accuracy": seg["accuracy"],
+            "baseline_accuracy": seg["baseline_accuracy"],
+            "gap": seg["gap"], "p_value": seg["p_value"],
+        }
+        for seg in segments
+    ]
+    candidate_guardrails = _promote_recurring_segments(segment_flags)
+
+    wrong = [r for r in rows if r.get("outcome") in ("wrong_significant", "wrong_minor")]
+    wrong_sorted = sorted(wrong, key=lambda r: abs(r.get("error_magnitude") or 0), reverse=True)
+
+    if not segment_flags and len(wrong) < 5:
+        insert_validation_report(
+            "weekly",
+            {"segment_flags": [], "candidate_guardrails": candidate_guardrails},
+            "No statistically significant failure segments this week.",
+            {"n_evaluated": len(rows), "n_wrong": len(wrong)},
+        )
+        return {"inserted": True, "segments_found": 0}
+
+    prompt = _build_postmortem_prompt(segment_flags, wrong_sorted, candidate_guardrails)
 
     try:
         import litellm
@@ -505,37 +720,92 @@ def weekly_pattern_analysis() -> dict:
             except Exception:
                 pass
 
+        patterns_dict["segment_flags"] = segment_flags
+        patterns_dict["candidate_guardrails"] = candidate_guardrails
+
         insert_validation_report(
             "weekly",
             patterns_dict,
             llm_summary,
-            {"wrong_count": len(wrong)},
+            {"n_evaluated": len(rows), "n_wrong": len(wrong), "segments_found": len(segment_flags)},
         )
-        return {"inserted": True, "wrong_analyzed": len(wrong)}
+        return {"inserted": True, "segments_found": len(segment_flags), "wrong_analyzed": len(wrong)}
 
     except Exception as exc:
         return {"error": str(exc)}
 
 
-def _build_postmortem_prompt(wrong: list[dict]) -> str:
-    lines = ["Wrong predictions this week:"]
-    for p in wrong[:20]:
-        lines.append(
+def _build_postmortem_prompt(
+    segment_flags: list[dict],
+    wrong_examples: list[dict],
+    candidate_guardrails: list[dict],
+) -> str:
+    seg_lines = [f"Statistically confirmed failure segments this week "
+                 f"(n>={_SEGMENT_MIN_N}, |gap|>={_SEGMENT_MIN_GAP*100:.0f}pts, p<{_SEGMENT_MAX_P}):"]
+    if segment_flags:
+        for s in segment_flags:
+            seg_lines.append(
+                f"  {s['description']}: accuracy={s['accuracy']*100:.0f}% vs "
+                f"baseline={s['baseline_accuracy']*100:.0f}% (n={s['n']}, p={s['p_value']})"
+            )
+    else:
+        seg_lines.append("  (none cleared the statistical bar this week)")
+
+    recur_lines = ["Segments confirmed recurring across multiple weekly reports "
+                   "(candidates for a hard-coded guardrail, like apex.py's existing "
+                   "no-news-bullish and bounce-thesis conviction caps):"]
+    if candidate_guardrails:
+        for c in candidate_guardrails:
+            recur_lines.append(f"  {c['description']} — seen in {c['weeks_seen']} of the last reports")
+    else:
+        recur_lines.append("  (none yet)")
+
+    example_lines = ["Worst individual misses this week (supporting detail only — "
+                      "do not invent new patterns from these alone):"]
+    for p in wrong_examples[:15]:
+        example_lines.append(
             f"  {p.get('ticker')} {p.get('horizon_days')}d | predicted {p.get('predicted_direction')} "
             f"[{p.get('predicted_return_low','?')}% to {p.get('predicted_return_high','?')}%] | "
             f"actual {(p.get('actual_return') or 0)*100:.1f}% | "
-            f"conviction={p.get('conviction_score','?')} | segment={p.get('risk_segment','?')}"
+            f"conviction={p.get('conviction_score','?')} | regime={p.get('weight_regime','?')}"
         )
+
     return (
         "You are a systematic trading analyst reviewing prediction errors.\n\n"
-        + "\n".join(lines)
-        + "\n\nIdentify 2-4 patterns in these failures. "
+        + "\n".join(seg_lines) + "\n\n"
+        + "\n".join(recur_lines) + "\n\n"
+        + "\n".join(example_lines)
+        + "\n\nWrite a narrative ONLY about the statistically confirmed segments above — "
+          "do not pattern-match new theories off the individual examples, they're context only. "
         "Return a JSON object with:\n"
-        '  "patterns": [list of pattern strings],\n'
+        '  "patterns": [one string per confirmed segment above, plain-English],\n'
         '  "summary": "2-3 sentence overall narrative",\n'
-        '  "suggestions": [list of improvement suggestions]\n\n'
+        '  "suggestions": [improvement suggestions, prioritizing any recurring segment]\n\n'
         "JSON only, no prose outside the block."
     )
+
+
+def get_active_failure_patterns(limit: int = 5) -> list[dict]:
+    """
+    Return the most recently computed set of recurring, statistically-
+    confirmed failure segments (candidate_guardrails from the latest weekly
+    report) for injection into get_full_analysis_context() — so every future
+    APEX call sees known system-wide biases, not just this ticker's own
+    prediction_history.
+    """
+    with _db() as c:
+        row = c.execute(
+            """SELECT patterns_identified FROM validation_reports
+               WHERE period = 'weekly'
+               ORDER BY report_date DESC LIMIT 1""",
+        ).fetchone()
+    if not row:
+        return []
+    try:
+        parsed = json.loads(row["patterns_identified"] or "{}")
+    except Exception:
+        return []
+    return (parsed.get("candidate_guardrails") or [])[:limit]
 
 
 # ── Dashboard read helpers ─────────────────────────────────────────────────────
