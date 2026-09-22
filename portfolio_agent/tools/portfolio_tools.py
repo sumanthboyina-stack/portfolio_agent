@@ -106,23 +106,10 @@ def check_restricted_list(ticker: str) -> str:
     Returns:
         JSON string with is_restricted (bool) and reason (string or null).
     """
-    path = _CONFIG_DIR / "restricted_list.yaml"
-    if not path.exists():
-        return json.dumps({"ticker": ticker.upper(), "is_restricted": False, "reason": None})
+    from portfolio_agent.tools.restricted_list_db import is_restricted
 
-    with open(path) as f:
-        data = yaml.safe_load(f) or {}
-
-    restricted: list[dict] = data.get("restricted", [])
     ticker_upper = ticker.upper()
-    for entry in restricted:
-        if entry.get("ticker", "").upper() == ticker_upper:
-            return json.dumps({
-                "ticker": ticker_upper,
-                "is_restricted": True,
-                "reason": entry.get("reason", "No reason specified"),
-            })
-
-    return json.dumps({"ticker": ticker_upper, "is_restricted": False, "reason": None})
+    restricted, reason = is_restricted(ticker_upper)
+    return json.dumps({"ticker": ticker_upper, "is_restricted": restricted, "reason": reason})
 
 

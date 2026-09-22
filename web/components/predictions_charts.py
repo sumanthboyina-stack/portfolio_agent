@@ -19,7 +19,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, PURPLE,
+    SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, PURPLE, icon_html,
 )
 from web.data.predictions import _fetch_price_chart_data
 
@@ -71,9 +71,9 @@ def _prob_strip_html(row: dict, height: int = 14) -> str:
         f'<div style="display:flex;border-radius:6px;overflow:hidden">{segments}</div>'
         f'<div style="display:flex;margin-top:1px">{label_cells}</div>'
         f'<div style="display:flex;gap:8px;margin-top:4px">'
-        f'<span style="font-size:0.65rem;color:#059669">📈 {p_up:.2f}% bullish</span>'
-        f'<span style="font-size:0.65rem;color:#94A3B8">➡ {p_flat:.2f}% flat</span>'
-        f'<span style="font-size:0.65rem;color:#EF4444">📉 {p_down:.2f}% bearish</span>'
+        f'<span style="font-size:0.65rem;color:#059669">{icon_html("trending_up", 12)} {p_up:.2f}% bullish</span>'
+        f'<span style="font-size:0.65rem;color:#94A3B8">{icon_html("trending_flat", 12)} {p_flat:.2f}% flat</span>'
+        f'<span style="font-size:0.65rem;color:#EF4444">{icon_html("trending_down", 12)} {p_down:.2f}% bearish</span>'
         f'</div>'
         f'</div>'
     )
@@ -113,7 +113,9 @@ def _plot_prob_full(row: dict) -> go.Figure:
         yaxis=dict(showgrid=False, tickfont=dict(size=11, color="#334155")),
         bargap=0.3,
         title=dict(
-            text=f"📈 <b>{p_up:.2f}%</b> bullish   ➡ <b>{row.get('p_flat') or 0:.2f}%</b> flat   📉 <b>{p_down:.2f}%</b> bearish",
+            # Plotly's title renderer only supports a small HTML subset (no custom icon
+            # font classes), so this stays plain text rather than using icon_html().
+            text=f"Bullish <b>{p_up:.2f}%</b>   ·   Flat <b>{row.get('p_flat') or 0:.2f}%</b>   ·   Bearish <b>{p_down:.2f}%</b>",
             font=dict(size=12, color="#475569"),
             x=0, xanchor="left",
         ),

@@ -94,8 +94,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def upsert_holdings(holdings: list[dict], broker: str, as_of_date: str) -> dict:
+    """
+    Replace holdings for just the (broker, account_number) pairs present in
+    *holdings* — accounts at this broker not present in this upload are left
+    untouched. A blank/missing account_number is its own bucket (rows with no
+    account number get replaced together), same as before this was scoped.
+    """
+    account_numbers = {(h.get("account_number") or "").strip() for h in holdings}
     with _db() as conn:
-        conn.execute("DELETE FROM holdings WHERE broker = ?", [broker])
+        for acct_num in account_numbers:
+            conn.execute(
+                "DELETE FROM holdings WHERE broker = ? AND COALESCE(account_number, '') = ?",
+                [broker, acct_num],
+            )
         rows_to_insert = []
         for h in holdings:
             rows_to_insert.append((
@@ -107,7 +118,7 @@ def upsert_holdings(holdings: list[dict], broker: str, as_of_date: str) -> dict:
                 h.get("current_price"),
                 h.get("current_value"),
                 h.get("account_name"),
-                h.get("account_number"),
+                (h.get("account_number") or "").strip(),
                 h.get("account_type"),
                 broker,
                 h.get("sector", ""),
@@ -193,9 +204,21 @@ def get_holdings_summary() -> dict:
 
 
 def delete_broker_holdings(broker: str) -> int:
+    """Remove every holding from this broker, across all accounts."""
     with _db() as conn:
         cursor = conn.execute(
             "DELETE FROM holdings WHERE broker = ?", [broker]
+        )
+        conn.commit()
+    return cursor.rowcount
+
+
+def delete_account_holdings(broker: str, account_number: str) -> int:
+    """Remove holdings from a single (broker, account_number) pair."""
+    with _db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM holdings WHERE broker = ? AND COALESCE(account_number, '') = ?",
+            [broker, (account_number or "").strip()],
         )
         conn.commit()
     return cursor.rowcount

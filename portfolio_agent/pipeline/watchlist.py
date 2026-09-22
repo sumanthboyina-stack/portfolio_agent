@@ -1,9 +1,10 @@
 """
-Watchlist loading helper — reads config/watchlist.yaml.
+Watchlist loading helper — reads the watchlist table in data/portfolio.db.
 
 The watchlist is manual-only: tickers are added/removed via the Watchlist
 Manager screen or the Opportunity Engine's "Add to Watchlist" button
-(web/data/watchlist.py). Nothing in the pipeline auto-promotes tickers here.
+(portfolio_agent/tools/watchlist_db.py). Nothing in the pipeline auto-promotes
+tickers here.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from portfolio_agent.log import get_logger as _get_logger
 
 def load_all_tickers(
     extra_tickers: list[str] | None,
-    watchlist_path: Path,
     portfolio_path: Path,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """
@@ -27,11 +27,9 @@ def load_all_tickers(
     """
     log = _get_logger("main")
     from portfolio_agent.tools.news_sources import get_trending_tickers
+    from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
 
-    watchlist = [
-        str(t).upper()
-        for t in (yaml.safe_load(watchlist_path.read_text()) or {}).get("tickers", [])
-    ]
+    watchlist = load_watchlist_tickers()
 
     portfolio_tickers: list[str] = []
     if portfolio_path.exists():

@@ -34,7 +34,7 @@ sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
     inject_global_css, top_nav, badge_html, rec_badge_html, score_bar_html,
-    ticker_label,
+    ticker_label, icon_html, material,
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, NEUTRAL_LIGHT,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
 )
@@ -47,7 +47,7 @@ from web.chat.orchestration import (
 
 st.set_page_config(
     page_title="APEX Chat · Financial AI",
-    page_icon="🤖",
+    page_icon=material("smart_toy"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -213,9 +213,8 @@ def _extract_tickers(text: str) -> list[str]:
 
 def _load_watchlist() -> list[str]:
     try:
-        import yaml
-        d = yaml.safe_load((_ROOT / "config" / "watchlist.yaml").read_text()) or {}
-        return [str(t).upper() for t in d.get("tickers", [])]
+        from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
+        return load_watchlist_tickers()
     except Exception:
         return []
 
@@ -297,15 +296,17 @@ def _load_chat(session_id: str):
 with st.sidebar:
     st.markdown(
         '<div style="padding:10px 0 16px">'
-        '<h2 style="margin:0;font-size:1rem;font-weight:700;color:#F9FAFB;'
-        'letter-spacing:-0.02em">🤖 APEX Chat</h2>'
+        f'<h2 style="margin:0;font-size:1rem;font-weight:700;color:#F9FAFB;'
+        f'letter-spacing:-0.02em;display:flex;align-items:center;gap:6px">'
+        f'{icon_html("smart_toy", 18)} APEX Chat</h2>'
         '<p style="margin:4px 0 0;font-size:0.72rem;color:#4B5563;font-weight:500">'
         'Financial AI · stocks · markets · news</p>'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    if st.button("✏️  New conversation", type="primary", use_container_width=True):
+    if st.button("New conversation", type="primary", use_container_width=True,
+                 icon=material("edit")):
         _new_chat()
         st.rerun()
 
@@ -344,8 +345,9 @@ with st.sidebar:
                 ):
                     _load_chat(s["id"])
                     st.rerun()
-            with del_col:
-                if st.button("🗑", key=f"del_{s['id']}", help="Delete this conversation"):
+            with del_col, st.container(key=f"chat_del_wrap_{s['id']}"):
+                if st.button("", key=f"del_{s['id']}", help="Delete this conversation",
+                             icon=material("delete")):
                     delete_session(s["id"])
                     if st.session_state.get("session_id") == s["id"]:
                         _new_chat()
@@ -367,7 +369,7 @@ if not st.session_state.session_id and not st.session_state.messages:
         '<div style="text-align:center;padding:52px 20px 16px">'
         '<div style="display:inline-flex;align-items:center;justify-content:center;'
         'width:64px;height:64px;background:#EFF6FF;border-radius:18px;'
-        'font-size:2rem;margin-bottom:16px">🤖</div>'
+        f'margin-bottom:16px">{icon_html("smart_toy", 32, color="#2563EB")}</div>'
         '<h1 style="font-size:2rem;font-weight:800;color:#111827;margin:0;'
         'letter-spacing:-0.04em">APEX Chat</h1>'
         '<p style="font-size:0.95rem;color:#6B7280;margin:8px 0 0;font-weight:400;'
@@ -378,7 +380,7 @@ if not st.session_state.session_id and not st.session_state.messages:
         '<div style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:14px;'
         'padding:20px 22px;border-top:3px solid #2563EB;'
         'box-shadow:0 1px 3px rgba(0,0,0,0.04)">'
-        '<div style="font-size:1.15rem;margin-bottom:8px">📊</div>'
+        f'<div style="margin-bottom:8px">{icon_html("bar_chart", 20, color="#2563EB")}</div>'
         '<div style="font-size:0.88rem;font-weight:700;color:#111827;margin-bottom:6px">'
         'Stock Analysis</div>'
         '<div style="font-size:0.79rem;color:#6B7280;line-height:1.65">'
@@ -391,7 +393,7 @@ if not st.session_state.session_id and not st.session_state.messages:
         '<div style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:14px;'
         'padding:20px 22px;border-top:3px solid #059669;'
         'box-shadow:0 1px 3px rgba(0,0,0,0.04)">'
-        '<div style="font-size:1.15rem;margin-bottom:8px">💬</div>'
+        f'<div style="margin-bottom:8px">{icon_html("chat_bubble", 20, color="#059669")}</div>'
         '<div style="font-size:0.88rem;font-weight:700;color:#111827;margin-bottom:6px">'
         'Financial Chat</div>'
         '<div style="font-size:0.79rem;color:#6B7280;line-height:1.65">'
@@ -404,26 +406,26 @@ if not st.session_state.session_id and not st.session_state.messages:
         '</div>'
         '<div style="max-width:760px;margin:0 auto 24px;'
         'display:flex;flex-wrap:wrap;gap:7px;justify-content:center">'
-        '<span style="display:inline-flex;align-items:center;gap:5px;'
-        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
-        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
-        '📰 Market News</span>'
-        '<span style="display:inline-flex;align-items:center;gap:5px;'
-        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
-        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
-        '🌐 Economy &amp; Macro</span>'
-        '<span style="display:inline-flex;align-items:center;gap:5px;'
-        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
-        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
-        '🚀 IPOs &amp; Listings</span>'
-        '<span style="display:inline-flex;align-items:center;gap:5px;'
-        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
-        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
-        '📈 Sectors &amp; Indices</span>'
-        '<span style="display:inline-flex;align-items:center;gap:5px;'
-        'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
-        'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
-        '🔍 Web Search</span>'
+        f'<span style="display:inline-flex;align-items:center;gap:5px;'
+        f'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        f'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        f'{icon_html("newspaper", 14)} Market News</span>'
+        f'<span style="display:inline-flex;align-items:center;gap:5px;'
+        f'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        f'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        f'{icon_html("public", 14)} Economy &amp; Macro</span>'
+        f'<span style="display:inline-flex;align-items:center;gap:5px;'
+        f'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        f'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        f'{icon_html("rocket_launch", 14)} IPOs &amp; Listings</span>'
+        f'<span style="display:inline-flex;align-items:center;gap:5px;'
+        f'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        f'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        f'{icon_html("trending_up", 14)} Sectors &amp; Indices</span>'
+        f'<span style="display:inline-flex;align-items:center;gap:5px;'
+        f'background:#F9FAFB;border-radius:999px;padding:5px 13px;'
+        f'font-size:0.75rem;font-weight:600;color:#6B7280;border:1px solid #E5E7EB">'
+        f'{icon_html("search", 14)} Web Search</span>'
         '</div>'
     )
     st.markdown(_hero_html, unsafe_allow_html=True)
@@ -438,7 +440,7 @@ if not st.session_state.session_id and not st.session_state.messages:
             f'border:1px solid {DANGER}33;border-radius:12px;padding:14px 18px 4px">'
             f'<div style="font-size:0.78rem;font-weight:700;color:{DANGER};'
             f'text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">'
-            f'⚠️ {_n} item{"s" if _n != 1 else ""} need your attention</div>'
+            f'{icon_html("warning", 13, color=DANGER)} {_n} item{"s" if _n != 1 else ""} need your attention</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -468,17 +470,18 @@ if not st.session_state.session_id and not st.session_state.messages:
         unsafe_allow_html=True,
     )
     _hero_prompts = [
-        ("Analyze NVDA",                    "📊", True),
-        ("What's happening in markets?",    "📰", False),
-        ("Latest IPOs this week",           "🚀", False),
-        ("Compare MSFT vs GOOGL",           "⚖️", True),
-        ("Fed rate outlook",                "🌐", False),
-        ("How is tech sector performing?",  "📈", False),
+        ("Analyze NVDA",                    "bar_chart",     True),
+        ("What's happening in markets?",    "newspaper",     False),
+        ("Latest IPOs this week",           "rocket_launch", False),
+        ("Compare MSFT vs GOOGL",           "balance",       True),
+        ("Fed rate outlook",                "public",        False),
+        ("How is tech sector performing?",  "trending_up",   False),
     ]
     _hp_cols = st.columns(3)
     for _hi, (_hp_prompt, _hp_icon, _hp_has_ticker) in enumerate(_hero_prompts):
         with _hp_cols[_hi % 3]:
-            if st.button(f"{_hp_icon}  {_hp_prompt}", use_container_width=True, key=f"hero_p_{_hi}"):
+            if st.button(_hp_prompt, use_container_width=True, key=f"hero_p_{_hi}",
+                         icon=material(_hp_icon)):
                 if not st.session_state.session_id:
                     _new_chat()
                 st.session_state.messages.append({"role": "user", "content": _hp_prompt,
@@ -514,13 +517,14 @@ if st.session_state.get("ticker_confirm"):
         )
         _c1, _c2, _c3 = st.columns([1, 1, 2])
         with _c1:
-            if st.button(f"✅ Yes, analyze {_tc['ticker']}", type="primary", key="tc_yes"):
+            if st.button(f"Yes, analyze {_tc['ticker']}", type="primary", key="tc_yes",
+                         icon=material("check_circle")):
                 st.session_state.current_tickers = [_tc["ticker"]]
                 st.session_state.ticker_confirm  = None
                 st.session_state.awaiting_ticker = False
                 st.rerun()
         with _c2:
-            if st.button("🔍 Different company", key="tc_no"):
+            if st.button("Different company", key="tc_no", icon=material("search")):
                 st.session_state.ticker_confirm  = None
                 st.session_state.awaiting_ticker = True
                 st.rerun()
@@ -543,7 +547,8 @@ elif st.session_state.awaiting_ticker:
                                    label_visibility="collapsed", key="ticker_text",
                                    placeholder="e.g. NVDA or Nvidia")
 
-        if st.button("▶ Analyze", type="primary", key="confirm_tickers"):
+        if st.button("Analyze", type="primary", key="confirm_tickers",
+                     icon=material("play_arrow")):
             manual_list = [t.strip() for t in manual.split(",") if t.strip()]
             # Try to resolve any company names in the manual input
             resolved = []
@@ -654,7 +659,7 @@ if _has_message and (_has_ticker or _no_ticker):
             used_label_chat = None
 
             # Tool log lives inside the collapsible status; answer is rendered below it
-            with st.status("🔧 Fetching data…", expanded=True) as chat_st:
+            with st.status("Fetching data…", expanded=True) as chat_st:
                 tool_ph_c  = st.empty()
                 tool_log_c: list[str] = []
 
@@ -668,26 +673,27 @@ if _has_message and (_has_ticker or _no_ticker):
 
                     if ev_type == "info":
                         tool_log_c.append(
-                            f'<span style="color:#3B82F6;font-size:0.8rem">ℹ {ev_val}</span>'
+                            f'<span style="color:#3B82F6;font-size:0.8rem">'
+                            f'{icon_html("info", 13)} {ev_val}</span>'
                         )
                     elif ev_type in ("tool", "result", "warn"):
-                        icon  = {"tool": "▶", "result": "◀", "warn": "⚠"}[ev_type]
+                        icon_name = {"tool": "play_arrow", "result": "check", "warn": "warning"}[ev_type]
                         color = {"tool": "#0F172A", "result": "#64748B", "warn": "#F59E0B"}[ev_type]
                         tool_log_c.append(
                             f'<span style="color:{color};font-size:0.78rem">'
-                            f'{icon} {ev_val[:220]}</span>'
+                            f'{icon_html(icon_name, 13, color=color)} {ev_val[:220]}</span>'
                         )
                     elif ev_type == "text":
                         chat_text += ev_val   # collected; rendered below after status closes
                     elif ev_type == "model_used":
                         used_label_chat = ev_val[0]
                     elif ev_type == "error":
-                        chat_st.update(label=f"❌ {ev_val}", state="error")
+                        chat_st.update(label=f"Error: {ev_val}", state="error")
                         break
                     elif ev_type == "done":
                         label_txt = f" ({used_label_chat})" if used_label_chat else ""
                         chat_st.update(
-                            label=f"✅ Tools done{label_txt}", state="complete",
+                            label=f"Tools done{label_txt}", state="complete",
                             expanded=False,   # collapse after done -- answer shows below
                         )
                         break
@@ -730,7 +736,7 @@ if _has_message and (_has_ticker or _no_ticker):
             # Fill gaps via live agents
             if plan["gaps"]:
                 with st.status(
-                    f"⚡ Running live agents for: {', '.join(plan['gaps'])}…",
+                    f"Running live agents for: {', '.join(plan['gaps'])}…",
                     expanded=True,
                 ) as gap_st:
                     from portfolio_agent.tools.reasoning_tools import fill_data_gaps
@@ -738,22 +744,27 @@ if _has_message and (_has_ticker or _no_ticker):
                     try:
                         _, agents_run = fill_data_gaps(ticker, {"data_gaps": plan["gaps"]})
                         for a in agents_run:
-                            st.write(f"✅ {a.title()} agent completed")
-                        gap_st.update(label="✅ Data gaps filled", state="complete")
+                            st.write(f"{icon_html('check_circle', 14, color=SUCCESS)} {a.title()} agent completed",
+                                     unsafe_allow_html=True)
+                        gap_st.update(label="Data gaps filled", state="complete")
                     except CreditExhaustedError as exc:
-                        gap_st.update(label="⚠️ Could not fill all data gaps", state="error")
+                        gap_st.update(label="Could not fill all data gaps", state="error")
                         st.warning(
                             f"**All models exhausted** -- could not fetch live data for "
                             f"`{', '.join(plan['gaps'])}`. "
                             f"APEX will reason with whatever is already in the database.\n\n"
                             f"_{str(exc).split('Last error:')[0].strip()}_",
-                            icon="⚠️",
+                            icon=material("warning"),
                         )
                     except Exception as exc:
-                        gap_st.update(label="⚠️ Data gap fill failed", state="error")
-                        st.warning(f"Live agent error (continuing with cached data): {exc}", icon="⚠️")
+                        gap_st.update(label="Data gap fill failed", state="error")
+                        st.warning(f"Live agent error (continuing with cached data): {exc}",
+                                   icon=material("warning"))
 
-            st.markdown(f"#### 🧠 Panel Deliberation -- `{ticker_label(ticker)}`")
+            st.markdown(
+                f"#### {icon_html('psychology', 18)} Panel Deliberation -- `{ticker_label(ticker)}`",
+                unsafe_allow_html=True,
+            )
 
             # ── Stream execution ──────────────────────────────────────────────
             q: Queue = Queue()
@@ -765,7 +776,7 @@ if _has_message and (_has_ticker or _no_ticker):
             used_model_label    = None
             used_model_provider = None
 
-            with st.status("🔄 Analysts deliberating…", expanded=True) as run_st:
+            with st.status("Analysts deliberating…", expanded=True) as run_st:
                 tool_ph = st.empty()
                 text_ph = st.empty()
                 tool_log: list[str] = []
@@ -779,7 +790,10 @@ if _has_message and (_has_ticker or _no_ticker):
                         continue
 
                     if ev_type == "info":
-                        tool_log.append(f'<span style="color:#3B82F6;font-size:0.8rem">ℹ {ev_val}</span>')
+                        tool_log.append(
+                            f'<span style="color:#3B82F6;font-size:0.8rem">'
+                            f'{icon_html("info", 13)} {ev_val}</span>'
+                        )
                         tool_ph.markdown(
                             f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;'
                             f'border-radius:8px;padding:10px 14px;font-family:monospace">'
@@ -788,7 +802,10 @@ if _has_message and (_has_ticker or _no_ticker):
                         )
 
                     elif ev_type == "warn":
-                        tool_log.append(f'<span style="color:#F59E0B;font-size:0.8rem">⚠ {ev_val}</span>')
+                        tool_log.append(
+                            f'<span style="color:#F59E0B;font-size:0.8rem">'
+                            f'{icon_html("warning", 13, color="#F59E0B")} {ev_val}</span>'
+                        )
                         tool_ph.markdown(
                             f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;'
                             f'border-radius:8px;padding:10px 14px;font-family:monospace">'
@@ -797,7 +814,10 @@ if _has_message and (_has_ticker or _no_ticker):
                         )
 
                     elif ev_type == "tool":
-                        tool_log.append(f'<code style="font-size:0.8rem">▶ {ev_val}</code>')
+                        tool_log.append(
+                            f'<code style="font-size:0.8rem">'
+                            f'{icon_html("play_arrow", 13)} {ev_val}</code>'
+                        )
                         tool_ph.markdown(
                             f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;'
                             f'border-radius:8px;padding:10px 14px;font-family:monospace">'
@@ -806,7 +826,10 @@ if _has_message and (_has_ticker or _no_ticker):
                         )
 
                     elif ev_type == "result":
-                        tool_log.append(f'<span style="color:#64748B;font-size:0.78rem">◀ {ev_val[:200]}</span>')
+                        tool_log.append(
+                            f'<span style="color:#64748B;font-size:0.78rem">'
+                            f'{icon_html("check", 13, color="#64748B")} {ev_val[:200]}</span>'
+                        )
                         tool_ph.markdown(
                             f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;'
                             f'border-radius:8px;padding:10px 14px;font-family:monospace">'
@@ -822,14 +845,14 @@ if _has_message and (_has_ticker or _no_ticker):
                         used_model_label, used_model_provider = ev_val
 
                     elif ev_type == "error":
-                        run_st.update(label=f"❌ Error: {ev_val}", state="error")
+                        run_st.update(label=f"Error: {ev_val}", state="error")
                         st.error(ev_val)
                         break
 
                     elif ev_type == "done":
                         raw_output = ev_val
                         label_txt = f" ({used_model_label})" if used_model_label else ""
-                        run_st.update(label=f"✅ Deliberation complete{label_txt}", state="complete")
+                        run_st.update(label=f"Deliberation complete{label_txt}", state="complete")
                         break
 
             elapsed = time.time() - start
@@ -917,9 +940,10 @@ if _has_message and (_has_ticker or _no_ticker):
                 if save_res and save_res.get("saved"):
                     _hz_label = f"{_saved_h_count} horizon{'s' if _saved_h_count != 1 else ''}"
                     st.caption(
-                        f"💾 Prediction saved ({_hz_label})"
+                        f"{icon_html('save', 12)} Prediction saved ({_hz_label})"
                         + (f" · changed from **{save_res['previous']}**"
-                           if save_res.get("changed") else "")
+                           if save_res.get("changed") else ""),
+                        unsafe_allow_html=True,
                     )
 
                 # Update session metadata

@@ -16,6 +16,11 @@ Contains:
   - build_logloss_histogram          : distribution of log-loss values
   - build_drift_accuracy_chart       : 5-day rolling accuracy over time
   - build_volume_by_horizon_chart    : prediction volume stacked by horizon
+  - build_outcome_breakdown_chart    : outcome bucket counts, green->red
+  - build_returns_by_recommendation_chart : avg realized return per recommendation
+  - build_signal_equity_curve_chart  : cumulative "followed the BUY calls" vs SPY
+  - build_score_vs_returns_chart     : top vs bottom quintile return per score system
+  - build_horizon_reliability_chart  : simplified accuracy-by-horizon-only view
 """
 
 from __future__ import annotations
@@ -42,11 +47,11 @@ _METRIC_CFG = {
         fmt=lambda v: f"{v*100:.2f}%",
         defn="% of predictions where the model's UP / DOWN / FLAT direction matched the actual market move.",
         tiers=[
-            (0.75, "#059669", "🌟 Exceptional  (≥ 75%)"),
-            (0.65, "#22C55E", "🟢 Strong skill  (65 – 75%)"),
-            (0.55, "#EAB308", "🟡 Mild signal   (55 – 65%)"),
-            (0.50, "#F97316", "🟠 Random        (50 – 55%)"),
-            (0.00, "#EF4444", "🔴 Below random  (< 50%)"),
+            (0.75, "#059669", "Exceptional  (≥ 75%)"),
+            (0.65, "#22C55E", "Strong skill  (65 – 75%)"),
+            (0.55, "#EAB308", "Mild signal   (55 – 65%)"),
+            (0.50, "#F97316", "Random        (50 – 55%)"),
+            (0.00, "#EF4444", "Below random  (< 50%)"),
         ],
         ref=0.5, ref_label="50% random baseline",
     ),
@@ -56,11 +61,11 @@ _METRIC_CFG = {
         fmt=lambda v: f"{v*100:.2f}%",
         defn="% of predictions where the actual return landed inside the model's predicted return range [low, high].",
         tiers=[
-            (0.80, "#059669", "🌟 Excellent calibration  (≥ 80%)"),
-            (0.65, "#22C55E", "🟢 Well calibrated        (65 – 80%)"),
-            (0.50, "#EAB308", "🟡 Acceptable             (50 – 65%)"),
-            (0.30, "#F97316", "🟠 Narrow / overconfident (30 – 50%)"),
-            (0.00, "#EF4444", "🔴 Poorly calibrated      (< 30%)"),
+            (0.80, "#059669", "Excellent calibration  (≥ 80%)"),
+            (0.65, "#22C55E", "Well calibrated        (65 – 80%)"),
+            (0.50, "#EAB308", "Acceptable             (50 – 65%)"),
+            (0.30, "#F97316", "Narrow / overconfident (30 – 50%)"),
+            (0.00, "#EF4444", "Poorly calibrated      (< 30%)"),
         ],
         ref=None, ref_label="",
     ),
@@ -70,11 +75,11 @@ _METRIC_CFG = {
         fmt=lambda v: f"{v*100:+.2f}%",
         defn="Average return above / below the S&P 500 benchmark over the prediction horizon. Positive = alpha.",
         tiers=[
-            (0.03,  "#059669", "🌟 Strong alpha      (> +3%)"),
-            (0.01,  "#22C55E", "🟢 Positive alpha    (+1 – +3%)"),
-            (0.00,  "#EAB308", "🟡 Marginal          (0 – +1%)"),
-            (-0.02, "#F97316", "🟠 Underperforming   (−2 – 0%)"),
-            (-99,   "#EF4444", "🔴 Significant drag  (< −2%)"),
+            (0.03,  "#059669", "Strong alpha      (> +3%)"),
+            (0.01,  "#22C55E", "Positive alpha    (+1 – +3%)"),
+            (0.00,  "#EAB308", "Marginal          (0 – +1%)"),
+            (-0.02, "#F97316", "Underperforming   (−2 – 0%)"),
+            (-99,   "#EF4444", "Significant drag  (< −2%)"),
         ],
         ref=0.0, ref_label="0% benchmark neutral",
     ),
@@ -84,11 +89,11 @@ _METRIC_CFG = {
         fmt=lambda v: f"{v*100:.2f}%",
         defn="Directional accuracy for predictions with conviction score ≥ 7/10. High-conviction calls should outperform average.",
         tiers=[
-            (0.75, "#059669", "🌟 Exceptional  (≥ 75%)"),
-            (0.65, "#22C55E", "🟢 Strong skill  (65 – 75%)"),
-            (0.58, "#EAB308", "🟡 Mild edge     (58 – 65%)"),
-            (0.50, "#F97316", "🟠 No edge       (50 – 58%)"),
-            (0.00, "#EF4444", "🔴 Overconfident (< 50%)"),
+            (0.75, "#059669", "Exceptional  (≥ 75%)"),
+            (0.65, "#22C55E", "Strong skill  (65 – 75%)"),
+            (0.58, "#EAB308", "Mild edge     (58 – 65%)"),
+            (0.50, "#F97316", "No edge       (50 – 58%)"),
+            (0.00, "#EF4444", "Overconfident (< 50%)"),
         ],
         ref=0.5, ref_label="50% random baseline",
     ),
@@ -98,11 +103,11 @@ _METRIC_CFG = {
         fmt=lambda v: f"{v*100:.2f}%",
         defn="Directional accuracy for predictions with conviction score < 7/10. Low-conviction should be closer to random.",
         tiers=[
-            (0.70, "#059669", "🌟 Exceptional  (≥ 70%)"),
-            (0.60, "#22C55E", "🟢 Skill        (60 – 70%)"),
-            (0.55, "#EAB308", "🟡 Mild signal  (55 – 60%)"),
-            (0.50, "#F97316", "🟠 Random       (50 – 55%)"),
-            (0.00, "#EF4444", "🔴 Below random (< 50%)"),
+            (0.70, "#059669", "Exceptional  (≥ 70%)"),
+            (0.60, "#22C55E", "Skill        (60 – 70%)"),
+            (0.55, "#EAB308", "Mild signal  (55 – 60%)"),
+            (0.50, "#F97316", "Random       (50 – 55%)"),
+            (0.00, "#EF4444", "Below random (< 50%)"),
         ],
         ref=0.5, ref_label="50% random baseline",
     ),
@@ -112,11 +117,11 @@ _METRIC_CFG = {
         fmt=lambda v: f"{v:.2f}",
         defn="Mean squared error of probability forecasts across 5 return buckets (▼▼ / ▼ / → / ▲ / ▲▲). Perfect = 0.0 · Coin flip = 0.25.",
         tiers=[
-            (0.15, "#059669", "🌟 Exceptional     (< 0.15)"),
-            (0.18, "#22C55E", "🟢 Genuine skill   (0.15 – 0.18)"),
-            (0.20, "#EAB308", "🟡 Mild edge       (0.18 – 0.20)"),
-            (0.25, "#F97316", "🟠 Near coin flip  (0.20 – 0.25)"),
-            (99,   "#EF4444", "🔴 Actively bad    (> 0.25)"),
+            (0.15, "#059669", "Exceptional     (< 0.15)"),
+            (0.18, "#22C55E", "Genuine skill   (0.15 – 0.18)"),
+            (0.20, "#EAB308", "Mild edge       (0.18 – 0.20)"),
+            (0.25, "#F97316", "Near coin flip  (0.20 – 0.25)"),
+            (99,   "#EF4444", "Actively bad    (> 0.25)"),
         ],
         ref=0.25, ref_label="0.25 coin-flip ceiling",
     ),
@@ -126,11 +131,11 @@ _METRIC_CFG = {
         fmt=lambda v: f"{v:.2f}",
         defn="Cross-entropy loss. Penalises overconfident wrong predictions more than Brier. Perfect = 0.0 · Coin flip ≈ 0.693.",
         tiers=[
-            (0.30,  "#059669", "🌟 Excellent    (< 0.30)"),
-            (0.50,  "#22C55E", "🟢 Good signal  (0.30 – 0.50)"),
-            (0.693, "#EAB308", "🟡 Marginal     (0.50 – 0.693)"),
-            (1.0,   "#F97316", "🟠 Coin-flip    (0.693 – 1.0)"),
-            (99,    "#EF4444", "🔴 Overconfident / wrong  (> 1.0)"),
+            (0.30,  "#059669", "Excellent    (< 0.30)"),
+            (0.50,  "#22C55E", "Good signal  (0.30 – 0.50)"),
+            (0.693, "#EAB308", "Marginal     (0.50 – 0.693)"),
+            (1.0,   "#F97316", "Coin-flip    (0.693 – 1.0)"),
+            (99,    "#EF4444", "Overconfident / wrong  (> 1.0)"),
         ],
         ref=0.693, ref_label="0.693 coin-flip baseline",
     ),
@@ -721,5 +726,162 @@ def build_volume_by_horizon_chart(vol_data: list[dict]) -> go.Figure:
         barmode="stack",
         xaxis_title="Date", yaxis_title="Predictions",
         height=350, margin=dict(t=20, b=40),
+    )
+    return fig
+
+
+# ── User-facing "did this actually work" charts ───────────────────────────────
+
+OUTCOME_LABELS = {
+    "strong_correct":        "Strong Correct",
+    "directionally_correct": "Directionally Correct",
+    "flat_correct":          "Flat Correct",
+    "wrong_minor":           "Wrong (Minor)",
+    "wrong_significant":     "Wrong (Significant)",
+}
+OUTCOME_COLORS = {
+    "strong_correct":        "#059669",
+    "directionally_correct": "#22C55E",
+    "flat_correct":          "#94A3B8",
+    "wrong_minor":           "#F59E0B",
+    "wrong_significant":     "#EF4444",
+}
+RECOMMENDATION_COLORS = {
+    "STRONG_BUY":  "#059669",
+    "BUY":         "#22C55E",
+    "HOLD":        "#94A3B8",
+    "SELL":        "#F59E0B",
+    "STRONG_SELL": "#EF4444",
+}
+
+
+def build_outcome_breakdown_chart(breakdown: list[dict]) -> go.Figure:
+    """Bar of evaluated-prediction counts per outcome bucket, green (strong_correct) to red (wrong_significant)."""
+    labels = [OUTCOME_LABELS[b["outcome"]] for b in breakdown]
+    counts = [b["count"] for b in breakdown]
+    colors = [OUTCOME_COLORS[b["outcome"]] for b in breakdown]
+    total = sum(counts) or 1
+
+    fig = go.Figure(go.Bar(
+        x=labels, y=counts,
+        marker_color=colors,
+        text=[f"{c} ({c/total*100:.0f}%)" if c else "0" for c in counts],
+        textposition="outside",
+        hovertemplate="%{x}<br>%{y} predictions<extra></extra>",
+    ))
+    fig.update_layout(
+        height=320,
+        yaxis=dict(title="Predictions", gridcolor="#F1F5F9"),
+        margin=dict(t=30, b=40, l=50, r=20),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    return fig
+
+
+def build_returns_by_recommendation_chart(data: list[dict]) -> go.Figure:
+    """Bar of average realized return per recommendation bucket — 'did following this call actually work.'"""
+    labels = [d["recommendation"].replace("_", " ").title() for d in data]
+    vals   = [d["avg_return"] * 100 if d["avg_return"] is not None else 0 for d in data]
+    colors = [RECOMMENDATION_COLORS.get(d["recommendation"], "#94A3B8") for d in data]
+    texts  = [
+        f"{d['avg_return']*100:+.2f}% (n={d['n']})" if d["avg_return"] is not None else "no data"
+        for d in data
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=labels, y=vals,
+        marker_color=colors,
+        text=texts, textposition="outside",
+        hovertemplate="%{x}<br>Avg realized return: %{y:.2f}%<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_color="#64748B", line_width=1)
+    fig.update_layout(
+        height=340,
+        yaxis=dict(title="Avg Realized Return (%)", gridcolor="#F1F5F9"),
+        margin=dict(t=30, b=40, l=50, r=20),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    return fig
+
+
+def build_signal_equity_curve_chart(curve_df: pd.DataFrame) -> go.Figure:
+    """Cumulative return from mechanically following every BUY/STRONG_BUY call vs. SPY over the same windows."""
+    fig = go.Figure()
+    hover_dates = curve_df["event_date"].dt.strftime("%Y-%m-%d")
+
+    fig.add_trace(go.Scatter(
+        x=curve_df["call_num"], y=(curve_df["strategy_cum"] - 1) * 100,
+        mode="lines", name="Following BUY / STRONG_BUY calls",
+        line=dict(color="#2563EB", width=2.5),
+        customdata=list(zip(curve_df["ticker"], hover_dates)),
+        hovertemplate="Call #%{x} — %{customdata[0]} (%{customdata[1]})<br>Cumulative: %{y:+.2f}%<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=curve_df["call_num"], y=(curve_df["benchmark_cum"] - 1) * 100,
+        mode="lines", name="SPY (same windows)",
+        line=dict(color="#94A3B8", width=2, dash="dash"),
+        hovertemplate="Call #%{x}<br>SPY cumulative: %{y:+.2f}%<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_color="#64748B", line_width=1, opacity=0.5)
+    fig.update_layout(
+        height=380,
+        xaxis=dict(title="Call # (sequenced by evaluation date)"),
+        yaxis=dict(title="Cumulative Return (%)", gridcolor="#F1F5F9"),
+        margin=dict(t=20, b=50, l=60, r=20),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=-0.2),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def build_score_vs_returns_chart(report: dict, score_labels: dict) -> go.Figure:
+    """Grouped bar: bottom-20% vs top-20% scored names' avg realized return, per scoring system."""
+    cols = [c for c in report["scores"] if not report["scores"][c].get("insufficient_data")]
+    labels = [score_labels[c] for c in cols]
+    bottom = [report["scores"][c]["bottom_quintile_avg_return_pct"] for c in cols]
+    top    = [report["scores"][c]["top_quintile_avg_return_pct"] for c in cols]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=labels, y=bottom, name="Bottom 20% scored", marker_color="#EF4444"))
+    fig.add_trace(go.Bar(x=labels, y=top, name="Top 20% scored", marker_color="#059669"))
+    fig.add_hline(y=0, line_color="#64748B", line_width=1)
+    fig.update_layout(
+        barmode="group",
+        height=380,
+        yaxis=dict(title="Avg Realized Return (%)", gridcolor="#F1F5F9"),
+        margin=dict(t=20, b=50, l=60, r=20),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=-0.2),
+    )
+    return fig
+
+
+def build_horizon_reliability_chart(by_horizon: dict, all_horizons: list, horizon_labels: dict) -> go.Figure:
+    """Simplified 'which time horizon is more reliable' bar — directional accuracy per horizon, no segment breakdown."""
+    labels = [horizon_labels.get(h, f"{h}d") for h in all_horizons]
+    accs   = [by_horizon[h].get("directional_accuracy") for h in all_horizons]
+    ns     = [by_horizon[h].get("num_predictions") or 0 for h in all_horizons]
+    colors = [
+        "#059669" if (a or 0) >= 0.55 else "#EAB308" if (a or 0) >= 0.50 else "#EF4444"
+        for a in accs
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=labels, y=[(a or 0) * 100 for a in accs],
+        marker_color=colors,
+        text=[f"{(a or 0)*100:.2f}% (n={n})" if a is not None else "no data" for a, n in zip(accs, ns)],
+        textposition="outside",
+    ))
+    fig.add_hline(y=50, line_dash="dot", line_color="#94A3B8",
+                  annotation_text="50% random baseline", annotation_font_size=10)
+    fig.update_layout(
+        height=340,
+        yaxis=dict(title="Directional Accuracy (%)", range=[0, 100], gridcolor="#F1F5F9"),
+        margin=dict(t=30, b=40, l=50, r=20),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
     )
     return fig

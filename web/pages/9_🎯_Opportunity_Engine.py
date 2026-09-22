@@ -14,10 +14,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    inject_global_css, page_header, section_title, top_nav, card,
+    inject_global_css, page_header, section_title, top_nav, card, material, icon_html,
     badge_html, ticker_label, score_color, SUCCESS, WARNING, NEUTRAL, PRIMARY, PRIMARY_LIGHT,
 )
-from web.data.watchlist import load_watchlist, add_tickers
+from web.data.watchlist import load_watchlist_tickers, add_tickers
 from portfolio_agent.tools.opportunity_engine import get_daily_opportunities, get_opportunity_history
 from portfolio_agent.tools.universe_db import (
     get_latest_signal_date, get_signals, has_any_universe_data, get_conviction_data,
@@ -41,7 +41,7 @@ def _price_change_since(ticker: str, since_date: str) -> float | None:
 
 st.set_page_config(
     page_title="Opportunity Engine — Portfolio Intelligence",
-    page_icon="🎯",
+    page_icon=material("track_changes"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -54,7 +54,7 @@ with st.sidebar:
 page_header(
     "Opportunity Engine",
     subtitle="Today's best new opportunities for your portfolio — ranked, scored, and evaluated against your current holdings",
-    icon="🎯",
+    icon="track_changes",
 )
 
 st.markdown(
@@ -79,8 +79,7 @@ def _cached_history(ticker: str) -> dict:
 
 opportunities = _cached_opportunities(10)
 
-wl_data = load_watchlist()
-existing_tickers = {str(t).upper() for t in wl_data.get("tickers", [])}
+existing_tickers = set(load_watchlist_tickers())
 at_cap = len(existing_tickers) >= 70
 
 # ── Section 1: Today's Top Opportunities (APEX-vetted BUY/WATCH) ──────────────
@@ -90,7 +89,7 @@ if not opportunities:
         "No opportunities scored yet today — the morning batch generates APEX predictions for "
         "trending/screener candidates once per trading day. Check back after the morning run, "
         "or see what's been flagged but not yet analyzed below.",
-        icon="🔍",
+        icon=material("search"),
     )
 else:
     section_title(
@@ -102,8 +101,8 @@ else:
         st.warning("Watchlist is at capacity (70) — remove tickers before promoting more.")
 
     _CALL_STYLE = {
-        "BUY":   (SUCCESS, "#F0FDF4", "🟢 BUY"),
-        "WATCH": (WARNING, "#FFFBEB", "🟡 WATCH"),
+        "BUY":   (SUCCESS, "#F0FDF4", "BUY"),
+        "WATCH": (WARNING, "#FFFBEB", "WATCH"),
     }
 
     for opp in opportunities:
@@ -132,7 +131,7 @@ else:
         if hist["times_identified"] > 0:
             hist_parts.append(
                 f'<span title="Distinct days in the trailing 30 this ticker qualified as a BUY/WATCH '
-                f'opportunity (including today).">🔁 {hist["times_identified"]}x in 30d</span>'
+                f'opportunity (including today).">{icon_html("repeat", 12)} {hist["times_identified"]}x in 30d</span>'
             )
             first_date = hist["first_identified_date"]
             if first_date and first_date != _date.today().isoformat():
@@ -180,9 +179,9 @@ else:
                     "On list" if ticker in existing_tickers else "Full",
                     key=f"oe_promote_{ticker}", disabled=True, use_container_width=True,
                 )
-            elif st.button("➕ Watchlist", key=f"oe_promote_{ticker}", use_container_width=True):
-                add_tickers(wl_data, [ticker])
-                st.success(f"✅ Added {ticker} to watchlist.")
+            elif st.button("Watchlist", icon=material("add"), key=f"oe_promote_{ticker}", use_container_width=True):
+                add_tickers([ticker])
+                st.success(f"Added {ticker} to watchlist.", icon=material("check_circle"))
                 st.rerun()
 
 st.divider()
@@ -292,7 +291,7 @@ else:
             st.info(
                 "No candidates match these filters — either nothing tripped a signal, or "
                 "everything flagged is already shown above or on your watchlist.",
-                icon="✅",
+                icon=material("check_circle"),
             )
         else:
             _TIER_DEFS = {
@@ -399,7 +398,7 @@ else:
                 with d_row_r:
                     if at_cap:
                         st.button("Full", key=f"promote_{d_ticker}", disabled=True, use_container_width=True)
-                    elif st.button("➕ Watchlist", key=f"promote_{d_ticker}", use_container_width=True):
-                        add_tickers(wl_data, [d_ticker])
-                        st.success(f"✅ Added {d_ticker} to watchlist.")
+                    elif st.button("Watchlist", icon=material("add"), key=f"promote_{d_ticker}", use_container_width=True):
+                        add_tickers([d_ticker])
+                        st.success(f"Added {d_ticker} to watchlist.", icon=material("check_circle"))
                         st.rerun()

@@ -186,29 +186,30 @@ def get_market_news(limit: int = 20) -> str:
 
 def get_sp100_news(tickers: list[str] | None = None, limit_per_ticker: int = 3) -> str:
     """
-    Return recent news for a list of tickers (defaults to watchlist.yaml).
+    Return recent news for a list of tickers (defaults to the watchlist).
 
     Fetches up to *limit_per_ticker* headlines per ticker using Yahoo Finance.
     Cap at 30 tickers per call to avoid excessive API usage.
 
     Args:
-        tickers:           List of ticker symbols; None → load from config/watchlist.yaml.
+        tickers:           List of ticker symbols; None → load from the watchlist.
         limit_per_ticker:  Headlines to return per ticker (default 3).
 
     Returns:
         JSON string with {tickers_fetched, results:{TICKER:[{title, published_at}]}}.
     """
     if tickers is None:
-        import yaml
-        for candidate in ("watchlist.yaml", "sp100.yaml"):
-            path = _CONFIG_DIR / candidate
+        from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
+        tickers = load_watchlist_tickers()
+        if not tickers:
+            import yaml
+            path = _CONFIG_DIR / "sp100.yaml"
             if path.exists():
                 with open(path) as f:
                     data = yaml.safe_load(f) or {}
                 tickers = data.get("tickers", [])
-                break
-        else:
-            tickers = []
+            else:
+                tickers = []
 
     tickers = [t.upper() for t in tickers[:30]]
     results: dict[str, list] = {}

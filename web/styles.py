@@ -30,13 +30,13 @@ TEXT_PRIMARY   = "#111827"   # Gray-900
 TEXT_SECONDARY = "#6B7280"   # Gray-500
 SIDEBAR_BG     = "#111827"   # Near-black
 
-# Recommendation colors
+# Recommendation colors — color carries the signal; labels are plain text (see #4: clean pills, not colorful cards)
 REC_STYLES: dict[str, tuple[str, str, str]] = {
-    "STRONG_BUY":  (SUCCESS,  SUCCESS_LIGHT,  "🟢 STRONG BUY"),
-    "BUY":         ("#16A34A","#F0FDF4",      "🟢 BUY"),
-    "HOLD":        (WARNING,  WARNING_LIGHT,  "🟡 HOLD"),
-    "SELL":        (DANGER,   DANGER_LIGHT,   "🔴 SELL"),
-    "STRONG_SELL": ("#B91C1C","#FEE2E2",      "🔴 STRONG SELL"),
+    "STRONG_BUY":  (SUCCESS,  SUCCESS_LIGHT,  "STRONG BUY"),
+    "BUY":         ("#16A34A","#F0FDF4",      "BUY"),
+    "HOLD":        (WARNING,  WARNING_LIGHT,  "HOLD"),
+    "SELL":        (DANGER,   DANGER_LIGHT,   "SELL"),
+    "STRONG_SELL": ("#B91C1C","#FEE2E2",      "STRONG SELL"),
 }
 PRED_COLORS: dict[str, tuple[str, str]] = {
     "BULLISH": (SUCCESS, SUCCESS_LIGHT),
@@ -89,6 +89,30 @@ def concentration_color(weight_pct: float) -> str:
     return PRIMARY
 
 
+def fmt_money(value, decimals: int = 2, signed: bool = False, dash: str = "—") -> str:
+    """The one shared dollar formatter — always $X,XXX.XX (or .XX decimals given).
+    `signed=True` adds a leading + for positive values (for gain/loss amounts)."""
+    if value is None:
+        return dash
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return dash
+    sign = "-" if v < 0 else ("+" if signed and v > 0 else "")
+    return f"{sign}${abs(v):,.{decimals}f}"
+
+
+def fmt_pct(value, decimals: int = 2, signed: bool = False, dash: str = "—") -> str:
+    """The one shared percent formatter — always X.XX% (optionally with a leading +/-)."""
+    if value is None:
+        return dash
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return dash
+    return f"{v:+.{decimals}f}%" if signed else f"{v:.{decimals}f}%"
+
+
 def freshness_color(date_str, warn_days: int = 3):
     """Return (display_text, color) for a data freshness date string."""
     from datetime import datetime as _dt
@@ -111,12 +135,41 @@ def inject_global_css() -> None:
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0,0&display=block');
 
     /* ── Reset & Base ───────────────────────────────────────── */
     html, body, [class*="css"] {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
         -webkit-font-smoothing: antialiased !important;
         -moz-osx-font-smoothing: grayscale !important;
+    }
+    /* Financial figures: digits always align in columns, never jitter */
+    html, body, [class*="css"] {
+        font-variant-numeric: tabular-nums !important;
+        font-feature-settings: "tnum" 1 !important;
+    }
+
+    /* ── Icons — Material Symbols (matches Streamlit's own :material/ icons) ── */
+    .material-symbols-rounded {
+        font-family: 'Material Symbols Rounded';
+        font-weight: normal;
+        font-style: normal;
+        line-height: 1;
+        letter-spacing: normal;
+        text-transform: none;
+        display: inline-block;
+        white-space: nowrap;
+        word-wrap: normal;
+        direction: ltr;
+        -webkit-font-smoothing: antialiased;
+        font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        vertical-align: middle;
+    }
+    /* Native Streamlit :material/ icons (buttons, page_link, alerts, expanders, tabs)
+       should read as the same restrained, monochrome icon language as our own —
+       never let them inherit alert/status colors decoratively. */
+    [data-testid="stIconMaterial"] {
+        font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20 !important;
     }
     .stApp { background: #FFFFFF !important; }
     .block-container {
@@ -271,8 +324,11 @@ def inject_global_css() -> None:
     [data-testid="stSidebar"] [data-testid="stButton"] button:hover span {
         color: #FFFFFF !important;
     }
-    /* Delete button in chat history */
-    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div:last-child [data-testid="stButton"] button {
+    /* Delete button in chat history — scoped to its own keyed container
+       (st.container(key="chat_del_wrap_...")) rather than a positional
+       :last-child guess, which used to also catch unrelated sidebar
+       button pairs (e.g. Database's Today/7-days quick-select grid). */
+    [data-testid="stSidebar"] [class*="st-key-chat_del_wrap_"] [data-testid="stButton"] button {
         background: rgba(239,68,68,0.1) !important;
         border: 1px solid rgba(239,68,68,0.25) !important;
         color: #FCA5A5 !important;
@@ -281,7 +337,7 @@ def inject_global_css() -> None:
         min-height: 0 !important;
         border-radius: 7px !important;
     }
-    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div:last-child [data-testid="stButton"] button:hover {
+    [data-testid="stSidebar"] [class*="st-key-chat_del_wrap_"] [data-testid="stButton"] button:hover {
         background: rgba(239,68,68,0.25) !important;
         border-color: rgba(239,68,68,0.5) !important;
         color: #FEE2E2 !important;
@@ -630,34 +686,42 @@ def inject_global_css() -> None:
 # ── Top navigation bar ────────────────────────────────────────────────────────
 
 _NAV_PRIMARY = [
-    ("dashboard",         "🏠", "Today",             "app.py"),
-    ("opportunity_engine", "🚀", "Opportunity Engine", "pages/9_🎯_Opportunity_Engine.py"),
-    ("predictions",       "🔮", "Predictions",       "pages/7_🔮_Predictions.py"),
-    ("portfolio",         "💼", "Portfolio",         "pages/5_💼_Portfolio.py"),
+    ("dashboard",         "home",          "Today",             "app.py"),
+    ("opportunity_engine", "rocket_launch", "Opportunity Engine", "pages/9_🎯_Opportunity_Engine.py"),
+    ("predictions",       "insights",      "Predictions",       "pages/7_🔮_Predictions.py"),
+    ("portfolio",         "work",          "Portfolio",         "pages/5_💼_Portfolio.py"),
 ]
 _NAV_SECONDARY = [
-    ("watchlist",   "📋", "Watchlist",     "pages/3_📋_Watchlist.py"),
-    ("validation",  "🎯", "Validation",    "pages/6_🎯_Validation.py"),
-    ("chat",        "🤖", "Chat",          "pages/4_🤖_Chat.py"),
-    ("valuation",   "📐", "Valuation",     "pages/10_📐_Valuation.py"),
+    ("validation",  "track_changes", "Validation",    "pages/6_🎯_Validation.py"),
+    ("chat",        "smart_toy",     "Chat",          "pages/4_🤖_Chat.py"),
+    ("valuation",   "calculate",     "Valuation",     "pages/10_📐_Valuation.py"),
 ]
 _NAV_ADMIN = [
-    ("schedule",    "🗓️", "Schedule",    "pages/2_🗓️_Schedule.py"),
-    ("database",    "📊", "Database",      "pages/1_📊_Database.py"),
+    ("schedule",    "calendar_month", "Schedule",    "pages/2_🗓️_Schedule.py"),
+    ("database",    "database",       "Database",      "pages/1_📊_Database.py"),
+    ("restricted",  "block",          "Restricted List", "pages/8_🚫_Restricted_List.py"),
+    ("validation_qa", "science",      "Validation QA", "pages/11_🔬_Validation_QA.py"),
 ]
 
 def top_nav(active: str = "dashboard") -> None:
     """Render a sticky top nav: primary tabs, secondary tabs, and an admin drawer toggle."""
     st.markdown(
         '<div class="top-nav-wrap">'
-        '<div class="nav-brand">📈 Portfolio Intelligence</div>'
+        f'<div class="nav-brand">{icon_html("trending_up", 19)} Portfolio Intelligence</div>'
         '<div class="nav-tabs-row">',
         unsafe_allow_html=True,
     )
 
-    # primary (wider) | thin divider | secondary (narrower) | thin divider | admin gear
+    # column width scales with label length so longer labels (e.g. "Opportunity
+    # Engine") don't get clipped next to short ones (e.g. "Chat") in a uniform grid
+    def _w(label: str) -> float:
+        return 0.75 + 0.11 * len(label)
+
     n_primary, n_secondary = len(_NAV_PRIMARY), len(_NAV_SECONDARY)
-    widths = [1.8] * n_primary + [0.3] + [1.4] * n_secondary + [0.3, 0.6]
+    widths = (
+        [_w(label) for _, _, label, _ in _NAV_PRIMARY] + [0.3]
+        + [_w(label) for _, _, label, _ in _NAV_SECONDARY] + [0.3, 0.6]
+    )
     cols = st.columns(widths, gap="small")
     divider_1 = n_primary
     secondary_start = n_primary + 1
@@ -668,11 +732,11 @@ def top_nav(active: str = "dashboard") -> None:
         with cols[i]:
             if key == active:
                 st.markdown(
-                    f'<div class="nav-tab active">{icon} <span>{label}</span></div>',
+                    f'<div class="nav-tab active">{icon_html(icon, 17)} <span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
             else:
-                st.page_link(path, label=f"{icon} {label}", use_container_width=True)
+                st.page_link(path, label=label, icon=material(icon), use_container_width=True)
 
     with cols[divider_1]:
         st.markdown(
@@ -685,11 +749,11 @@ def top_nav(active: str = "dashboard") -> None:
             if key == active:
                 st.markdown(
                     f'<div class="nav-tab active" style="font-size:0.875rem">'
-                    f'{icon} <span>{label}</span></div>',
+                    f'{icon_html(icon, 16)} <span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
             else:
-                st.page_link(path, label=f"{icon} {label}", use_container_width=True)
+                st.page_link(path, label=label, icon=material(icon), use_container_width=True)
 
     with cols[divider_2]:
         st.markdown(
@@ -698,30 +762,59 @@ def top_nav(active: str = "dashboard") -> None:
         )
 
     with cols[admin_col]:
-        if st.button("⚙️", key="admin_drawer_toggle", help="Admin: Schedule & Database",
-                     use_container_width=True):
+        if st.button("", icon=material("settings"), key="admin_drawer_toggle",
+                     help="Admin: Schedule & Database", use_container_width=True):
             st.session_state["_admin_drawer_open"] = not st.session_state.get("_admin_drawer_open", False)
 
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-    if st.session_state.get("_admin_drawer_open", False) or active in ("schedule", "database"):
+    if st.session_state.get("_admin_drawer_open", False) or active in ("schedule", "database", "restricted", "validation_qa"):
         st.markdown(
             '<div style="padding:6px 24px 0;display:flex;gap:6px;align-items:center">'
             '<span style="font-size:0.7rem;font-weight:700;text-transform:uppercase;'
             'letter-spacing:0.08em;color:#9CA3AF;margin-right:4px">Admin</span></div>',
             unsafe_allow_html=True,
         )
-        admin_cols = st.columns([1, 1, 6])
+        _admin_widths = [_w(label) for _, _, label, _ in _NAV_ADMIN]
+        admin_cols = st.columns(_admin_widths + [sum(_admin_widths) * 2])
         for i, (key, icon, label, path) in enumerate(_NAV_ADMIN):
             with admin_cols[i]:
                 if key == active:
                     st.markdown(
                         f'<div class="nav-tab active" style="font-size:0.85rem">'
-                        f'{icon} <span>{label}</span></div>',
+                        f'{icon_html(icon, 15)} <span>{label}</span></div>',
                         unsafe_allow_html=True,
                     )
                 else:
-                    st.page_link(path, label=f"{icon} {label}", use_container_width=True)
+                    st.page_link(path, label=label, icon=material(icon), use_container_width=True)
+
+
+# ── Icon system (Material Symbols Rounded — same font Streamlit's own
+#    `:material/name:` icon params render, so custom spans match native
+#    widgets exactly). Use icon_html() inside raw HTML/markdown strings;
+#    use the plain "name" string with Streamlit's own icon= kwargs
+#    (st.button, st.page_link, st.info/warning/success/error, st.expander,
+#    st.tabs) via f":material/{name}:". ───────────────────────────────────
+
+def icon_html(name: str, size: int = 18, color: str = "currentColor", extra_style: str = "") -> str:
+    """Inline Material Symbols glyph for embedding inside raw HTML/markdown."""
+    return (
+        f'<span class="material-symbols-rounded" '
+        f'style="font-size:{size}px;color:{color};{extra_style}">{name}</span>'
+    )
+
+
+def material(name: str) -> str:
+    """Format an icon name for Streamlit's native icon= kwargs, e.g. st.button(icon=material("refresh"))."""
+    return f":material/{name}:"
+
+
+def status_dot_html(color: str, size: int = 8) -> str:
+    """A small solid dot for status/quality indicators — no emoji circles."""
+    return (
+        f'<span style="display:inline-block;width:{size}px;height:{size}px;'
+        f'border-radius:50%;background:{color};flex-shrink:0"></span>'
+    )
 
 
 # ── HTML component helpers ─────────────────────────────────────────────────────
@@ -737,7 +830,8 @@ def card(html: str, padding: str = "20px 24px", extra_style: str = "") -> None:
 
 
 def page_header(title: str, subtitle: str = "", icon: str = "") -> None:
-    icon_html = f'<span style="font-size:1.5rem;margin-right:10px;opacity:0.85">{icon}</span>' if icon else ""
+    """`icon` is a Material Symbols icon name (e.g. "work"), not an emoji."""
+    icon_span = icon_html(icon, 22, color="#111827", extra_style="margin-right:10px;opacity:0.85") if icon else ""
     sub_html  = (
         f'<p style="margin:5px 0 0;color:#6B7280;font-size:0.9rem;font-weight:400">{subtitle}</p>'
         if subtitle else ""
@@ -745,7 +839,7 @@ def page_header(title: str, subtitle: str = "", icon: str = "") -> None:
     st.markdown(
         f'<div style="margin-bottom:28px;padding-bottom:18px;border-bottom:1px solid #F3F4F6">'
         f'<h1 style="margin:0;color:#111827;font-size:1.65rem;font-weight:700;'
-        f'letter-spacing:-0.03em;display:flex;align-items:center">{icon_html}{title}</h1>'
+        f'letter-spacing:-0.03em;display:flex;align-items:center">{icon_span}{title}</h1>'
         f'{sub_html}</div>',
         unsafe_allow_html=True,
     )
@@ -809,12 +903,21 @@ def score_bar_html(score: int | None, max_score: int = 10, color: str = PRIMARY)
 
 
 def stat_card_html(value: str, label: str, icon: str = "", color: str = PRIMARY,
-                   delta: str = "") -> str:
-    delta_html = (
-        f'<p style="margin:6px 0 0;font-size:0.75rem;font-weight:600;color:#059669;'
-        f'display:flex;align-items:center;gap:3px">▲ {delta}</p>'
-        if delta else ""
-    )
+                   delta: str = "", delta_positive: bool | None = None) -> str:
+    """`icon` is a Material Symbols icon name (e.g. "work"), not an emoji.
+    `delta_positive` picks the up/down glyph and gain/loss color; omit for a neutral delta."""
+    if delta:
+        if delta_positive is None:
+            d_color, d_arrow = NEUTRAL, "•"
+        else:
+            d_color, d_arrow = (SUCCESS, "▲") if delta_positive else (DANGER, "▼")
+        delta_html = (
+            f'<p style="margin:6px 0 0;font-size:0.75rem;font-weight:600;color:{d_color};'
+            f'display:flex;align-items:center;gap:3px">{d_arrow} {delta}</p>'
+        )
+    else:
+        delta_html = ""
+    icon_span = icon_html(icon, 18, color=color) if icon else ""
     return (
         f'<div style="background:#FFFFFF;border:1px solid #F3F4F6;border-radius:14px;'
         f'padding:18px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.04),'
@@ -828,6 +931,6 @@ def stat_card_html(value: str, label: str, icon: str = "", color: str = PRIMARY,
         f'letter-spacing:-0.04em;line-height:1">{value}</p>'
         f'{delta_html}</div>'
         f'<div style="width:38px;height:38px;border-radius:10px;background:{color}12;'
-        f'display:flex;align-items:center;justify-content:center;font-size:1.15rem;'
-        f'flex-shrink:0">{icon}</div></div></div>'
+        f'display:flex;align-items:center;justify-content:center;'
+        f'flex-shrink:0">{icon_span}</div></div></div>'
     )

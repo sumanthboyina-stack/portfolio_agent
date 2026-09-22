@@ -4,7 +4,7 @@ Portfolio Analysis CLI
 Usage examples:
   python main.py AAPL                        # full pipeline
   python main.py AAPL MSFT NVDA              # multiple tickers, full pipeline each
-  python main.py --watchlist                 # run all tickers in config/watchlist.yaml
+  python main.py --watchlist                 # run all tickers in the watchlist
   python main.py AAPL --agent fundamentals   # single specialist
   python main.py AAPL --agent technical      # single specialist
   python main.py AAPL --agent synthesis      # synthesis only (needs prior state or empty)
@@ -19,9 +19,7 @@ Available --agent values:
 import argparse
 import asyncio
 import sys
-from pathlib import Path
 
-import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -55,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--watchlist",
         action="store_true",
-        help="Analyze all tickers listed in config/watchlist.yaml.",
+        help="Analyze all tickers in the watchlist.",
     )
     p.add_argument(
         "--agent",
@@ -189,13 +187,8 @@ async def _main() -> None:
         return
 
     if args.watchlist:
-        wl_path = Path(__file__).parent / "config" / "watchlist.yaml"
-        if not wl_path.exists():
-            log.error(f"[error] Watchlist not found at {wl_path}", event_type="error")
-            sys.exit(1)
-        with open(wl_path) as f:
-            wl_data = yaml.safe_load(f) or {}
-        wl_tickers = [t.upper() for t in wl_data.get("tickers", [])]
+        from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
+        wl_tickers = load_watchlist_tickers()
         tickers = list(dict.fromkeys(tickers + wl_tickers))
 
     if not tickers:

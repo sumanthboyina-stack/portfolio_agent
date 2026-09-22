@@ -31,7 +31,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    section_title,
+    section_title, material, icon_html, status_dot_html,
     SUCCESS, SUCCESS_LIGHT, WARNING, WARNING_LIGHT, DANGER, DANGER_LIGHT,
     PRIMARY, PRIMARY_LIGHT, NEUTRAL, NEUTRAL_LIGHT, PURPLE, PURPLE_LIGHT,
     REC_STYLES, PRED_COLORS,
@@ -118,10 +118,10 @@ def render_system_strip(df_all: pd.DataFrame, selected_date: date) -> None:
     n_today = int((df_all["as_of_date"] == selected_date.isoformat()).sum()) if not df_all.empty else 0
 
     if n_today > 0:
-        dot = "🟢"
+        dot = status_dot_html(SUCCESS)
         status_text = f"Predictions available for {selected_date}"
     else:
-        dot = "🔴"
+        dot = status_dot_html(DANGER)
         status_text = f"No predictions for {selected_date}"
 
     brier_str = f"{stats['brier_5d']:.2f}" if stats["brier_5d"] is not None else "—"
@@ -136,7 +136,7 @@ def render_system_strip(df_all: pd.DataFrame, selected_date: date) -> None:
         f'padding:10px 18px;margin-bottom:16px;display:flex;align-items:center;'
         f'justify-content:space-between;box-shadow:0 1px 3px rgba(0,0,0,0.05)">'
         f'<div style="display:flex;align-items:center;gap:10px">'
-        f'<span style="font-size:1rem">{dot}</span>'
+        f'{dot}'
         f'<span style="font-size:0.82rem;color:#475569">{status_text}</span>'
         f'<span style="color:#CBD5E1">|</span>'
         f'<span style="font-size:0.82rem;color:#64748B">Last run: <b style="color:#0F172A">{last_run}</b></span>'
@@ -229,7 +229,7 @@ def render_action_items(df: pd.DataFrame, title: str = "Today's Action Items") -
     ]
 
     if action_df.empty:
-        st.info("No high-conviction STRONG BUY or STRONG SELL signals for this date.", icon="🔮")
+        st.info("No high-conviction STRONG BUY or STRONG SELL signals for this date.", icon=material("insights"))
         return
 
     strong_buy = action_df[action_df["recommendation"] == "STRONG_BUY"]
@@ -279,14 +279,14 @@ def render_edge_indicator(row: dict) -> str:
         return '<span style="font-size:0.72rem;color:#94A3B8">ⓘ insufficient validation data</span>'
     seg_label = segment or "all"
     if n < 10:
-        return f'<span style="font-size:0.72rem;color:#94A3B8">⚠ insufficient data (n={n})</span>'
+        return f'<span style="font-size:0.72rem;color:#94A3B8">{icon_html("warning", 12)} insufficient data (n={n})</span>'
     if acc < 0.52:
         return (
-            f'<span style="font-size:0.72rem;color:{WARNING}">⚠ no edge '
+            f'<span style="font-size:0.72rem;color:{WARNING}">{icon_html("warning", 12)} no edge '
             f'({h_days}d segment {acc*100:.2f}%)</span>'
         )
     return (
-        f'<span style="font-size:0.72rem;color:{SUCCESS}">✓ {h_days}d segment '
+        f'<span style="font-size:0.72rem;color:{SUCCESS}">{icon_html("check_circle", 12)} {h_days}d segment '
         f'{acc*100:.2f}% (n={n})</span>'
     )
 
@@ -451,17 +451,14 @@ def render_all_predictions(df: pd.DataFrame, title: str = "All Predictions by Re
     section_title(title)
 
     rec_order = ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"]
-    rec_labels = {
-        "STRONG_BUY": "🟢 STRONG BUY",
-        "BUY": "🟢 BUY",
-        "HOLD": "🟡 HOLD",
-        "SELL": "🔴 SELL",
-        "STRONG_SELL": "🔴 STRONG SELL",
-    }
+    # Plain labels — color already carries the BUY/HOLD/SELL signal via the
+    # per-card badges rendered inside each expander (st.expander headers can't
+    # render colored HTML dots, only plain text).
+    rec_labels = {rec: REC_STYLES.get(rec, (None, None, rec))[2] for rec in rec_order}
     auto_open = {"STRONG_BUY", "BUY", "STRONG_SELL"}
 
     if df.empty:
-        st.info("No predictions to display for the selected filters.", icon="🔮")
+        st.info("No predictions to display for the selected filters.", icon=material("insights"))
         return
 
     for rec in rec_order:
@@ -512,7 +509,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         ).fetchall()
 
     if not rows:
-        st.warning(f"No predictions found for {drill_ticker} on {drill_date}.", icon="⚠️")
+        st.warning(f"No predictions found for {drill_ticker} on {drill_date}.", icon=material("warning"))
         if st.button("Clear selection", key="clear_drill"):
             del st.session_state["drill_ticker"]
             st.session_state.pop("drill_date", None)
@@ -542,7 +539,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
 
     close_col, _ = st.columns([1, 9])
     with close_col:
-        if st.button("✕ Close", key="close_drill"):
+        if st.button("Close", icon=material("close"), key="close_drill"):
             del st.session_state["drill_ticker"]
             st.session_state.pop("drill_date", None)
             st.rerun()
@@ -575,7 +572,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
     st.markdown(header_html, unsafe_allow_html=True)
 
     # ── Reasoning ─────────────────────────────────────────────────────────────
-    with st.expander("📝 Reasoning", expanded=True):
+    with st.expander("Reasoning", icon=material("notes"), expanded=True):
         reasoning = row.get("reasoning") or row.get("reasoning_text") or "—"
         st.markdown(
             f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:14px 18px;'
@@ -590,7 +587,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         )
 
     # ── Inputs at prediction time ─────────────────────────────────────────────
-    with st.expander("📊 Inputs at Prediction Time", expanded=True):
+    with st.expander("Inputs at Prediction Time", icon=material("bar_chart"), expanded=True):
         f_score = row.get("fundamental_score")
         r_score = row.get("research_score")
         m_score = row.get("macro_score")
@@ -627,7 +624,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
     # ── Price chart — the pre-trade sanity check: where's price relative to the
     # range, breakout or bounce, where's support. Right next to the reasoning/
     # radar/probability blocks, not a separate site you have to tab out to.
-    with st.expander("📉 Price Chart", expanded=True):
+    with st.expander("Price Chart", icon=material("trending_up"), expanded=True):
         _period_label = st.radio(
             "Period", ["1mo", "3mo", "6mo", "1y"], index=2,
             horizontal=True, key=f"price_chart_period_{drill_ticker}",
@@ -637,14 +634,14 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         if fig_price is not None:
             st.plotly_chart(fig_price, use_container_width=True, config={"displayModeBar": False})
         else:
-            st.info(f"No price history available for {drill_ticker}.", icon="📉")
+            st.info(f"No price history available for {drill_ticker}.", icon=material("trending_up"))
 
     # ── Probability distribution (full) ──────────────────────────────────────
     has_prob = any(
         row.get(k) is not None
         for k in ["p_strong_down", "p_moderate_down", "p_flat", "p_moderate_up", "p_strong_up"]
     )
-    with st.expander("📈 Return Probability Distribution", expanded=True):
+    with st.expander("Return Probability Distribution", icon=material("insights"), expanded=True):
         if has_prob:
             pc1, pc2 = st.columns([2, 1])
             with pc1:
@@ -658,21 +655,21 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                     f'<div style="display:flex;flex-direction:column;gap:8px;margin-top:20px">'
                     f'<div style="background:{SUCCESS_LIGHT};color:{SUCCESS};padding:8px 14px;'
                     f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'📈 Bullish {bull_pct:.2f}%</div>'
+                    f'{icon_html("trending_up", 15)} Bullish {bull_pct:.2f}%</div>'
                     f'<div style="background:{NEUTRAL_LIGHT};color:{NEUTRAL};padding:8px 14px;'
                     f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'➡️ Flat {flat_pct:.2f}%</div>'
+                    f'{icon_html("trending_flat", 15)} Flat {flat_pct:.2f}%</div>'
                     f'<div style="background:{DANGER_LIGHT};color:{DANGER};padding:8px 14px;'
                     f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'📉 Bearish {bear_pct:.2f}%</div>'
+                    f'{icon_html("trending_down", 15)} Bearish {bear_pct:.2f}%</div>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
         else:
-            st.info("Probability distribution data not available for this prediction.", icon="📊")
+            st.info("Probability distribution data not available for this prediction.", icon=material("bar_chart"))
 
     # ── Score radar ───────────────────────────────────────────────────────────
-    with st.expander("🎯 Score Radar", expanded=False):
+    with st.expander("Score Radar", icon=material("track_changes"), expanded=False):
         rc1, rc2 = st.columns([1, 1])
         with rc1:
             fig_radar = _plot_score_radar(row)
@@ -706,7 +703,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                 )
 
     # ── Agent Panel ───────────────────────────────────────────────────────────
-    with st.expander("🏛️ Agent Panel", expanded=True):
+    with st.expander("Agent Panel", icon=material("account_balance"), expanded=True):
         try:
             panel = json.loads(row.get("panel_summary") or "{}")
         except Exception:
@@ -718,9 +715,9 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
         # score alone doesn't convey, and it's the same label the Valuation
         # page shows as its headline. Best-effort: absent if not yet computed.
         _VALUATION_LABEL_STYLE = {
-            "UNDERVALUED":   (SUCCESS, SUCCESS_LIGHT, "🟢 UNDERVALUED"),
-            "FAIRLY_VALUED": (WARNING, WARNING_LIGHT, "🟡 FAIRLY VALUED"),
-            "OVERVALUED":    (DANGER, DANGER_LIGHT, "🔴 OVERVALUED"),
+            "UNDERVALUED":   (SUCCESS, SUCCESS_LIGHT, "UNDERVALUED"),
+            "FAIRLY_VALUED": (WARNING, WARNING_LIGHT, "FAIRLY VALUED"),
+            "OVERVALUED":    (DANGER, DANGER_LIGHT, "OVERVALUED"),
         }
         valuation_label_badge = ""
         try:
@@ -731,7 +728,9 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                 _vl_color, _vl_bg, _vl_text = _VALUATION_LABEL_STYLE[_val_label]
                 valuation_label_badge = (
                     f'<span style="background:{_vl_bg};color:{_vl_color};padding:2px 8px;'
-                    f'border-radius:10px;font-weight:700;font-size:0.72rem;margin-left:4px">{_vl_text}</span>'
+                    f'border-radius:10px;font-weight:700;font-size:0.72rem;margin-left:4px;'
+                    f'display:inline-flex;align-items:center;gap:4px">'
+                    f'{status_dot_html(_vl_color, 6)}{_vl_text}</span>'
                 )
         except Exception:
             pass
@@ -777,7 +776,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             st.caption("Agent panel summary not available for this prediction.")
 
     # ── Why did it change? ────────────────────────────────────────────────────
-    with st.expander("🔍 Why did it change?", expanded=False):
+    with st.expander("Why did it change?", icon=material("search"), expanded=False):
         from portfolio_agent.tools.prediction_db import get_score_change_breakdown
 
         change = get_score_change_breakdown(drill_ticker)
@@ -819,10 +818,10 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
     # ── Historical predictions for this ticker ────────────────────────────────
     _drill_hist_name = _cname(drill_ticker)
     _drill_hist_label = f"{drill_ticker} ({_drill_hist_name})" if _drill_hist_name else drill_ticker
-    with st.expander(f"📅 Historical Predictions — {_drill_hist_label}", expanded=False):
+    with st.expander(f"Historical Predictions — {_drill_hist_label}", icon=material("calendar_month"), expanded=False):
         hist_df = _load_ticker_history(drill_ticker)
         if hist_df.empty:
-            st.info(f"No prediction history found for {drill_ticker}.", icon="📊")
+            st.info(f"No prediction history found for {drill_ticker}.", icon=material("bar_chart"))
         else:
             display_cols = [
                 "as_of_date", "horizon_days", "recommendation", "prediction",
@@ -849,7 +848,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             st.dataframe(hist_display, use_container_width=True, hide_index=True)
 
     # ── Edge data ─────────────────────────────────────────────────────────────
-    with st.expander("🎯 Edge & Validation Data", expanded=False):
+    with st.expander("Edge & Validation Data", icon=material("track_changes"), expanded=False):
         h_days = row.get("horizon_days")
         segment = row.get("risk_segment")
         edge = _load_edge_data(int(h_days), segment) if h_days else None
@@ -870,14 +869,14 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
                 f'<div style="font-size:0.82rem;color:#0F172A">'
                 f'<b>{h_days}d horizon</b> · Segment: {segment or "all"} · '
                 f'Directional accuracy: <b style="color:{WARNING}">{acc_str}</b> · '
-                f'n={n} (⚠ below baseline)</div></div>'
+                f'n={n} ({icon_html("warning", 12)} below baseline)</div></div>'
             )
             st.markdown(edge_html, unsafe_allow_html=True)
         else:
             st.info(
                 "No validation metrics available for this horizon/segment. "
                 "Run the evaluation pipeline to generate accuracy data.",
-                icon="ℹ️",
+                icon=material("info"),
             )
         st.markdown(
             f'<div style="margin-top:8px;font-size:0.78rem;color:#64748B">'

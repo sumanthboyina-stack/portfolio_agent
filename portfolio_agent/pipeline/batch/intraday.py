@@ -84,7 +84,6 @@ async def run_batch_intraday(
     """
     log = _get_logger("batch.intraday")
     pp = _PROJECT_ROOT / "config" / "portfolio.yaml"
-    wp = _PROJECT_ROOT / "config" / "watchlist.yaml"
 
     if not pp.exists():
         log.error("[error] config/portfolio.yaml not found.", event_type="error")
@@ -95,9 +94,9 @@ async def run_batch_intraday(
     portfolio_set = {t.upper() for t in portfolio_tickers}
 
     # Load current watchlist (needed to avoid double-adding tickers)
+    from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
     try:
-        wl_data = yaml.safe_load(wp.read_text()) if wp.exists() else {}
-        current_watchlist: list[str] = [str(t).upper() for t in (wl_data or {}).get("tickers", [])]
+        current_watchlist: list[str] = load_watchlist_tickers()
     except Exception:
         current_watchlist = []
 
@@ -232,7 +231,7 @@ async def run_batch_intraday(
         # News phase for trending/event-triggered tickers. The watchlist itself is
         # manual-only (Watchlist Manager screen / Opportunity Engine "Add to
         # Watchlist") — trending tickers get same-day News/Research/Fundamentals/
-        # APEX coverage here but are never auto-promoted onto watchlist.yaml.
+        # APEX coverage here but are never auto-promoted onto the watchlist.
         await _run_news_phase(
             all_tickers=research_tickers,
             watchlist=current_watchlist,

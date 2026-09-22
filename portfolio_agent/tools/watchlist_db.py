@@ -1,0 +1,128 @@
+"""
+Watchlist database — manually curated tickers tracked for daily pipeline coverage.
+
+Table (watchlist):
+  ticker, added_at
+
+The watchlist is manual-only: tickers are added/removed via the Watchlist
+Manager screen or the Opportunity Engine's "Add to Watchlist" button.
+Nothing in the pipeline auto-promotes tickers here.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+from portfolio_agent.tools.db import DB_PATH, db_conn
+
+_LEGACY_YAML = Path(__file__).resolve().parents[2] / "config" / "watchlist.yaml"
+
+
+@contextmanager
+def _db():
+    def _setup(conn: sqlite3.Connection) -> None:
+        _create_schema(conn)
+        _migrate(conn)
+        conn.commit()
+    with db_conn(setup=_setup) as conn:
+        yield conn
+
+
+def _create_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            ticker   TEXT PRIMARY KEY,
+            added_at TEXT NOT NULL
+        )
+    """)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """One-time seed from the legacy config/watchlist.yaml, if present and the table is empty."""
+    if not _LEGACY_YAML.exists():
+        return
+    if conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] > 0:
+        return
+    try:
+        data = yaml.safe_load(_LEGACY_YAML.read_text()) or {}
+    except Exception:
+        return
+    tickers = {str(t).upper() for t in data.get("tickers", [])}
+    if not tickers:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
+        [(t, now) for t in sorted(tickers)],
+    )
+
+
+def load_watchlist_tickers() -> list[str]:
+    """Return all watchlist tickers, sorted."""
+    with _db() as conn:
+        rows = conn.execute("SELECT ticker FROM watchlist ORDER BY ticker").fetchall()
+    return [r[0] for r in rows]
+
+
+def add_tickers(to_add: list[str], cap: int = 70) -> tuple[list[str], str | None]:
+    """Add tickers to the watchlist (respecting cap). Returns (added, warning_or_none)."""
+    to_add = [str(t).upper() for t in to_add]
+    with _db() as conn:
+        existing = {r[0] for r in conn.execute("SELECT ticker FROM watchlist").fetchall()}
+        new_unique = [t for t in dict.fromkeys(to_add) if t not in existing]
+        warning = None
+        if new_unique and len(existing) + len(new_unique) > cap:
+            available = cap - len(existing)
+            new_unique = new_unique[:available]
+            warning = f"Watchlist cap ({cap}) — adding only {len(new_unique)}: {', '.join(new_unique)}"
+        if new_unique:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.executemany(
+                "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
+                [(t, now) for t in new_unique],
+            )
+            conn.commit()
+    return new_unique, warning
+
+
+def remove_tickers(to_remove: list[str]) -> None:
+    remove_set = {str(t).upper() for t in to_remove}
+    if not remove_set:
+        return
+    with _db() as conn:
+        ph = ",".join("?" * len(remove_set))
+        conn.execute(f"DELETE FROM watchlist WHERE ticker IN ({ph})", list(remove_set))
+        conn.commit()
+
+
+def watchlist_db_status(tickers: list[str]) -> dict[str, dict]:
+    """For each ticker, check if it has records in fundamentals/research/predictions."""
+    if not DB_PATH.exists() or not tickers:
+        return {}
+    status = {t: {"fund": False, "res": False, "pred": False} for t in tickers}
+    ph = ",".join("?" * len(tickers))
+    try:
+        with sqlite3.connect(str(DB_PATH)) as c:
+            for t in c.execute(
+                f"SELECT DISTINCT ticker FROM fundamentals WHERE ticker IN ({ph})", tickers
+            ).fetchall():
+                if t[0] in status:
+                    status[t[0]]["fund"] = True
+            for t in c.execute(
+                f"SELECT DISTINCT ticker FROM research WHERE as_of_date IS NOT NULL AND ticker IN ({ph})", tickers
+            ).fetchall():
+                if t[0] in status:
+                    status[t[0]]["res"] = True
+            for t in c.execute(
+                f"SELECT DISTINCT ticker FROM predictions WHERE ticker IN ({ph})", tickers
+            ).fetchall():
+                if t[0] in status:
+                    status[t[0]]["pred"] = True
+    except Exception:
+        pass
+    return status

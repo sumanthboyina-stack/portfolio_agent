@@ -1,5 +1,23 @@
 """
-APEX Prediction Validation Dashboard — system health panel with metric trend charts.
+APEX Prediction Validation — user-facing trust page: "is this reliable" and
+"did it make money." Opens scoped to the viewer's own holdings + watchlist by
+default, with an explicit toggle to widen to the full shared prediction
+universe (predictions themselves are shared across everyone; this default
+just keeps what's on screen relevant to the person looking at it).
+
+Operator/engineering diagnostics that used to live here — raw Metric Trends,
+the full reliability-diagram Calibration tab, Post-mortems, and Version
+comparison — now live on the separate Validation QA admin page instead. None
+of those help a friend decide whether to trust a BUY call; they help tune the
+shared prediction engine, which is an operator concern.
+
+Privacy note: every filter here (segment radio, horizon/outcome multiselects)
+narrows by *criteria*, never by an enumerable list of other people's specific
+tickers — so there's nothing on this page that could let one viewer page
+through a dropdown to infer what somebody else holds or watches. That
+property needs to be preserved if/when this becomes genuinely multi-user;
+today there's a single shared portfolio.yaml/watchlist, so the question is
+moot in practice but the filter design already assumes the stricter future.
 """
 from __future__ import annotations
 
@@ -12,54 +30,36 @@ sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 import streamlit as st
-from web.styles import inject_global_css, top_nav
+from web.styles import inject_global_css, top_nav, icon_html, material, fmt_pct, fmt_money
 
 st.set_page_config(
     page_title="Validation — Portfolio Intelligence",
-    page_icon="🎯",
+    page_icon=material("track_changes"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 top_nav("validation")
 
-from portfolio_agent.tools.validation_engine import (
-    get_recent_evaluated_predictions,
-    get_accuracy_heatmap_data,
-    get_calibration_data,
-    get_volume_by_horizon,
-    get_system_version_comparison,
-    weekly_pattern_analysis,
-)
-from portfolio_agent.tools.prediction_db import (
-    get_rolling_metrics,
-    get_validation_reports,
-    CURRENT_SYSTEM_VERSION,
-)
+from portfolio_agent.tools.prediction_db import CURRENT_SYSTEM_VERSION
 from web.data.validation import (
-    _load_metric_series,
     _load_portfolio_tickers,
     _load_watchlist_tickers,
     _get_model_names,
     _compute_filtered_metrics,
-    _load_rolling_metrics_series,
-    _directional_correct,
+    _load_evaluated_predictions_df,
+    _outcome_breakdown,
+    _returns_by_recommendation,
+    _signal_equity_curve,
 )
 from web.components.validation_charts import (
-    build_brier_trend_chart,
-    build_logloss_trend_chart,
-    build_directional_accuracy_chart,
-    build_predicted_vs_actual_scatter,
-    build_accuracy_heatmap,
-    build_reliability_diagram,
-    build_conviction_calibration_chart,
-    build_brier_histogram,
-    build_logloss_histogram,
-    build_volume_by_horizon_chart,
+    build_outcome_breakdown_chart,
+    build_returns_by_recommendation_chart,
+    build_signal_equity_curve_chart,
+    build_score_vs_returns_chart,
+    build_horizon_reliability_chart,
 )
 from web.components.validation_cards import _render_scorecard_tiles
-
-# ── Session state ─────────────────────────────────────────────────────────────
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -69,7 +69,7 @@ with st.sidebar:
         'letter-spacing:0.08em;color:#475569;margin:0 0 10px">Filters</p>',
         unsafe_allow_html=True,
     )
-    st.caption("Run Evening (evaluation) and Weekly Analysis from the 🗓️ Schedule page.")
+    st.caption(f"Run Evening (evaluation) and Weekly Analysis from the {material('calendar_month')} Schedule page.")
 
     st.divider()
     lookback = st.selectbox(
@@ -119,13 +119,16 @@ with st.sidebar:
         st.caption("All predictions — no model filter applied")
     else:
         _model_filter = _GROUP_NAMES[_model_sel]
-        icon = "🧠" if _model_sel == "Higher reasoning" else "⚡"
-        st.caption(f"{icon} {_model_sel} (GPT-4x / Claude)" if _model_sel == "Higher reasoning" else f"{icon} {_model_sel}")
+        _icon_name = "psychology" if _model_sel == "Higher reasoning" else "bolt"
+        st.caption(
+            f"{material(_icon_name)} {_model_sel} (GPT-4x / Claude)"
+            if _model_sel == "Higher reasoning" else f"{material(_icon_name)} {_model_sel}"
+        )
         # Show individual names so the user knows what's included in the group
         st.markdown(
             '<div style="margin-top:4px">' +
             "".join(
-                f'<div style="font-size:0.68rem;color:#6B7280;padding:1px 0">{icon} {m}</div>'
+                f'<div style="font-size:0.68rem;color:#6B7280;padding:1px 0">{icon_html(_icon_name, 12)} {m}</div>'
                 for m in _model_filter
             ) + '</div>',
             unsafe_allow_html=True,
@@ -133,25 +136,28 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Prediction segment ───────────────────────────────────────────────────
+    # ── Scope — defaults to the viewer's own tickers, not the shared universe ──
     st.markdown(
         '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 8px">'
-        'Prediction segment</p>',
+        'Scope</p>',
         unsafe_allow_html=True,
     )
     _seg_sel = st.radio(
         "segment",
-        ["All", "Portfolio", "Watchlist", "New Opportunities"],
+        ["My Tickers", "All", "Portfolio", "Watchlist", "New Opportunities"],
         index=0,
         label_visibility="collapsed",
         key="val_segment",
         help=(
-            "All: every prediction  ·  "
+            "My Tickers (default): your holdings + watchlist combined  ·  "
+            "All: everyone's shared prediction universe, for context  ·  "
             "Portfolio: your holdings only  ·  "
             "Watchlist: tracked but not held  ·  "
             "New Opportunities: trending tickers discovered by the scanner"
         ),
     )
+    if _seg_sel == "All":
+        st.caption(f"{material('public')} Widened to the full shared universe.")
 
 # Load portfolio/watchlist tickers once (used by segment filter throughout)
 _portfolio_tickers = _load_portfolio_tickers()
@@ -159,57 +165,93 @@ _watchlist_tickers = _load_watchlist_tickers()
 
 # ── Page header ───────────────────────────────────────────────────────────────
 
-st.title("🎯 APEX Prediction Validation")
+st.title(f"{material('track_changes')} APEX Prediction Validation")
 st.caption(f"System version: `{CURRENT_SYSTEM_VERSION}` · Scores predictions after they mature")
+
+_SEG_ICONS = {
+    "My Tickers":        material("person"),
+    "All":               material("public"),
+    "Portfolio":         material("work"),
+    "Watchlist":         material("list_alt"),
+    "New Opportunities": material("star"),
+}
 
 _active_filters: list[str] = []
 if _model_filter:
     _active_filters.append(f"Model: {', '.join(f'`{m}`' for m in _model_filter)}")
-if _seg_sel != "All":
-    _seg_icon = {"Portfolio": "💼", "Watchlist": "📋"}.get(_seg_sel, "🌟")
-    _active_filters.append(f"Segment: **{_seg_icon} {_seg_sel}**")
+if _seg_sel != "My Tickers":
+    _active_filters.append(f"Scope: **{_SEG_ICONS.get(_seg_sel, material('search'))} {_seg_sel}**")
 if _active_filters:
     st.info(
-        "🔍 **Active filters** — " + "  ·  ".join(_active_filters) +
+        "**Active filters** — " + "  ·  ".join(_active_filters) +
         "  ·  All metrics and tables recalculated for selected filter(s).",
-        icon="🔍",
+        icon=material("search"),
     )
 
-# ── Live log panel ────────────────────────────────────────────────────────────
+# ── Shared per-horizon metrics (used by both Scorecard and Heatmap tabs) ──────
+
+metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+by_horizon: dict[int, dict] = {}
+for row in metrics:
+    h = row["horizon_days"]
+    if h not in by_horizon:
+        by_horizon[h] = row
+
+horizon_labels = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
+all_horizons = [h for h in [5, 21, 63] if h in by_horizon] + \
+               [h for h in sorted(by_horizon) if h not in [5, 21, 63]]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 tabs = st.tabs([
-    "📊 Scorecard",
-    "📈 Metric Trends",
-    "🗺️ Heatmap",
-    "🎯 Calibration",
-    "📋 Prediction History",
-    "🔬 Post-mortems",
-    "🔄 Versions",
-    "📐 Score Calibration",
+    f"{material('bar_chart')} Scorecard",
+    f"{material('list_alt')} Prediction History",
+    f"{material('calculate')} Score vs Returns",
+    f"{material('map')} Heatmap",
 ])
 
 # ── Tab 1: Scorecard ──────────────────────────────────────────────────────────
 
 with tabs[0]:
-    metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
     if not metrics:
         st.info(
             "No evaluated predictions yet. "
-            "Click **🌆 Evening** on the 🗓️ Schedule page to score matured predictions.",
-            icon="ℹ️",
+            f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
+            "Schedule page to score matured predictions.",
+            icon=material("info"),
         )
     else:
-        by_horizon: dict[int, dict] = {}
-        for row in metrics:
-            h = row["horizon_days"]
-            if h not in by_horizon:
-                by_horizon[h] = row
+        # ── "Did this actually work?" — outcome breakdown, returns by call,
+        # and a hypothetical equity curve, all first, before the tiles ────────
+        st.subheader("Did This Actually Work?")
+        eval_df = _load_evaluated_predictions_df(
+            lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers
+        )
 
-        horizon_labels = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
-        all_horizons = [h for h in [5, 21, 63] if h in by_horizon] + \
-                       [h for h in sorted(by_horizon) if h not in [5, 21, 63]]
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            st.caption("Outcome breakdown")
+            breakdown = _outcome_breakdown(eval_df)
+            if breakdown and sum(b["count"] for b in breakdown):
+                st.plotly_chart(build_outcome_breakdown_chart(breakdown), use_container_width=True)
+            else:
+                st.info("No evaluated predictions yet.", icon=material("info"))
+        with oc2:
+            st.caption("Avg realized return by recommendation")
+            rec_returns = _returns_by_recommendation(eval_df)
+            if rec_returns and any(r["n"] for r in rec_returns):
+                st.plotly_chart(build_returns_by_recommendation_chart(rec_returns), use_container_width=True)
+            else:
+                st.info("No evaluated predictions yet.", icon=material("info"))
+
+        st.caption("If you'd mechanically followed every BUY / STRONG_BUY call, vs. SPY over the same windows")
+        curve_df = _signal_equity_curve(eval_df)
+        if not curve_df.empty:
+            st.plotly_chart(build_signal_equity_curve_chart(curve_df), use_container_width=True)
+        else:
+            st.info("Not enough evaluated BUY / STRONG_BUY calls yet to plot a cumulative curve.", icon=material("info"))
+
+        st.divider()
 
         # ── Metric tiles ──────────────────────────────────────────────────────
         st.subheader("All Metrics by Horizon")
@@ -228,280 +270,32 @@ with tabs[0]:
             raw_rows.append({
                 "Horizon":           hlbl,
                 "Evaluated Preds":   n,
-                "Dir Accuracy":   f"{row['directional_accuracy']*100:.2f}%" if row.get("directional_accuracy") is not None else "—",
-                "In-Range %":     f"{row['in_range_pct']*100:.2f}%"         if row.get("in_range_pct")          is not None else "—",
-                "Excess Return":  f"{row['mean_excess_return']*100:+.2f}%"  if row.get("mean_excess_return")     is not None else "—",
-                "Hi-Conv Acc":    f"{row['high_conviction_accuracy']*100:.2f}%" if row.get("high_conviction_accuracy") is not None else "—",
-                "Lo-Conv Acc":    f"{row['low_conviction_accuracy']*100:.2f}%"  if row.get("low_conviction_accuracy")  is not None else "—",
+                "Dir Accuracy":   fmt_pct(row["directional_accuracy"]*100) if row.get("directional_accuracy") is not None else "—",
+                "In-Range %":     fmt_pct(row["in_range_pct"]*100)         if row.get("in_range_pct")          is not None else "—",
+                "Excess Return":  fmt_pct(row["mean_excess_return"]*100, signed=True)  if row.get("mean_excess_return")     is not None else "—",
+                "Hi-Conv Acc":    fmt_pct(row["high_conviction_accuracy"]*100) if row.get("high_conviction_accuracy") is not None else "—",
+                "Lo-Conv Acc":    fmt_pct(row["low_conviction_accuracy"]*100)  if row.get("low_conviction_accuracy")  is not None else "—",
                 "Brier Score":    f"{row['brier_score']:.2f}"                if row.get("brier_score")            is not None else "—",
                 "Log-Loss":       f"{row['mean_log_loss']:.2f}"              if row.get("mean_log_loss")           is not None else "—",
             })
         st.dataframe(pd.DataFrame(raw_rows), hide_index=True, use_container_width=True)
 
-# ── Tab 2: Metric Trends ──────────────────────────────────────────────────────
+# ── Tab 2: Prediction History — promoted right after Scorecard; once scoped
+# to "My Tickers" by default, this is every call made on tickers the viewer
+# actually cares about, and how each one turned out ───────────────────────────
 
 with tabs[1]:
-    st.subheader("📈 Prediction Quality Metrics Over Time")
-    st.caption(
-        "Each data point is one evaluated prediction. Rolling average smooths the trend. "
-        "Populates after **🌆 Evening** (🗓️ Schedule page) scores matured predictions."
-    )
+    from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
 
-    metric_df  = _load_metric_series(_seg_sel, _portfolio_tickers, _watchlist_tickers)
-    rolling_df = _load_rolling_metrics_series(_seg_sel)
-
-    # Apply model filter to per-prediction series
-    if _model_filter and not metric_df.empty and "model_name" in metric_df.columns:
-        metric_df = metric_df[metric_df["model_name"].isin(_model_filter)]
-    # rolling_df comes from metrics_rolling which has no model field — show note
-    if _model_filter and not rolling_df.empty:
-        st.caption("ℹ️ Aggregate rolling metrics (dashed lines) are not model-filtered — they reflect all models.")
-
-    H_COLORS = {5: "#2563EB", 21: "#7C3AED", 63: "#059669"}
-    H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
-
-    if metric_df.empty:
-        st.info(
-            "No evaluated predictions with Brier/log-loss values yet.\n\n"
-            "Predictions become evaluable once their horizon has elapsed "
-            "(e.g., a 5-day prediction from Monday is scored the following Monday). "
-            "Click **🌆 Evening** on the 🗓️ Schedule page to score any matured predictions.",
-            icon="📊",
-        )
-        with st.expander("What these charts will show once data is available", expanded=True):
-            st.markdown("""
-| Chart | What it measures |
-|---|---|
-| **Brier Score trend** | Per-prediction probability accuracy (0 = perfect, 0.25 = coin flip). Plots each evaluated prediction's brier_score over time with a rolling 10-prediction average per horizon. |
-| **Log-Loss trend** | Information-theoretic accuracy. Lower = better calibrated probability estimates. Baseline (coin flip) ≈ 0.693. |
-| **Directional accuracy** | Rolling % of predictions where the predicted direction (UP/DOWN/FLAT) matched the actual direction. 50% = random. |
-| **Predicted vs Actual return** | Scatter plot comparing expected return midpoint vs actual return. Points on the diagonal = perfect. Color = outcome. |
-| **Rolling metrics** | Aggregate metrics from `metrics_rolling` table — recomputed nightly, showing system-level accuracy by horizon and lookback window. |
-""")
-    else:
-        n_eval = len(metric_df)
-        horizons_present = sorted(metric_df["horizon_days"].dropna().unique())
-
-        # ── Metric selector ────────────────────────────────────────────────────
-        m1, m2 = st.columns(2)
-        with m1:
-            horizon_sel = st.multiselect(
-                "Horizon filter",
-                options=horizons_present,
-                default=list(horizons_present),
-                format_func=lambda h: H_LABELS.get(int(h), f"{int(h)}d"),
-                key="trend_horizon",
-            )
-        with m2:
-            roll_window = st.select_slider(
-                "Rolling average window",
-                options=[5, 10, 20],
-                value=10,
-                key="trend_roll",
-            )
-
-        # Both default off — with 4 horizons now scored (5/21/63/250d), showing
-        # every layer (raw points + rolling avg + a separate unfiltered
-        # aggregate line) per horizon adds up to 12 traces on one chart. The
-        # rolling-average line is the one that actually reads as a trend;
-        # these add detail back in on request instead of by default.
-        d1, d2 = st.columns(2)
-        with d1:
-            show_points = st.checkbox(
-                "Show individual predictions", value=False, key="trend_show_points",
-                help="Raw per-prediction dots behind the rolling average — adds one layer of detail, and clutter.",
-            )
-        with d2:
-            show_aggregate = st.checkbox(
-                "Show unfiltered aggregate overlay", value=False, key="trend_show_aggregate",
-                help="A second line from the nightly metrics_rolling table, computed across ALL models "
-                     "regardless of the model filter above — useful to compare filtered vs. unfiltered, "
-                     "otherwise mostly duplicates the rolling-average line already shown.",
-            )
-
-        fdf = metric_df[metric_df["horizon_days"].isin(horizon_sel)] if horizon_sel else metric_df
-        st.caption(f"Showing {len(fdf)} of {n_eval} evaluated predictions")
-
-        # ── Brier Score trend ──────────────────────────────────────────────────
-        st.subheader("Brier Score — Rolling Average")
-        st.caption(
-            "Lower is better. Baseline (uniform guesser) ≈ 0.32. "
-            "Below 0.20 = mild edge. Below 0.18 = genuine skill."
-        )
-
-        fig_brier = build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                             H_COLORS, H_LABELS, show_points=show_points, show_aggregate=show_aggregate)
-        st.plotly_chart(fig_brier, use_container_width=True)
-
-        st.divider()
-
-        # ── Log-Loss trend ─────────────────────────────────────────────────────
-        st.subheader("Log-Loss — Rolling Average")
-        st.caption(
-            "Lower is better. Baseline (coin flip / uniform) ≈ 0.693. "
-            "Below 0.5 = model provides useful probability estimates."
-        )
-
-        fig_ll = build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                            H_COLORS, H_LABELS, show_points=show_points, show_aggregate=show_aggregate)
-        st.plotly_chart(fig_ll, use_container_width=True)
-
-        st.divider()
-
-        # ── Directional accuracy rolling trend ────────────────────────────────
-        st.subheader("Directional Accuracy — Rolling Average")
-        st.caption("Rolling % of predictions where predicted direction matched actual direction. 50% = random baseline.")
-
-        fig_dir = build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                                     H_COLORS, H_LABELS, show_aggregate=show_aggregate)
-        st.plotly_chart(fig_dir, use_container_width=True)
-
-        st.divider()
-
-        # ── Predicted vs Actual return scatter ────────────────────────────────
-        st.subheader("Predicted Return Midpoint vs Actual Return")
-        st.caption(
-            "X = midpoint of predicted return range. Y = actual return. "
-            "Points on the diagonal = perfect predictions. "
-            "Color = prediction outcome."
-        )
-
-        scatter_df = fdf.dropna(subset=["actual_return", "predicted_return_low", "predicted_return_high"]).copy()
-        if scatter_df.empty:
-            st.info("No predictions with both predicted range and actual return yet.", icon="📉")
-        else:
-            fig_scatter = build_predicted_vs_actual_scatter(scatter_df)
-            st.plotly_chart(fig_scatter, use_container_width=True)
-            st.caption("Marker size = conviction score (larger = higher conviction).")
-
-        st.divider()
-
-        # ── Prediction volume by horizon (moved here from the old Drift tab —
-        # its other chart, 5d rolling accuracy, was a strict subset of the
-        # Directional Accuracy chart above, which already covers every horizon) ──
-        st.subheader("Prediction Volume by Horizon")
-        vol_data = get_volume_by_horizon(lookback_days=lookback)
-        if not vol_data:
-            st.info("No volume data yet.")
-        else:
-            fig_vol = build_volume_by_horizon_chart(vol_data)
-            st.plotly_chart(fig_vol, use_container_width=True)
-
-# ── Tab 3: Accuracy Heatmap ───────────────────────────────────────────────────
-
-with tabs[2]:
-    heatmap_data = get_accuracy_heatmap_data(lookback_days=lookback, model_names=_model_filter)
-    if not heatmap_data:
-        st.info("No evaluated predictions yet. Run **🌆 Evening** on the 🗓️ Schedule page to generate heatmap data.")
-    else:
-        fig = build_accuracy_heatmap(heatmap_data)
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Grey = fewer than 5 evaluated predictions. "
-                   "Green = stronger signal, Red = weaker signal than expected.")
-
-# ── Tab 4: Calibration ────────────────────────────────────────────────────────
-
-with tabs[3]:
-    _cal_raw = get_calibration_data(lookback_days=lookback, model_names=_model_filter)
-    if isinstance(_cal_raw, list):
-        _cal_raw = {"conviction": _cal_raw, "summary": {}, "reliability": [], "bucket_table": []}
-    cal            = _cal_raw
-    summary        = cal.get("summary", {})
-    reliability    = cal.get("reliability", [])
-    bucket_table   = cal.get("bucket_table", [])
-    conviction_cal = cal.get("conviction", [])
-
-    n_total = summary.get("n", 0)
-
-    if n_total == 0:
-        st.info(
-            "No probability-distribution predictions evaluated yet. "
-            "Once predictions with the 5-bucket distribution are scored, "
-            "this tab will populate with the full reliability diagram.",
-            icon="ℹ️",
-        )
-    else:
-        if n_total < 30:
-            st.warning(f"⚠️ Only {n_total} evaluated predictions — metrics completely unreliable.", icon="⚠️")
-        elif n_total < 100:
-            st.warning(f"⚠️ {n_total} predictions — rough direction visible only.", icon="⚠️")
-        elif n_total < 300:
-            st.info(f"ℹ️ {n_total} predictions — overall Brier/log-loss meaningful; calibration bins sparse.", icon="ℹ️")
-        else:
-            st.success(f"✅ {n_total} predictions — calibration is interpretable.", icon="✅")
-
-    # Overall/per-horizon Brier & Log-Loss numbers live on the Scorecard tab —
-    # not restated here. This tab's job is the reliability diagram, bucket
-    # sample sizes, and conviction calibration, none of which Scorecard shows.
-    st.markdown("""
-<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 18px;margin:12px 0">
-<strong style="color:#0F172A;font-size:0.88rem">📐 Binary Brier score — p_up vs actual up/not-up</strong>
-<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px">
-  <div style="background:#D1FAE5;border-radius:6px;padding:7px;text-align:center">
-    <div style="font-weight:700;color:#065F46;font-size:0.82rem">&lt; 0.15</div>
-    <div style="font-size:0.72rem;color:#047857">Exceptional</div>
-  </div>
-  <div style="background:#DCFCE7;border-radius:6px;padding:7px;text-align:center">
-    <div style="font-weight:700;color:#166534;font-size:0.82rem">0.15–0.18</div>
-    <div style="font-size:0.72rem;color:#15803D">Genuine skill</div>
-  </div>
-  <div style="background:#FEF3C7;border-radius:6px;padding:7px;text-align:center">
-    <div style="font-weight:700;color:#92400E;font-size:0.82rem">0.18–0.20</div>
-    <div style="font-size:0.72rem;color:#B45309">Mild edge</div>
-  </div>
-  <div style="background:#FEE2E2;border-radius:6px;padding:7px;text-align:center">
-    <div style="font-weight:700;color:#991B1B;font-size:0.82rem">0.20–0.25</div>
-    <div style="font-size:0.72rem;color:#DC2626">Barely beats coin flip</div>
-  </div>
-  <div style="background:#FCA5A5;border-radius:6px;padding:7px;text-align:center">
-    <div style="font-weight:700;color:#7F1D1D;font-size:0.82rem">&gt; 0.25</div>
-    <div style="font-size:0.72rem;color:#991B1B">Actively bad</div>
-  </div>
-</div>
-<p style="margin:6px 0 0;font-size:0.76rem;color:#94A3B8">
-perfect = 0.0 · coin flip = 0.25 · worst = 1.0
-</p>
-</div>
-""", unsafe_allow_html=True)
-
-    st.divider()
-    st.subheader("Reliability Diagram")
-    st.caption(
-        "Stated p_up confidence (x-axis) vs actual 'up' hit rate (y-axis). "
-        "Points on the diagonal = perfectly calibrated. "
-        "**Below** diagonal = overconfident. **Above** = underconfident."
-    )
-
-    if not reliability:
-        st.info("No reliability data yet — needs evaluated predictions with distribution.", icon="ℹ️")
-    else:
-        fig = build_reliability_diagram(reliability)
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Prediction Count per Confidence Bucket")
-    st.caption("Sample size per bin is critical — thin bins (< 30) are unreliable.")
-    st.dataframe(pd.DataFrame(bucket_table), use_container_width=True, hide_index=True)
-    st.caption("Per-horizon Brier/log-loss breakdown lives on the Scorecard tab.")
-
-    st.divider()
-    st.subheader("Conviction Score vs Directional Accuracy")
-    st.caption("Conviction (1–10) vs whether the predicted direction was correct.")
-    if len(conviction_cal) < 2:
-        st.info("Insufficient data — needs predictions across at least 2 conviction buckets.")
-    else:
-        fig2 = build_conviction_calibration_chart(conviction_cal)
-        st.plotly_chart(fig2, use_container_width=True)
-
-# ── Tab 5: Prediction History (evaluated/matured predictions — distinct from
-# the live/pending predictions the separate Predictions page shows) ───────────
-
-with tabs[4]:
     preds = get_recent_evaluated_predictions(limit=500, lookback_days=lookback)
     # Apply global model filter
     if _model_filter and preds:
         preds = [p for p in preds if p.get("model_name") in _model_filter]
     # Apply segment filter
-    if _seg_sel == "Portfolio" and _portfolio_tickers and preds:
+    _my_set = set(_portfolio_tickers) | set(_watchlist_tickers)
+    if _seg_sel == "My Tickers" and _my_set and preds:
+        preds = [p for p in preds if p.get("ticker", "").upper() in _my_set]
+    elif _seg_sel == "Portfolio" and _portfolio_tickers and preds:
         _pt_set = set(_portfolio_tickers)
         preds = [p for p in preds if p.get("ticker", "").upper() in _pt_set]
     elif _seg_sel == "Watchlist" and _watchlist_tickers and preds:
@@ -514,8 +308,8 @@ with tabs[4]:
         if _model_filter:
             _no_pred_msg = f"No evaluated predictions for model(s): {', '.join(_model_filter)}"
         if _seg_sel != "All":
-            _no_pred_msg += f" (segment: {_seg_sel})"
-        st.info(_no_pred_msg)
+            _no_pred_msg += f" (scope: {_seg_sel})"
+        st.info(_no_pred_msg, icon=material("info"))
     else:
         f1, f2 = st.columns(2)
         with f1:
@@ -534,17 +328,6 @@ with tabs[4]:
             reverse=True,
         )
 
-        outcome_icon = {
-            "strong_correct":       "✅",
-            "directionally_correct":"🟢",
-            "flat_correct":         "🔵",
-            "wrong_minor":          "🟡",
-            "wrong_significant":    "🔴",
-            "data_missing":         "⬜",
-        }
-        def _fmt_price(p: float) -> str:
-            return f"${p:,.2f}" if p >= 10 else f"${p:.2f}"
-
         rows = []
         for p in filtered:
             ar    = p.get("actual_return")        # decimal  e.g. -0.0063
@@ -552,24 +335,22 @@ with tabs[4]:
             rhi   = p.get("predicted_return_high") # percent  e.g. 4.0
             sp    = p.get("start_price")           # dollars
             oc    = p.get("outcome") or p.get("evaluation_status") or "—"
-            bs    = p.get("brier_score")
-            ll    = p.get("log_loss")
             er    = p.get("excess_return")
 
             # Return % strings
-            rng_pct = f"{rlo:+.2f}% – {rhi:+.2f}%" if rlo is not None and rhi is not None else "—"
-            act_pct = f"{ar*100:+.2f}%" if ar is not None else "—"
+            rng_pct = f"{fmt_pct(rlo, signed=True)} – {fmt_pct(rhi, signed=True)}" if rlo is not None and rhi is not None else "—"
+            act_pct = fmt_pct(ar*100, signed=True) if ar is not None else "—"
 
             # Dollar price strings (only when start_price available)
             if sp and sp > 0:
                 if rlo is not None and rhi is not None:
                     p_lo = sp * (1 + rlo / 100)
                     p_hi = sp * (1 + rhi / 100)
-                    rng_price = f"{_fmt_price(p_lo)} – {_fmt_price(p_hi)}"
+                    rng_price = f"{fmt_money(p_lo)} – {fmt_money(p_hi)}"
                 else:
                     rng_price = "—"
-                act_price = _fmt_price(sp * (1 + ar)) if ar is not None else "—"
-                entry_price = _fmt_price(sp)
+                act_price = fmt_money(sp * (1 + ar)) if ar is not None else "—"
+                entry_price = fmt_money(sp)
             else:
                 rng_price = "—"
                 act_price = "—"
@@ -594,11 +375,9 @@ with tabs[4]:
                 "Actual Price":    act_price,
                 "Distribution":    " ".join(dist_parts) if dist_parts else "—",
                 "Bucket":          p.get("actual_bucket") or "—",
-                "Outcome":         f"{outcome_icon.get(oc,'')} {oc}",
-                "Brier":           f"{bs:.2f}" if bs is not None else "—",
-                "Log-Loss":        f"{ll:.2f}" if ll is not None else "—",
+                "Outcome":         oc.replace("_", " ").title() if isinstance(oc, str) else oc,
                 "Conviction":      p.get("conviction_score"),
-                "Excess vs SPY":   f"{er*100:+.2f}%" if er is not None else "—",
+                "Excess vs SPY":   fmt_pct(er*100, signed=True) if er is not None else "—",
                 "Segment":         p.get("risk_segment") or "unknown",
             })
 
@@ -610,89 +389,18 @@ with tabs[4]:
             "Distribution: ▼▼=strong_down ▼=moderate_down →=flat ▲=moderate_up ▲▲=strong_up"
         )
 
-        # ── Brier + Log-Loss distribution among evaluated predictions ─────────
-        if filtered:
-            eval_df = pd.DataFrame(rows)
-            b_vals  = [p["brier_score"] for p in filtered if p.get("brier_score") is not None]
-            ll_vals = [p["log_loss"] for p in filtered if p.get("log_loss") is not None]
+# ── Tab 3: Score vs Returns — renamed from "Score Calibration"; the
+# correlation table became the top-vs-bottom-quintile return chart, since
+# that's the plain-English version of the same underlying calibration_analysis
+# computation. Kept user-facing: this directly answers "should I trust a
+# high score," unlike the full reliability-diagram Calibration tab (moved to
+# Validation QA as "Confidence Calibration" to avoid name collision) ─────────
 
-            if b_vals or ll_vals:
-                st.divider()
-                st.subheader("Distribution of Brier Score & Log-Loss (evaluated set)")
-                hc1, hc2 = st.columns(2)
-                with hc1:
-                    if b_vals:
-                        fig_bh = build_brier_histogram(b_vals)
-                        st.plotly_chart(fig_bh, use_container_width=True)
-                with hc2:
-                    if ll_vals:
-                        fig_llh = build_logloss_histogram(ll_vals)
-                        st.plotly_chart(fig_llh, use_container_width=True)
-
-# ── Tab 6: Post-mortems ───────────────────────────────────────────────────────
-
-with tabs[5]:
-    reports = get_validation_reports(limit=5)
-    if not reports:
-        st.info("No post-mortem reports yet. Click **🔬 Weekly Analysis** on the 🗓️ Schedule page.")
-    else:
-        for report in reports:
-            period = (report.get("period") or "weekly").capitalize()
-            st.subheader(f"{period} — {report['report_date']}")
-            if report.get("llm_summary"):
-                st.write(report["llm_summary"])
-            pi   = report.get("patterns_identified") or {}
-            pats = pi.get("patterns", [])
-            sugs = pi.get("suggestions", [])
-            if pats:
-                st.write("**Patterns detected:**")
-                for pat in pats:
-                    st.write(f"- {pat}")
-            if sugs:
-                st.write("**Suggested improvements:**")
-                for sug in sugs:
-                    st.write(f"- {sug}")
-            snap = report.get("metrics_snapshot") or {}
-            if snap.get("wrong_count"):
-                st.caption(f"Analyzed {snap['wrong_count']} wrong predictions.")
-            st.divider()
-
-# ── Tab 7: Version Comparison ─────────────────────────────────────────────────
-# (the old Drift tab was removed here — its rolling-accuracy chart was a strict
-# subset of Metric Trends' Directional Accuracy chart, and its volume-by-horizon
-# chart now lives at the bottom of Metric Trends instead)
-
-with tabs[6]:
-    ver_data = get_system_version_comparison(lookback_days=lookback, model_names=_model_filter)
-    if not ver_data:
-        st.info("No version comparison data yet — needs evaluated predictions.")
-    else:
-        unique_ver = {r["sys_ver"] for r in ver_data}
-        if len(unique_ver) <= 1:
-            st.info("Only one system version in history. "
-                    "Comparison becomes available after prompt or model changes are tagged.")
-            st.subheader(f"Current baseline — version {next(iter(unique_ver), CURRENT_SYSTEM_VERSION)}")
-
-        rows_ver = [{
-            "Version":            r.get("sys_ver") or "v1.0",
-            "Horizon":            f"{r.get('horizon_days')}d" if r.get("horizon_days") else "—",
-            "N":                  r.get("n"),
-            "Directional Acc.":   f"{r['dir_acc']*100:.2f}%" if r.get("dir_acc") is not None else "—",
-            "Mean Excess Return": f"{r['mean_excess']*100:.2f}%" if r.get("mean_excess") is not None else "—",
-        } for r in ver_data]
-        st.dataframe(pd.DataFrame(rows_ver), use_container_width=True, hide_index=True)
-
-# ── Tab 8: Score Calibration ───────────────────────────────────────────────────
-#
-# Answers "is the Opportunity Engine's 0-100 score actually better than plain
-# APEX at predicting returns" — empirically, not by assertion. See
-# portfolio_agent/tools/scoring_snapshot_db.py and calibration_analysis.py.
-
-with tabs[7]:
+with tabs[2]:
     from portfolio_agent.tools.scoring_snapshot_db import get_latest_snapshot_date, get_snapshots_for_date
     from portfolio_agent.tools.calibration_analysis import compute_calibration_report, SCORE_LABELS
 
-    st.subheader("📐 Today's Scoring Table")
+    st.subheader(f"{material('calculate')} Today's Scoring Table")
     st.caption(
         "Every ticker scored today across all four parallel systems, plus a documented fixed "
         "blend (Final) — captured daily so it can be checked against realized returns later."
@@ -702,7 +410,7 @@ with tabs[7]:
         st.info(
             "No scoring snapshots yet — this table populates once the morning batch's "
             "Score Calibration phase runs.",
-            icon="📐",
+            icon=material("calculate"),
         )
     else:
         st.caption(f"As of {snap_date}")
@@ -719,34 +427,23 @@ with tabs[7]:
 
     st.divider()
 
-    st.subheader("🔬 Calibration Results")
+    st.subheader(f"{material('bar_chart')} Score vs Returns")
     st.caption(
-        "For each scoring system: correlation with the realized return at this horizon, and "
-        "the average return of the top-20% vs. bottom-20% scored names — the more legible "
-        "\"did our top picks actually do better\" view."
+        "For each scoring system: the average realized return of the top-20% vs. bottom-20% "
+        "scored names at this horizon — did the names we scored highly actually do better?"
     )
     horizon_choice = st.radio(
         "Horizon", [30, 60, 90, 250], format_func=lambda h: f"{h}d", horizontal=True, key="calib_horizon",
     )
     report = compute_calibration_report(horizon_choice)
-    calib_rows = []
-    for col, stats in report["scores"].items():
-        label = SCORE_LABELS[col]
-        if stats.get("insufficient_data"):
-            calib_rows.append({
-                "Score": label, "N": stats["n"],
-                "Correlation": "—", "Top 20% Avg Return": "—", "Bottom 20% Avg Return": "—", "Spread": "—",
-            })
-        else:
-            calib_rows.append({
-                "Score": label,
-                "N": stats["n"],
-                "Correlation": f"{stats['correlation']:+.2f}" if stats["correlation"] is not None else "—",
-                "Top 20% Avg Return": f"{stats['top_quintile_avg_return_pct']:+.2f}%",
-                "Bottom 20% Avg Return": f"{stats['bottom_quintile_avg_return_pct']:+.2f}%",
-                "Spread": f"{stats['spread_pct']:+.2f}%",
-            })
-    st.dataframe(pd.DataFrame(calib_rows), use_container_width=True, hide_index=True)
+    _has_any = any(not s.get("insufficient_data") for s in report["scores"].values())
+    if not _has_any:
+        st.info(
+            f"Not enough matured {horizon_choice}-day snapshots yet to compare scores against returns.",
+            icon=material("info"),
+        )
+    else:
+        st.plotly_chart(build_score_vs_returns_chart(report, SCORE_LABELS), use_container_width=True)
 
     any_insufficient = any(s.get("insufficient_data") for s in report["scores"].values())
     if any_insufficient:
@@ -754,5 +451,28 @@ with tabs[7]:
             f"Some scores don't have {report['min_sample']} matured {horizon_choice}-day snapshots yet — "
             f"a {horizon_choice}-day horizon needs {horizon_choice} days of history before the first row "
             "can even mature, so this fills in gradually. Check back as more days pass.",
-            icon="⏳",
+            icon=material("hourglass_top"),
+        )
+
+# ── Tab 4: Heatmap — simplified to horizon-only. Segment × horizon detail
+# moved conceptually to Validation QA territory (not wired there either,
+# since no one asked for it back — the underlying accuracy-heatmap functions
+# stay in the codebase, just unused, so it can come back easily if needed) ───
+
+with tabs[3]:
+    st.subheader("Which Horizon Is More Reliable?")
+    st.caption(
+        "Directional accuracy by prediction horizon — useful for deciding how much to weight "
+        "a 5-day call vs. a 63-day one. Segment-level detail lives on Validation QA."
+    )
+    if not metrics:
+        st.info(
+            f"No evaluated predictions yet. Run {material('nights_stay')} **Evening** on the "
+            f"{material('calendar_month')} Schedule page to generate this view.",
+            icon=material("info"),
+        )
+    else:
+        st.plotly_chart(
+            build_horizon_reliability_chart(by_horizon, all_horizons, horizon_labels),
+            use_container_width=True,
         )

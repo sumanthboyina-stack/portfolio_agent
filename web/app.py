@@ -20,13 +20,14 @@ from web.styles import (
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, PURPLE,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
     freshness_color, accuracy_color, brier_color,
+    icon_html, material, status_dot_html, fmt_money, fmt_pct,
 )
 
 _DB = _ROOT / "data" / "portfolio.db"
 
 st.set_page_config(
     page_title="Portfolio Intelligence",
-    page_icon="📈",
+    page_icon=material("trending_up"),
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -183,12 +184,8 @@ def _load() -> dict:
     # ── Newly promoted screener candidates (today's Discovered signals) ────────
     try:
         from portfolio_agent.tools.universe_db import get_latest_signal_date, get_signals
-        import yaml as _yaml
-        wl_path = _ROOT / "config" / "watchlist.yaml"
-        wl_tickers = set()
-        if wl_path.exists():
-            wl_data = _yaml.safe_load(wl_path.read_text()) or {}
-            wl_tickers = {str(t).upper() for t in wl_data.get("tickers", [])}
+        from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
+        wl_tickers = set(load_watchlist_tickers())
         latest_sig_date = get_latest_signal_date()
         if latest_sig_date:
             sigs = get_signals(latest_sig_date, min_score=2)
@@ -278,7 +275,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = hmap.get(ev["ticker"], {}).get("weight_pct", 0)
             _item("critical", ev["ticker"],
                   ev.get("summary") or f"Severity-3 {ev['event_type'].replace('_',' ')}",
-                  f"Portfolio weight {w:.2f}% — pipeline has not yet processed this event. "
+                  f"Portfolio weight {fmt_pct(w)} — pipeline has not yet processed this event. "
                   f"Open Chat and ask APEX to analyze {ev['ticker']}.",
                   "chat")
 
@@ -287,14 +284,14 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = hmap.get(t, {}).get("weight_pct", 0)
             _item("critical", t,
                   f"{p['recommendation']} — confidence {p.get('confidence','?')}/10",
-                  f"Portfolio weight {w:.2f}%. Review the reasoning before holding further. "
+                  f"Portfolio weight {fmt_pct(w)}. Review the reasoning before holding further. "
                   f"Check the Predictions page for the full analyst breakdown.",
                   "predictions")
 
     for h in d.get("holdings", []):
         if h["weight_pct"] > 20:
             _item("critical", h["ticker"],
-                  f"Concentration {h['weight_pct']:.2f}% of portfolio",
+                  f"Concentration {fmt_pct(h['weight_pct'])} of portfolio",
                   "Single name above 20%. Consider whether the position sizing still matches "
                   "your original thesis. See the Portfolio page for full breakdown.",
                   "portfolio")
@@ -313,10 +310,10 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             rd = {}
         bits = []
         if (rd.get("sector_concentration_pct") or 0) > 25:
-            bits.append(f"{rd.get('sector','sector')} at {rd['sector_concentration_pct']:.2f}% of portfolio")
+            bits.append(f"{rd.get('sector','sector')} at {fmt_pct(rd['sector_concentration_pct'])} of portfolio")
         if (rd.get("issuer_concentration_pct") or 0) > 15:
             peers = ", ".join(rd.get("issuer_peers") or [])
-            bits.append(f"issuer concentration {rd['issuer_concentration_pct']:.2f}%" + (f" (with {peers})" if peers else ""))
+            bits.append(f"issuer concentration {fmt_pct(rd['issuer_concentration_pct'])}" + (f" (with {peers})" if peers else ""))
         if abs(rd.get("beta_vs_spy") or 0) > 1.5:
             bits.append(f"beta {rd['beta_vs_spy']:.2f} vs SPY")
         detail = "; ".join(bits) if bits else (rf.get("summary") or "Risk specialist flagged this position")
@@ -359,7 +356,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
     n5   = v5.get("num_predictions") or 0
     if n5 >= 30 and acc5 < 0.45:
         _item("watch", None,
-              f"5-day accuracy {acc5*100:.2f}% over {n5} evaluated predictions",
+              f"5-day accuracy {fmt_pct(acc5*100)} over {n5} evaluated predictions",
               f"Below coin-flip baseline (50%). Brier score {v5.get('brier_score',0):.2f} "
               f"vs 0.250 baseline. Treat 5-day signals as research prompts only — "
               f"not trade signals. See Validation for breakdown by ticker and horizon.",
@@ -376,7 +373,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
     for h in d.get("holdings", []):
         if 15 <= h["weight_pct"] < 20:
             _item("watch", h["ticker"],
-                  f"Concentration {h['weight_pct']:.2f}% — approaching single-name limit",
+                  f"Concentration {fmt_pct(h['weight_pct'])} — approaching single-name limit",
                   "No immediate action required. Monitor — further appreciation will push "
                   "this past 20%.",
                   "portfolio", requires_action=False)
@@ -388,7 +385,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = hmap.get(ev["ticker"], {}).get("weight_pct", 0)
             _item("watch", ev["ticker"],
                   ev.get("summary") or f"Material event: {ev['event_type'].replace('_',' ')}",
-                  f"Portfolio weight {w:.2f}%. APEX already processed this — check the updated "
+                  f"Portfolio weight {fmt_pct(w)}. APEX already processed this — check the updated "
                   f"prediction on the Predictions page.",
                   "predictions", requires_action=False)
 
@@ -399,7 +396,7 @@ def _build_queue(d: dict, macro: dict) -> list[dict]:
             w = h.get("weight_pct", 0)
             if w < 10 and (p.get("confidence") or 0) >= 7:
                 _item("opportunity", t,
-                      f"{p['recommendation']} — {w:.2f}% weight, room to add",
+                      f"{p['recommendation']} — {fmt_pct(w)} weight, room to add",
                       f"Confidence {p.get('confidence','?')}/10. Candidate for adding to an "
                       f"existing position. Verify the thesis independently before acting.",
                       "predictions")
@@ -451,13 +448,13 @@ def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
         if ev["severity"] != 3:
             continue
         w = hmap.get(ev["ticker"], {}).get("weight_pct")
-        held_tag = f" · {w:.2f}% of portfolio" if w else ""
+        held_tag = f" · {fmt_pct(w)} of portfolio" if w else ""
         if not ev.get("processed"):
-            _add(100, "🔴", ev["ticker"],
+            _add(100, status_dot_html(DANGER), ev["ticker"],
                  f"{ev.get('summary') or ev['event_type'].replace('_',' ')}{held_tag} — not yet processed",
                  "chat")
         else:
-            _add(55, "🟡", ev["ticker"],
+            _add(55, status_dot_html(WARNING), ev["ticker"],
                  f"{ev.get('summary') or ev['event_type'].replace('_',' ')}{held_tag} — processed",
                  "predictions")
 
@@ -467,13 +464,13 @@ def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
         curr = rc.get("recommendation") or "—"
         if curr in ("SELL", "STRONG_SELL"):
             urgency = 92 if curr == "STRONG_SELL" else 85
-            icon = "🔴"
+            icon = status_dot_html(DANGER)
         elif curr in ("BUY", "STRONG_BUY"):
             urgency = 58 if curr == "STRONG_BUY" else 50
-            icon = "🟢"
+            icon = status_dot_html(SUCCESS)
         else:
             urgency = 40
-            icon = "🟡"
+            icon = status_dot_html(WARNING)
         _add(urgency, icon, rc["ticker"],
              f"{prev} → {curr} (conf {rc.get('confidence','?')}/10)",
              "predictions")
@@ -486,11 +483,11 @@ def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
             rd = {}
         score = rf.get("score") or 0
         if rf["source"] == "risk":
-            _add(70 + min(score, 10) * 2, "🟠", rf["ticker"],
+            _add(70 + min(score, 10) * 2, status_dot_html(WARNING), rf["ticker"],
                  f"Risk flag — {rd.get('summary', rf.get('summary',''))[:90]}",
                  "chat")
         else:
-            _add(55, "🟠", rf["ticker"],
+            _add(55, status_dot_html(WARNING), rf["ticker"],
                  f"Bearish momentum — {rd.get('summary', rf.get('summary',''))[:90]}",
                  "chat")
 
@@ -500,7 +497,7 @@ def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
             fired = json.loads(sig.get("signals_json") or "[]")
         except Exception:
             fired = []
-        _add(30 + min(sig.get("score") or 0, 10) * 3, "🌟", sig["ticker"],
+        _add(30 + min(sig.get("score") or 0, 10) * 3, icon_html("star", 14, color=PURPLE), sig["ticker"],
              f"Discovered — score {sig.get('score','?')} ({', '.join(fired) or 'screener hit'})",
              "chat")
 
@@ -513,14 +510,15 @@ def _build_fired_feed(d: dict, limit: int = 12) -> list[dict]:
 def _fmt_val(v):
     if v is None: return "—"
     if v >= 1_000_000: return f"${v/1_000_000:.2f}M"
-    if v >= 1_000:     return f"${v:,.2f}"
-    return f"${v:.2f}"
+    return fmt_money(v)
 
+# (color, label) — the status dot itself is rendered at each call site via
+# status_dot_html(color), not stored here, so the dot always tracks the color.
 PRIORITY_STYLE = {
-    "critical":    (DANGER,  "🔴", "CRITICAL"),
-    "watch":       (WARNING, "🟡", "WATCH"),
-    "opportunity": (SUCCESS, "🟢", "PORTFOLIO · ADD SIGNAL"),
-    "discovery":   (PURPLE,  "🌟", "NEW OPPORTUNITIES · TRENDING"),
+    "critical":    (DANGER,  "CRITICAL"),
+    "watch":       (WARNING, "WATCH"),
+    "opportunity": (SUCCESS, "PORTFOLIO · ADD SIGNAL"),
+    "discovery":   (PURPLE,  "NEW OPPORTUNITIES · TRENDING"),
 }
 
 PAGE_MAP = {
@@ -602,13 +600,17 @@ run    = d.get("last_run") or {}
 run_st = run.get("status", "")
 run_sc = SUCCESS if run_st == "completed" else (DANGER if run_st == "error" else WARNING)
 run_la = (run.get("started_at") or "")[:16].replace("T", " ")
-run_tx = ("✓ " if run_st == "completed" else "✗ " if run_st == "error" else "… ") + run_la
+run_icon_name = "check_circle" if run_st == "completed" else "cancel" if run_st == "error" else "hourglass_empty"
+run_tx = (
+    f'<span style="display:inline-flex;align-items:center;gap:4px">'
+    f'{icon_html(run_icon_name, 13, color=run_sc)}{run_la}</span>'
+)
 
 regime     = macro.get("regime", "—")
 regime_col = DANGER if regime in ("HIGH VOL","INVERTED") else (SUCCESS if regime == "RISK-ON" else WARNING)
 rev_color  = DANGER if n_critical > 0 else (WARNING if n_watch > 0 else SUCCESS)
 upr_col    = SUCCESS if (upr or 0) >= 0 else DANGER
-upr_str    = f"{upr:+.2f}%" if upr is not None else "—"
+upr_str    = fmt_pct(upr, signed=True)
 rev_sub    = (f"{n_critical} critical" if n_critical else "") + (f", {n_watch} watch" if n_watch else "")
 disc_col   = PURPLE if n_discovery > 0 else NEUTRAL
 disc_sub   = f"{n_discovery} BUY/STRONG_BUY" if n_discovery > 0 else "none today"
@@ -618,7 +620,7 @@ st.markdown(
     'margin-bottom:18px;display:flex;align-items:stretch">'
     + _tile("Portfolio",        _fmt_val(tv))
     + _tile("Unrealized P&L",   upr_str, upr_col,
-            f"vs ${tc:,.2f} cost" if tc else "")
+            f"vs {fmt_money(tc)} cost" if tc else "")
     + _tile("Review Queue",     f"{n_review} items", rev_color, rev_sub or "nothing urgent")
     + _tile("New Discoveries",  f"{n_discovery}", disc_col, disc_sub)
     + _tile("Regime",           regime, regime_col,
@@ -648,7 +650,7 @@ if _fired:
         _fired_html += (
             f'<div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;'
             f'border-bottom:1px solid #F1F5F9">'
-            f'<span style="font-size:0.9rem">{_f["icon"]}</span>'
+            f'<span style="display:inline-flex;align-items:center">{_f["icon"]}</span>'
             f'<span style="font-weight:800;color:#111827;min-width:110px">'
             f'{ticker_label(_f["ticker"]) if _f["ticker"] else "—"}</span>'
             f'<span style="font-size:0.82rem;color:#374151;flex:1">{_f["title"]}</span>'
@@ -659,7 +661,9 @@ if _fired:
         f'<div style="background:white;border:1px solid #E5E7EB;border-radius:12px;'
         f'padding:12px 18px;margin-bottom:18px">'
         f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:0.08em;color:#6B7280;margin-bottom:6px">⚡ What Fired — {len(_fired)} item(s), ranked by urgency</div>'
+        f'letter-spacing:0.08em;color:#6B7280;margin-bottom:6px">'
+        f'{icon_html("bolt", 14, extra_style="margin-right:5px;vertical-align:-2px")} '
+        f'What Fired — {len(_fired)} item(s), ranked by urgency</div>'
         f'{_fired_html}'
         f'</div>',
         unsafe_allow_html=True,
@@ -702,7 +706,7 @@ with left:
             '<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             'letter-spacing:0.08em;color:#374151;background:#F9FAFB;border-radius:8px;'
             'padding:6px 10px;margin-bottom:4px;border-left:3px solid #2563EB">'
-            '💼 YOUR PORTFOLIO</div>',
+            f'{icon_html("work", 14, extra_style="margin-right:6px;vertical-align:-2px")} YOUR PORTFOLIO</div>',
             unsafe_allow_html=True,
         )
         _portfolio_rendered = False
@@ -711,11 +715,12 @@ with left:
             if not group:
                 continue
             _portfolio_rendered = True
-            color, dot, label = PRIORITY_STYLE[group_key]
+            color, label = PRIORITY_STYLE[group_key]
             st.markdown(
                 f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-                f'letter-spacing:0.08em;color:{color};margin:12px 0 6px">'
-                f'{dot} {label} ({len(group)})</div>',
+                f'letter-spacing:0.08em;color:{color};margin:12px 0 6px;display:flex;'
+                f'align-items:center;gap:6px">'
+                f'{status_dot_html(color, 7)} {label} ({len(group)})</div>',
                 unsafe_allow_html=True,
             )
             for item in group:
@@ -748,16 +753,18 @@ with left:
             '<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             'letter-spacing:0.08em;color:#374151;background:#F5F3FF;border-radius:8px;'
             'padding:6px 10px;margin:20px 0 4px;border-left:3px solid #7C3AED">'
-            '🌟 NEW INVESTMENT OPPORTUNITIES</div>',
+            f'{icon_html("auto_awesome", 14, color=PURPLE, extra_style="margin-right:6px;vertical-align:-2px")} '
+            'NEW INVESTMENT OPPORTUNITIES</div>',
             unsafe_allow_html=True,
         )
         disc_group = [i for i in queue if i["priority"] == "discovery"]
         if disc_group:
-            color, dot, label = PRIORITY_STYLE["discovery"]
+            color, label = PRIORITY_STYLE["discovery"]
             st.markdown(
                 f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-                f'letter-spacing:0.08em;color:{color};margin:12px 0 6px">'
-                f'{dot} {label} ({len(disc_group)})</div>',
+                f'letter-spacing:0.08em;color:{color};margin:12px 0 6px;display:flex;'
+                f'align-items:center;gap:6px">'
+                f'{status_dot_html(color, 7)} {label} ({len(disc_group)})</div>',
                 unsafe_allow_html=True,
             )
             for idx, item in enumerate(disc_group):
@@ -808,7 +815,7 @@ with right:
             f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:8px">System Health</div>'
             f'<div style="display:flex;gap:20px">'
             f'<div><div style="font-size:1.05rem;font-weight:800;color:{_acc_col}">'
-            f'{acc5*100:.2f}%</div>'
+            f'{fmt_pct(acc5*100)}</div>'
             f'<div style="font-size:0.63rem;color:#9CA3AF">5d accuracy</div></div>'
             f'<div><div style="font-size:1.05rem;font-weight:800;color:{_br_col}">'
             f'{br5:.2f}</div>'
@@ -841,11 +848,12 @@ with right:
         ("Holdings",     d.get("sync_date"),    7),
     ]:
         ftxt, fcol = freshness_color(date_str or "", warn_days)
-        dot = "✅" if fcol == SUCCESS else ("⚠️" if fcol == WARNING else "❌")
+        _dot_icon = "check_circle" if fcol == SUCCESS else ("warning" if fcol == WARNING else "cancel")
+        dot = icon_html(_dot_icon, 13, color=fcol)
         fresh_rows += (
             f'<div style="display:flex;justify-content:space-between;padding:5px 0;'
             f'border-bottom:1px solid #F3F4F6">'
-            f'<span style="font-size:0.78rem;color:#374151">{dot} {label}</span>'
+            f'<span style="font-size:0.78rem;color:#374151;display:inline-flex;align-items:center;gap:5px">{dot} {label}</span>'
             f'<span style="font-size:0.78rem;font-weight:600;color:{fcol}">{ftxt}</span>'
             f'</div>'
         )
@@ -860,14 +868,14 @@ with right:
         f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">'
         f'<div style="font-size:0.76rem;color:#6B7280">10Y–2Y Spread</div>'
         f'<div style="font-size:0.76rem;font-weight:700;color:{spr_col};text-align:right">'
-        f'{_mv(spr, "+.2f", "%")}</div>'
+        f'{fmt_pct(spr, signed=True)}</div>'
         f'<div style="font-size:0.76rem;color:#6B7280">Fed Funds</div>'
         f'<div style="font-size:0.76rem;font-weight:700;color:#374151;text-align:right">'
-        f'{_mv(macro.get("ff"), ".2f", "%")}</div>'
+        f'{fmt_pct(macro.get("ff"))}</div>'
         f'<div style="font-size:0.76rem;color:#6B7280">CPI YoY</div>'
         f'<div style="font-size:0.76rem;font-weight:700;'
         f'color:{DANGER if (macro.get("cpi") or 0)>3.5 else WARNING if (macro.get("cpi") or 0)>2.5 else SUCCESS};'
-        f'text-align:right">{_mv(macro.get("cpi"), ".2f", "%")}</div>'
+        f'text-align:right">{fmt_pct(macro.get("cpi"))}</div>'
         f'<div style="font-size:0.76rem;color:#6B7280">HY Spread</div>'
         f'<div style="font-size:0.76rem;font-weight:700;'
         f'color:{DANGER if (macro.get("hy") or 0)>450 else "#374151"};text-align:right">'
@@ -913,7 +921,8 @@ with right:
             f'padding:14px 16px;margin-bottom:12px">'
             f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:0.08em;color:#7C3AED;margin-bottom:10px">'
-            f'🌟 New Opportunities · Trending</div>'
+            f'{icon_html("auto_awesome", 13, color=PURPLE, extra_style="margin-right:5px;vertical-align:-2px")} '
+            f'New Opportunities · Trending</div>'
             f'{opp_rows}'
             f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
             f'→ <a href="/Opportunity_Engine" target="_self">Full ranking on Opportunity Engine</a></div>'
@@ -925,7 +934,8 @@ with right:
             f'padding:12px 16px;margin-bottom:12px">'
             f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:0.08em;color:#7C3AED;margin-bottom:6px">'
-            f'🌟 New Opportunities · Trending</div>'
+            f'{icon_html("auto_awesome", 13, color=PURPLE, extra_style="margin-right:5px;vertical-align:-2px")} '
+            f'New Opportunities · Trending</div>'
             f'<div style="font-size:0.8rem;color:#6B7280">'
             f'No trending signals yet today. Discoveries are added during morning '
             f'&amp; intraday pipeline runs.</div>'

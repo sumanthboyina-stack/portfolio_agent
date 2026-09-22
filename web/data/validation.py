@@ -8,6 +8,10 @@ Contains:
   - _compute_filtered_metrics    : rolling metrics recomputed from predictions table
   - _load_rolling_metrics_series : historical rows from metrics_rolling table
   - _directional_correct         : outcome -> bool correctness helper
+  - _load_evaluated_predictions_df : broad evaluated-prediction rows (no brier requirement)
+  - _outcome_breakdown           : outcome bucket counts
+  - _returns_by_recommendation   : avg realized return per recommendation bucket
+  - _signal_equity_curve         : cumulative "followed the BUY calls" vs SPY curve
 """
 
 from __future__ import annotations
@@ -35,9 +39,15 @@ def _load_metric_series(
     if not _DB.exists():
         return pd.DataFrame()
 
+    my_tickers = sorted(set(portfolio_tickers or []) | set(watchlist_tickers or []))
+
     seg_clause = ""
     seg_params: list = []
-    if segment == "Portfolio" and portfolio_tickers:
+    if segment == "My Tickers" and my_tickers:
+        ph = ",".join("?" * len(my_tickers))
+        seg_clause = f"AND ticker IN ({ph})"
+        seg_params = list(my_tickers)
+    elif segment == "Portfolio" and portfolio_tickers:
         ph = ",".join("?" * len(portfolio_tickers))
         seg_clause = f"AND ticker IN ({ph})"
         seg_params = list(portfolio_tickers)
@@ -83,10 +93,10 @@ def _load_portfolio_tickers() -> list[str]:
 
 
 def _load_watchlist_tickers() -> list[str]:
-    """Return unique watchlist ticker symbols from watchlist.yaml (excludes holdings)."""
+    """Return unique watchlist ticker symbols (excludes holdings)."""
+    from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
     try:
-        data = _yaml.safe_load((_ROOT / "config" / "watchlist.yaml").read_text()) or {}
-        watchlist = {str(t).upper() for t in data.get("tickers", [])}
+        watchlist = set(load_watchlist_tickers())
         return list(watchlist - set(_load_portfolio_tickers()))
     except Exception:
         return []
@@ -126,9 +136,15 @@ def _compute_filtered_metrics(
         model_clause = f"AND model_name IN ({placeholders})"
         model_params = list(model_names)
 
+    my_tickers = sorted(set(portfolio_tickers or []) | set(watchlist_tickers or []))
+
     seg_clause = ""
     seg_params: list = []
-    if segment == "Portfolio" and portfolio_tickers:
+    if segment == "My Tickers" and my_tickers:
+        ph = ",".join("?" * len(my_tickers))
+        seg_clause = f"AND ticker IN ({ph})"
+        seg_params = list(my_tickers)
+    elif segment == "Portfolio" and portfolio_tickers:
         ph = ",".join("?" * len(portfolio_tickers))
         seg_clause = f"AND ticker IN ({ph})"
         seg_params = list(portfolio_tickers)
@@ -214,3 +230,125 @@ def _directional_correct(outcome: str | None) -> bool | None:
     if outcome is None:
         return None
     return outcome in ("strong_correct", "directionally_correct", "flat_correct")
+
+
+OUTCOME_ORDER = [
+    "strong_correct", "directionally_correct", "flat_correct",
+    "wrong_minor", "wrong_significant",
+]
+RECOMMENDATION_ORDER = ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"]
+
+
+def _load_evaluated_predictions_df(
+    lookback_days: int | None = None,
+    model_names: list[str] | None = None,
+    segment: str = "My Tickers",
+    portfolio_tickers: list[str] | None = None,
+    watchlist_tickers: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Every evaluated prediction (recommendation, outcome, actual_return,
+    excess_return, dates) — unlike _load_metric_series, does NOT require
+    brier_score, since the outcome-breakdown / returns-by-recommendation /
+    equity-curve views don't depend on the probability-distribution columns
+    and would otherwise silently drop older or distribution-less predictions.
+    """
+    if not _DB.exists():
+        return pd.DataFrame()
+
+    my_tickers = sorted(set(portfolio_tickers or []) | set(watchlist_tickers or []))
+
+    clauses = ["evaluation_status = 'evaluated'"]
+    params: list = []
+    if lookback_days:
+        clauses.append("as_of_date >= DATE('now', '-' || ? || ' days')")
+        params.append(lookback_days)
+    if model_names:
+        ph = ",".join("?" * len(model_names))
+        clauses.append(f"model_name IN ({ph})")
+        params.extend(model_names)
+
+    if segment == "My Tickers" and my_tickers:
+        ph = ",".join("?" * len(my_tickers))
+        clauses.append(f"ticker IN ({ph})")
+        params.extend(my_tickers)
+    elif segment == "Portfolio" and portfolio_tickers:
+        ph = ",".join("?" * len(portfolio_tickers))
+        clauses.append(f"ticker IN ({ph})")
+        params.extend(portfolio_tickers)
+    elif segment == "Watchlist" and watchlist_tickers:
+        ph = ",".join("?" * len(watchlist_tickers))
+        clauses.append(f"ticker IN ({ph})")
+        params.extend(watchlist_tickers)
+    elif segment == "New Opportunities":
+        clauses.append("trigger_type = 'trending_opportunity'")
+
+    where = "WHERE " + " AND ".join(clauses)
+    with sqlite3.connect(str(_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(f"""
+            SELECT as_of_date, evaluation_date, evaluated_at, ticker, horizon_days,
+                   recommendation, outcome, actual_return, excess_return,
+                   conviction_score, composite_score, trigger_type, model_name
+            FROM predictions
+            {where}
+            ORDER BY COALESCE(evaluation_date, as_of_date) ASC
+        """, params).fetchall()
+
+    df = pd.DataFrame([dict(r) for r in rows])
+    if not df.empty:
+        df["event_date"] = pd.to_datetime(df["evaluation_date"].fillna(df["as_of_date"]))
+    return df
+
+
+def _outcome_breakdown(df: pd.DataFrame) -> list[dict]:
+    """Count of evaluated predictions per outcome bucket, in fixed strong->wrong order."""
+    if df.empty or "outcome" not in df.columns:
+        return []
+    counts = df["outcome"].value_counts().to_dict()
+    return [{"outcome": o, "count": int(counts.get(o, 0))} for o in OUTCOME_ORDER]
+
+
+def _returns_by_recommendation(df: pd.DataFrame) -> list[dict]:
+    """Average realized return per recommendation bucket, in STRONG_BUY->STRONG_SELL order."""
+    if df.empty:
+        return []
+    sub = df.dropna(subset=["actual_return", "recommendation"])
+    out = []
+    for rec in RECOMMENDATION_ORDER:
+        rows = sub[sub["recommendation"].str.upper() == rec]
+        out.append({
+            "recommendation": rec,
+            "avg_return": float(rows["actual_return"].mean()) if len(rows) else None,
+            "n": int(len(rows)),
+        })
+    return out
+
+
+def _signal_equity_curve(df: pd.DataFrame, buy_recs: tuple[str, ...] = ("STRONG_BUY", "BUY")) -> pd.DataFrame:
+    """
+    Hypothetical cumulative return from mechanically following every BUY /
+    STRONG_BUY call, vs. a same-window SPY benchmark derived from the already-
+    stored excess_return (benchmark_return = actual_return - excess_return).
+
+    Each step is one closed call, sequenced by evaluation date — not a daily-
+    compounded curve, since calls overlap across tickers and horizons. That
+    makes this a "did mechanically following the calls beat SPY over the same
+    stretches of time" comparison, not a literal portfolio simulation.
+    """
+    if df.empty or "recommendation" not in df.columns:
+        return pd.DataFrame()
+    sub = df[df["recommendation"].str.upper().isin(buy_recs)].dropna(
+        subset=["actual_return", "excess_return"]
+    ).copy()
+    if sub.empty:
+        return pd.DataFrame()
+    sub = sub.sort_values("event_date")
+    sub["benchmark_return"] = sub["actual_return"] - sub["excess_return"]
+    sub["strategy_cum"]  = (1 + sub["actual_return"]).cumprod()
+    sub["benchmark_cum"] = (1 + sub["benchmark_return"]).cumprod()
+    sub["call_num"] = range(1, len(sub) + 1)
+    return sub[[
+        "event_date", "call_num", "ticker", "recommendation",
+        "actual_return", "benchmark_return", "strategy_cum", "benchmark_cum",
+    ]]

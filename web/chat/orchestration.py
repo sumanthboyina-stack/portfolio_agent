@@ -209,7 +209,7 @@ def _run_chat_agent_thread(
         messages.append({"role": "user", "content": user_content})
 
         for model_id, provider, label in chat_chain:
-            q.put(("info", f"💬 {label} ({provider})"))
+            q.put(("info", f"{label} ({provider})"))
             try:
                 for _round in range(8):
                     resp = await litellm.acompletion(
@@ -264,7 +264,7 @@ def _run_chat_agent_thread(
 
             except Exception as exc:
                 if _is_apex_transient(exc) and (model_id, provider, label) != chat_chain[-1]:
-                    q.put(("warn", f"⚠ {label} failed -- trying next model…"))
+                    q.put(("warn", f"{label} failed -- trying next model…"))
                     continue
                 q.put(("error", str(exc)))
                 q.put(("done", ""))
@@ -313,7 +313,7 @@ async def _apex_adk_run(ticker: str, query: str, model_id: str, label: str,
     msg = types.Content(role="user",
                         parts=[types.Part(text=f"Analyze {ticker.upper()}: {query}")])
 
-    q.put(("info", f"🤖 Reasoning with {label} ({provider})  [{chain_pos}]"))
+    q.put(("info", f"Reasoning with {label} ({provider})  [{chain_pos}]"))
     async for ev in runner.run_async(user_id="chat_user",
                                      session_id=sess.id, new_message=msg):
         if not (hasattr(ev, "content") and ev.content):
@@ -345,7 +345,7 @@ async def _apex_direct_run(ticker: str, query: str, model_id: str, label: str,
     import litellm
     from portfolio_agent.tools.reasoning_tools import get_full_analysis_context
 
-    q.put(("info", f"🤖 Reasoning with {label} ({provider}) [no-tools]  [{chain_pos}]"))
+    q.put(("info", f"Reasoning with {label} ({provider}) [no-tools]  [{chain_pos}]"))
     q.put(("tool", "get_full_analysis_context -- pre-fetching context…"))
 
     ctx_json = get_full_analysis_context(ticker.upper())
@@ -485,7 +485,7 @@ def _run_apex_thread(ticker: str, query: str, q: Queue) -> None:
             except Exception as exc:
                 if _is_apex_transient(exc) and i < len(reasoning_chain) - 1:
                     next_label = reasoning_chain[i + 1][2]
-                    q.put(("warn", f"⚠ {label} failed -- falling back to {next_label}…"))
+                    q.put(("warn", f"{label} failed -- falling back to {next_label}…"))
                     continue
                 q.put(("error", str(exc)))
                 q.put(("done", ""))

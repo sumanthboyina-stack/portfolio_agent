@@ -13,7 +13,6 @@ Flow:
 from __future__ import annotations
 
 import os
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -77,15 +76,10 @@ async def run_batch_morning(
     for every portfolio ticker using the legacy get_scheduled_horizons() logic.
     """
     log = _get_logger("batch.morning")
-    wp = _PROJECT_ROOT / "config" / "watchlist.yaml"
     pp = _PROJECT_ROOT / "config" / "portfolio.yaml"
 
-    if not wp.exists():
-        log.error("[error] config/watchlist.yaml not found.", event_type="error")
-        sys.exit(1)
-
     all_tickers, watchlist, portfolio_tickers, trending = load_all_tickers(
-        extra_tickers, wp, pp
+        extra_tickers, pp
     )
     always_run = set((extra_tickers or []) + portfolio_tickers)
 

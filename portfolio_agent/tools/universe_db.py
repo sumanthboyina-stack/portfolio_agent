@@ -7,7 +7,7 @@ Tables:
   screening_signals — daily math-screen results; promoted candidates flow to intraday triage
 
 Tiers:
-  core     — portfolio holdings + manually curated watchlist (managed via watchlist.yaml)
+  core     — portfolio holdings + manually curated watchlist (see portfolio_agent/tools/watchlist_db.py)
   extended — S&P 1500 (500 + 400 + 600); ~1,500 names; screened daily for signals
   broad    — Nasdaq/NYSE listed tickers outside S&P 1500; ~3,000–5,000 names; lighter screen
 """

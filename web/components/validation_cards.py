@@ -16,6 +16,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.components.validation_charts import _METRIC_CFG, _H_COLORS, _TILE_CSS, _get_tier
+from web.styles import icon_html, WARNING
 
 
 def _render_scorecard_tiles(by_horizon: dict, all_horizons: list, horizon_labels: dict) -> None:
@@ -33,7 +34,7 @@ def _render_scorecard_tiles(by_horizon: dict, all_horizons: list, horizon_labels
             n_warn  = ""
         elif n < 30:
             n_label = f"{n} evaluated predictions"
-            n_warn  = "  ⚠️ fewer than 30 — metrics unreliable"
+            n_warn  = f"  {icon_html('warning', 12, color=WARNING)} fewer than 30 — metrics unreliable"
         else:
             n_label = f"{n} evaluated predictions"
             n_warn  = ""

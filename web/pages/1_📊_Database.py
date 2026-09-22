@@ -18,6 +18,7 @@ sys.path.insert(0, str(_ROOT))
 from web.styles import (
     inject_global_css, page_header, section_title, top_nav, ticker_label,
     SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, REC_STYLES,
+    icon_html, material, status_dot_html, fmt_money, fmt_pct,
 )
 
 _DB    = _ROOT / "data" / "portfolio.db"
@@ -55,7 +56,7 @@ def _available_dates() -> list[str]:
 
 st.set_page_config(
     page_title="Today's Data — Portfolio Intelligence",
-    page_icon="📊",
+    page_icon=material("database"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -63,8 +64,8 @@ inject_global_css()
 top_nav("database")
 
 if not _DB.exists():
-    page_header("Database", icon="📊")
-    st.warning("Database not found. Run `python main.py --daily` to initialise it.", icon="⚠️")
+    page_header("Database", icon="database")
+    st.warning("Database not found. Run `python main.py --daily` to initialise it.", icon=material("warning"))
     st.stop()
 
 _avail_dates = _available_dates()
@@ -206,9 +207,9 @@ def _pj(v, default=None):
 def _score_color(score) -> str:
     try:
         s = float(score)
-        return "🟢" if s >= 7 else ("🟡" if s >= 4 else "🔴")
+        return status_dot_html(SUCCESS if s >= 7 else (WARNING if s >= 4 else DANGER))
     except Exception:
-        return "⚪"
+        return status_dot_html(NEUTRAL)
 
 
 def _detail_card(label: str, items: list[tuple[str, str]]) -> None:
@@ -292,17 +293,17 @@ page_header(
         f"{cnt_fund} fundamentals · {cnt_news} news · "
         f"{cnt_res} research · {cnt_pred} predictions"
     ),
-    icon="📊",
+    icon="database",
 )
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    f"📋 Fundamentals ({cnt_fund})",
-    f"📰 News ({cnt_news})",
-    f"🔬 Research ({cnt_res})",
-    f"🤖 Predictions ({cnt_pred})",
-    f"💼 Holdings ({cnt_hold})",
-    f"📈 Validation ({cnt_metr})",
-    "⚡ Events",
+    f"{material('description')} Fundamentals ({cnt_fund})",
+    f"{material('newspaper')} News ({cnt_news})",
+    f"{material('science')} Research ({cnt_res})",
+    f"{material('smart_toy')} Predictions ({cnt_pred})",
+    f"{material('work')} Holdings ({cnt_hold})",
+    f"{material('trending_up')} Validation ({cnt_metr})",
+    f"{material('bolt')} Events",
 ])
 
 
@@ -328,7 +329,7 @@ with tab1:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No fundamentals data between {_DATE_FROM} and {_DATE_TO}.", icon="💡")
+        st.info(f"No fundamentals data between {_DATE_FROM} and {_DATE_TO}.", icon=material("lightbulb"))
     else:
         df = raw_df.copy()
         df["revenue_growth_yoy_pct"] = pd.to_numeric(df["revenue_growth_yoy_pct"], errors="coerce").round(2)
@@ -397,8 +398,8 @@ with tab1:
                 dc1, dc2 = st.columns(2)
                 with dc1:
                     _detail_card("Financials", [
-                        ("Revenue Growth", f"{row.get('revenue_growth_yoy_pct') or '—'}%"),
-                        ("Net Margin",     f"{row.get('net_margin') or '—'}%"),
+                        ("Revenue Growth", fmt_pct(row.get('revenue_growth_yoy_pct'))),
+                        ("Net Margin",     fmt_pct(row.get('net_margin'))),
                         ("FCF",            f"${(row.get('fcf') or 0)/1e9:.2f}B" if row.get('fcf') else "—"),
                         ("Debt/Equity",    f"{row.get('debt_to_equity') or '—'}"),
                         ("Score",          f"{_score_color(row.get('fundamental_score'))} {row.get('fundamental_score') or '—'}/10"),
@@ -409,10 +410,10 @@ with tab1:
                     strengths = _pj(row.get("key_strengths"), [])
                     risks     = _pj(row.get("key_risks"), [])
                     if strengths:
-                        st.markdown("**✅ Key Strengths**")
+                        st.markdown(f"**{icon_html('check_circle', 15, color=SUCCESS)} Key Strengths**", unsafe_allow_html=True)
                         for s in strengths[:5]: st.markdown(f"- {s}")
                     if risks:
-                        st.markdown("**⚠️ Key Risks**")
+                        st.markdown(f"**{icon_html('warning', 15, color=WARNING)} Key Risks**", unsafe_allow_html=True)
                         for r in risks[:5]: st.markdown(f"- {r}")
                 if row.get("summary"):
                     st.markdown(f"> {row['summary']}")
@@ -442,7 +443,7 @@ with tab2:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No news records between {_DATE_FROM} and {_DATE_TO}.", icon="📰")
+        st.info(f"No news records between {_DATE_FROM} and {_DATE_TO}.", icon=material("newspaper"))
     else:
         df = raw_df.copy()
         df["sentiment_score"] = pd.to_numeric(df["sentiment_score"], errors="coerce").round(2)
@@ -515,13 +516,13 @@ with tab2:
                 if themes:
                     st.markdown("**Themes:** " + "  ·  ".join(f"`{t}`" for t in themes[:8]))
                 meta_parts = []
-                if row.get("source"):            meta_parts.append(f"📡 Source: **{row['source']}**")
-                if row.get("impacted_tickers"):  meta_parts.append(f"🎯 Impacted: **{row['impacted_tickers']}**")
+                if row.get("source"):            meta_parts.append(f"{icon_html('sensors', 14)} Source: **{row['source']}**")
+                if row.get("impacted_tickers"):  meta_parts.append(f"{icon_html('track_changes', 14)} Impacted: **{row['impacted_tickers']}**")
                 if meta_parts:
-                    st.markdown("  ·  ".join(meta_parts))
+                    st.markdown("  ·  ".join(meta_parts), unsafe_allow_html=True)
                 model = row.get("model_name")
                 if model:
-                    st.caption(f"🤖 Model: {model}  ·  Provider: {row.get('model_provider','—')}")
+                    st.caption(f"{icon_html('smart_toy', 13)} Model: {model}  ·  Provider: {row.get('model_provider','—')}", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -549,7 +550,7 @@ with tab3:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No research data between {_DATE_FROM} and {_DATE_TO}.", icon="🔬")
+        st.info(f"No research data between {_DATE_FROM} and {_DATE_TO}.", icon=material("science"))
     else:
         df = raw_df.copy()
         for col in ["consensus_mean","num_analysts","price_target_avg","price_target_high",
@@ -630,12 +631,12 @@ with tab3:
                         ("Rec Trend",    str(row.get("rec_trend") or "—")),
                         ("Mean Rating",  f"{row.get('consensus_mean') or '—'}"),
                         ("# Analysts",   str(int(row.get("num_analysts") or 0) or "—")),
-                        ("Target Avg",   f"${row.get('price_target_avg') or '—'}"),
-                        ("Target Median",f"${row.get('price_target_median') or '—'}"),
-                        ("Target High",  f"${row.get('price_target_high') or '—'}"),
-                        ("Target Low",   f"${row.get('price_target_low') or '—'}"),
-                        ("Current",      f"${row.get('current_price') or '—'}"),
-                        ("Upside",       f"{row.get('upside_to_mean_pct') or '—'}%"),
+                        ("Target Avg",   fmt_money(row.get('price_target_avg'))),
+                        ("Target Median",fmt_money(row.get('price_target_median'))),
+                        ("Target High",  fmt_money(row.get('price_target_high'))),
+                        ("Target Low",   fmt_money(row.get('price_target_low'))),
+                        ("Current",      fmt_money(row.get('current_price'))),
+                        ("Upside",       fmt_pct(row.get('upside_to_mean_pct'))),
                         ("Last Upgrade", str(row.get('latest_upgrade_date') or '—')),
                         ("Score",        f"{_score_color(row.get('research_score'))} {row.get('research_score') or '—'}/10"),
                     ])
@@ -672,8 +673,8 @@ with tab4:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No predictions between {_DATE_FROM} and {_DATE_TO}. Open **APEX Chat** to generate your first recommendation.", icon="🤖")
-        if st.button("🤖 Go to APEX Chat", type="primary"):
+        st.info(f"No predictions between {_DATE_FROM} and {_DATE_TO}. Open **APEX Chat** to generate your first recommendation.", icon=material("smart_toy"))
+        if st.button("Go to APEX Chat", icon=material("smart_toy"), type="primary"):
             st.switch_page("pages/4_🤖_Chat.py")
     else:
         df = raw_df.copy()
@@ -773,7 +774,7 @@ with tab4:
                         ("Trigger",    trigger_fmt),
                         ("Created",    (str(row.get("created_at") or ""))[:16]),
                         ("Model",      row.get("model_name", "—") or "—"),
-                        ("Changed?",   "🔄 Yes" if row.get("changed_from_previous") else "No"),
+                        ("Changed?",   f"{icon_html('autorenew', 14, color=PRIMARY)} Yes" if row.get("changed_from_previous") else "No"),
                         ("Previous",   row.get("previous_prediction", "—") or "—"),
                     ])
                 with xc3:
@@ -781,16 +782,19 @@ with tab4:
                         panel = _pj(row.get("panel_summary"), {})
                         if panel:
                             st.markdown("**Panel Verdicts**")
-                            for k, name in [
-                                ("chen_verdict",  "🧮 Fundamental Analyst"),
-                                ("webb_verdict",  "📊 Research Analyst"),
-                                ("varga_verdict", "🌐 Macro Analyst"),
-                                ("park_verdict",  "📰 News Analyst"),
+                            for k, icon_name, name in [
+                                ("chen_verdict",  "calculate",   "Fundamental Analyst"),
+                                ("webb_verdict",  "bar_chart",   "Research Analyst"),
+                                ("varga_verdict", "public",      "Macro Analyst"),
+                                ("park_verdict",  "newspaper",   "News Analyst"),
                             ]:
                                 if panel.get(k):
-                                    st.markdown(f"**{name}:** {panel[k]}")
+                                    st.markdown(
+                                        f"**{icon_html(icon_name, 14)} {name}:** {panel[k]}",
+                                        unsafe_allow_html=True,
+                                    )
                             if panel.get("key_debate"):
-                                st.info(panel["key_debate"], icon="💬")
+                                st.info(panel["key_debate"], icon=material("chat_bubble"))
                     except Exception:
                         pass
 
@@ -819,7 +823,7 @@ with tab5:
     raw_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     if raw_df.empty:
-        st.info(f"No holdings data between {_DATE_FROM} and {_DATE_TO}.", icon="💼")
+        st.info(f"No holdings data between {_DATE_FROM} and {_DATE_TO}.", icon=material("work"))
     else:
         df = raw_df.copy()
         for col in ["shares", "avg_cost", "cost_basis_total", "current_price", "current_value"]:
@@ -831,10 +835,10 @@ with tab5:
         total_gain_loss = total_value - total_cost
 
         mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Portfolio Value",  f"${total_value:,.2f}")
-        mc2.metric("Total Cost Basis", f"${total_cost:,.2f}")
-        mc3.metric("Total Gain/Loss",  f"${total_gain_loss:+,.2f}",
-                   delta=f"{total_gain_loss / total_cost * 100:+.2f}%" if total_cost else None)
+        mc1.metric("Portfolio Value",  fmt_money(total_value))
+        mc2.metric("Total Cost Basis", fmt_money(total_cost))
+        mc3.metric("Total Gain/Loss",  fmt_money(total_gain_loss, signed=True),
+                   delta=fmt_pct(total_gain_loss / total_cost * 100, signed=True) if total_cost else None)
         mc4.metric("Positions", str(len(df)))
         st.divider()
 
@@ -889,18 +893,19 @@ with tab5:
             if not row_m.empty:
                 row = row_m.iloc[0]
                 st.divider()
-                gl_icon = "🟢" if (row.get("gain_loss") or 0) >= 0 else "🔴"
+                _gl_val = row.get("gain_loss") or 0
+                gl_icon = status_dot_html(SUCCESS if _gl_val >= 0 else DANGER)
                 section_title(f"Detail — {ticker_label(ticker)}", badge_text=str(row.get("description",""))[:40], badge_color=PRIMARY)
                 dc1, dc2 = st.columns(2)
                 with dc1:
                     _detail_card("Position", [
-                        ("Shares",      f"{row.get('shares') or '—':.2f}" if row.get('shares') else "—"),
-                        ("Avg Cost",    f"${row.get('avg_cost') or '—':.2f}" if row.get('avg_cost') else "—"),
-                        ("Cost Basis",  f"${(row.get('cost_basis_total') or 0):,.2f}"),
-                        ("Price",       f"${row.get('current_price') or '—':.2f}" if row.get('current_price') else "—"),
-                        ("Value",       f"${(row.get('current_value') or 0):,.2f}"),
-                        ("Gain/Loss",   f"{gl_icon} ${(row.get('gain_loss') or 0):+,.2f}"),
-                        ("G/L %",       f"{(row.get('gain_loss_pct') or 0):+.2f}%"),
+                        ("Shares",      f"{row.get('shares'):.2f}" if row.get('shares') else "—"),
+                        ("Avg Cost",    fmt_money(row.get('avg_cost'))),
+                        ("Cost Basis",  fmt_money(row.get('cost_basis_total'))),
+                        ("Price",       fmt_money(row.get('current_price'))),
+                        ("Value",       fmt_money(row.get('current_value'))),
+                        ("Gain/Loss",   f"{gl_icon} {fmt_money(_gl_val, signed=True)}"),
+                        ("G/L %",       fmt_pct(row.get('gain_loss_pct'), signed=True)),
                     ])
                 with dc2:
                     _detail_card("Account", [
@@ -972,7 +977,7 @@ with tab6:
         st.info(
             f"No evaluated predictions between {_VAL_FROM} and {_VAL_TO}. "
             "Predictions are scored automatically once their horizon matures.",
-            icon="📈",
+            icon=material("trending_up"),
         )
     else:
         grid_df = raw_val[[
@@ -1054,8 +1059,8 @@ with tab6:
                         ("Pred Model",    row.get("model_name") or "—"),
                         ("Predicted Dir", row.get("predicted_direction") or "—"),
                         ("Actual Dir",    row.get("actual_direction") or "—"),
-                        ("Pred Range",    f"{row.get('pred_low') or '—'}% – {row.get('pred_high') or '—'}%"),
-                        ("Actual Return", f"{row.get('actual_return_pct') or '—'}%"),
+                        ("Pred Range",    f"{fmt_pct(row.get('pred_low'))} – {fmt_pct(row.get('pred_high'))}"),
+                        ("Actual Return", fmt_pct(row.get('actual_return_pct'))),
                         ("In Range",      row.get("in_range") or "—"),
                         ("Conviction",    f"{row.get('conviction_score') or '—'}/10"),
                     ])
@@ -1063,7 +1068,7 @@ with tab6:
                     _detail_card("Scores", [
                         ("Brier Score",   f"{row.get('brier_score') or '—'}"),
                         ("Log-Loss",      f"{row.get('log_loss') or '—'}"),
-                        ("Excess Return", f"{row.get('excess_return_pct') or '—'}%"),
+                        ("Excess Return", fmt_pct(row.get('excess_return_pct'))),
                         ("Outcome",       str(outcome).replace("_", " ").title()),
                         ("Evaluated At",  str(row.get("evaluated_at") or "—")[:16]),
                     ])
@@ -1077,7 +1082,7 @@ with tab7:
         with _conn() as c:
             _ev_cols = {r[1] for r in c.execute("PRAGMA table_info(trigger_events)").fetchall()}
             if "id" not in _ev_cols:
-                st.info("No trigger_events table yet — run `--batch morning` to populate.", icon="⚡")
+                st.info("No trigger_events table yet — run `--batch morning` to populate.", icon=material("bolt"))
             else:
                 _ev_rows = c.execute(
                     """SELECT id, detected_at, ticker, event_type, severity, source,
@@ -1089,14 +1094,14 @@ with tab7:
                 ev_df = pd.DataFrame([dict(r) for r in _ev_rows]) if _ev_rows else pd.DataFrame()
 
                 if ev_df.empty:
-                    st.info("No events detected yet. Events are populated by the morning batch.", icon="⚡")
+                    st.info("No events detected yet. Events are populated by the morning batch.", icon=material("bolt"))
                 else:
                     sev_counts = ev_df.groupby("severity").size().to_dict()
                     proc_pct = (ev_df["processed"] > 0).mean() * 100
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Total Events", len(ev_df))
                     m2.metric("Severity 3", sev_counts.get(3, 0))
-                    m3.metric("Processed", f"{proc_pct:.2f}%")
+                    m3.metric("Processed", fmt_pct(proc_pct))
                     m4.metric("Unique Tickers", ev_df["ticker"].nunique())
 
                     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)

@@ -12,15 +12,14 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    inject_global_css, page_header, section_title, top_nav, card,
-    badge_html, ticker_label, stat_card_html,
+    inject_global_css, page_header, section_title, top_nav, card, material, icon_html,
+    badge_html, ticker_label, stat_card_html, status_dot_html, fmt_money, fmt_pct,
     SUCCESS, SUCCESS_LIGHT, WARNING, WARNING_LIGHT, DANGER, DANGER_LIGHT, NEUTRAL, PRIMARY, PRIMARY_LIGHT,
 )
-from web.components.portfolio_cards import _fmt_dollars
 
 st.set_page_config(
     page_title="Valuation — Portfolio Intelligence",
-    page_icon="📐",
+    page_icon=material("calculate"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -31,13 +30,13 @@ page_header(
     "Valuation",
     subtitle="DCF intrinsic value with explicit bear/base/bull scenarios, a WACC/terminal-growth "
              "sensitivity grid, and relative valuation vs peers and market — not a single fake-precise target",
-    icon="📐",
+    icon="calculate",
 )
 
 _LABEL_STYLE = {
-    "UNDERVALUED":   (SUCCESS, SUCCESS_LIGHT, "🟢 UNDERVALUED", "🟢"),
-    "FAIRLY_VALUED": (WARNING, WARNING_LIGHT, "🟡 FAIRLY VALUED", "🟡"),
-    "OVERVALUED":    (DANGER, DANGER_LIGHT, "🔴 OVERVALUED", "🔴"),
+    "UNDERVALUED":   (SUCCESS, SUCCESS_LIGHT, "UNDERVALUED"),
+    "FAIRLY_VALUED": (WARNING, WARNING_LIGHT, "FAIRLY VALUED"),
+    "OVERVALUED":    (DANGER, DANGER_LIGHT, "OVERVALUED"),
 }
 
 
@@ -71,13 +70,11 @@ def _cached_opportunity_tickers() -> list[str]:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _cached_watchlist_tickers() -> list[str]:
-    """Watchlist tickers (config/watchlist.yaml) excluding portfolio holdings —
+    """Watchlist tickers excluding portfolio holdings —
     matches the "Watchlist" segment definition used on the Validation page."""
-    import yaml
-    wl_path = _ROOT / "config" / "watchlist.yaml"
+    from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
     try:
-        data = yaml.safe_load(wl_path.read_text()) or {}
-        watchlist = {str(t).upper() for t in data.get("tickers", [])}
+        watchlist = set(load_watchlist_tickers())
     except Exception:
         return []
     return sorted(watchlist - set(_cached_holdings_tickers()))
@@ -124,14 +121,16 @@ def _cached_compute_valuation(ticker: str):
 
 
 def _highlight_line(ticker: str, valuation: dict) -> str:
+    # Note: this string is used as an st.expander() label, which only renders
+    # plain/limited markdown (no raw HTML) — so status_dot_html() can't be used
+    # here. label_words already states the direction in plain English instead.
     label = valuation.get("valuation_label") or "FAIRLY_VALUED"
-    _, _, _, circle = _LABEL_STYLE.get(label, (NEUTRAL, "#F9FAFB", label, "⚪"))
     mos = valuation.get("margin_of_safety_pct")
-    mos_str = f"{mos:+.2f}%" if mos is not None else "—"
-    intrinsic = _fmt_dollars(valuation.get("intrinsic_base"))
-    current = _fmt_dollars(valuation.get("current_price"))
+    mos_str = fmt_pct(mos, signed=True)
+    intrinsic = fmt_money(valuation.get("intrinsic_base"))
+    current = fmt_money(valuation.get("current_price"))
     label_words = (label or "").replace("_", " ").title()
-    return f"{circle}  {ticker_label(ticker)}  —  {label_words}  ·  MoS {mos_str}  ·  {intrinsic} vs {current}"
+    return f"{ticker_label(ticker)}  —  {label_words}  ·  MoS {mos_str}  ·  {intrinsic} vs {current}"
 
 
 def _render_detail(valuation: dict, ticker: str) -> None:
@@ -140,24 +139,26 @@ def _render_detail(valuation: dict, ticker: str) -> None:
     st.caption(f"As of {valuation['as_of_date']} · model: {valuation.get('model_name', 'deterministic')}")
 
     label = valuation.get("valuation_label") or "FAIRLY_VALUED"
-    label_color, label_bg, label_text, _ = _LABEL_STYLE.get(label, (NEUTRAL, "#F9FAFB", label, "⚪"))
+    label_color, label_bg, label_text = _LABEL_STYLE.get(label, (NEUTRAL, "#F9FAFB", label))
 
     hcol1, hcol2, hcol3, hcol4 = st.columns(4)
     with hcol1:
-        st.markdown(stat_card_html(_fmt_dollars(valuation["intrinsic_base"]), "Intrinsic Value (Base)", "🎯", PRIMARY), unsafe_allow_html=True)
+        st.markdown(stat_card_html(fmt_money(valuation["intrinsic_base"]), "Intrinsic Value (Base)", "track_changes", PRIMARY), unsafe_allow_html=True)
     with hcol2:
-        st.markdown(stat_card_html(_fmt_dollars(valuation["current_price"]), "Current Price", "💵", NEUTRAL), unsafe_allow_html=True)
+        st.markdown(stat_card_html(fmt_money(valuation["current_price"]), "Current Price", "attach_money", NEUTRAL), unsafe_allow_html=True)
     with hcol3:
         mos = valuation.get("margin_of_safety_pct")
         mos_color = SUCCESS if (mos or 0) > 0 else DANGER
-        st.markdown(stat_card_html(f"{mos:+.2f}%" if mos is not None else "—", "Margin of Safety", "🛡️", mos_color), unsafe_allow_html=True)
+        st.markdown(stat_card_html(fmt_pct(mos, signed=True), "Margin of Safety", "shield", mos_color), unsafe_allow_html=True)
     with hcol4:
         st.markdown(
             f'<div style="background:white;border:1px solid #F3F4F6;border-radius:14px;padding:18px 20px;'
             f'border-top:3px solid {label_color};text-align:center">'
             f'<p style="margin:0;font-size:0.68rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:0.08em;color:#9CA3AF">Valuation</p>'
-            f'<p style="margin:10px 0 0;font-size:1.1rem;font-weight:800;color:{label_color}">{label_text}</p>'
+            f'<p style="margin:10px 0 0;font-size:1.1rem;font-weight:800;color:{label_color};'
+            f'display:flex;align-items:center;justify-content:center;gap:6px">'
+            f'{status_dot_html(label_color)}{label_text}</p>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -167,7 +168,7 @@ def _render_detail(valuation: dict, ticker: str) -> None:
     # ── Bear / Base / Bull scenarios ──────────────────────────────────────────
     section_title(
         "Scenario Range",
-        badge_text=f"expected value {_fmt_dollars(valuation.get('expected_value'))}",
+        badge_text=f"expected value {fmt_money(valuation.get('expected_value'))}",
         badge_color=PRIMARY,
     )
     st.markdown(
@@ -190,14 +191,14 @@ def _render_detail(valuation: dict, ticker: str) -> None:
                 f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
                 f'letter-spacing:0.06em;color:{color}">{label_txt}</div>'
                 f'<div style="font-size:1.6rem;font-weight:800;color:#0F172A;margin-top:6px">'
-                f'{_fmt_dollars(valuation.get(f"intrinsic_{key}"))}</div>'
+                f'{fmt_money(valuation.get(f"intrinsic_{key}"))}</div>'
                 f'<div style="margin-top:6px">{badge_html(f"{prob*100:.2f}% probability", color, bg)}</div>'
                 f'</div>',
                 extra_style=f"border-top:3px solid {color}",
             )
 
     # ── Assumptions (auditable, not hidden) ───────────────────────────────────
-    with st.expander("📋 Assumptions used (base case)"):
+    with st.expander("Assumptions used (base case)", icon=material("list_alt")):
         base_assumptions = (valuation.get("assumptions") or {}).get("base", {})
         if base_assumptions:
             acol1, acol2 = st.columns(2)
@@ -238,7 +239,7 @@ def _render_detail(valuation: dict, ticker: str) -> None:
             cells = "".join(
                 f'<td style="padding:6px 10px;text-align:center;font-weight:{"800" if (wacc_delta==0.0 and tg==0.0) else "500"};'
                 f'background:{"#EFF6FF" if (wacc_delta==0.0 and tg==0.0) else "transparent"}">'
-                f'{_fmt_dollars(v) if v is not None else "—"}</td>'
+                f'{fmt_money(v)}</td>'
                 for tg, v in zip(tg_deltas, row)
             )
             rows_html += (
@@ -333,7 +334,7 @@ if not group_tickers:
     st.info(
         "No portfolio holdings found in config/portfolio.yaml." if group_choice == "Portfolio"
         else "No tickers in this group yet.",
-        icon="📐",
+        icon=material("calculate"),
     )
 else:
     valuations = _cached_valuations_for_tickers(tuple(group_tickers))
@@ -362,13 +363,13 @@ st.divider()
 
 # ── Manual lookup — any ticker, on-demand compute if not yet covered ─────────
 
-with st.expander("🔍 Look up any ticker"):
+with st.expander("Look up any ticker", icon=material("search")):
     col1, col2 = st.columns([2, 1])
     with col1:
         ticker_input = st.text_input("Ticker", value="AAPL", key="valuation_ticker").strip().upper()
     with col2:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        force_recompute = st.button("🔄 Recompute now", use_container_width=True)
+        force_recompute = st.button("Recompute now", icon=material("refresh"), use_container_width=True)
 
     if ticker_input:
         lookup_valuation = None if force_recompute else _cached_stored_valuation(ticker_input)
@@ -377,8 +378,8 @@ with st.expander("🔍 Look up any ticker"):
             lookup_valuation, lookup_error = _cached_compute_valuation(ticker_input)
 
         if lookup_error:
-            st.error(lookup_error, icon="⚠️")
+            st.error(lookup_error, icon=material("warning"))
         elif lookup_valuation is None:
-            st.info(f"No valuation data for {ticker_input} yet.", icon="📐")
+            st.info(f"No valuation data for {ticker_input} yet.", icon=material("calculate"))
         else:
             _render_detail(lookup_valuation, ticker_input)

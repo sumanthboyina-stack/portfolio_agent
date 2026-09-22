@@ -12,13 +12,13 @@ import streamlit as st
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
-from web.styles import inject_global_css, page_header, section_title, top_nav, PURPLE
+from web.styles import inject_global_css, page_header, section_title, top_nav, material, icon_html, PURPLE
 from web.data.predictions import _latest_as_of_date, _load_edge_data, _load_predictions
 from web.components.predictions_cards import render_action_items, render_all_predictions, render_drill_down, render_system_strip
 
 _DB = _ROOT / "data" / "portfolio.db"
 
-st.set_page_config(page_title="APEX Predictions", page_icon="🔮", layout="wide")
+st.set_page_config(page_title="APEX Predictions", page_icon=material("insights"), layout="wide")
 inject_global_css()
 top_nav("predictions")
 
@@ -26,12 +26,12 @@ top_nav("predictions")
 # ── Main page ─────────────────────────────────────────────────────────────────
 
 if not _DB.exists():
-    page_header("APEX Predictions", icon="🔮")
-    st.warning("Database not found. Run `python main.py --daily` to initialise it.", icon="⚠️")
+    page_header("APEX Predictions", icon="insights")
+    st.warning("Database not found. Run `python main.py --daily` to initialise it.", icon=material("warning"))
     st.stop()
 
 # ── Piece 2: Controls Bar ────────────────────────────────────────────────────
-ctrl1, ctrl2, ctrl3, ctrl4, ctrl5, ctrl6 = st.columns([2, 1, 1.5, 2, 2, 1])
+ctrl1, ctrl2, ctrl3, ctrl4, ctrl5, ctrl6 = st.columns([1.8, 1, 1.5, 2, 2, 1.4])
 
 with ctrl1:
     _default_date = _latest_as_of_date()
@@ -76,7 +76,7 @@ with ctrl5:
     )
 
 with ctrl6:
-    if st.button("🔄 Refresh", use_container_width=True):
+    if st.button("Refresh", icon=material("refresh"), use_container_width=True):
         st.rerun()
 
 # Map horizon choice to int or None
@@ -144,7 +144,7 @@ _OPP_TICKER_CAP = 20
 
 if not df_opps.empty:
     st.markdown("---")
-    section_title("🌟 New Opportunities", badge_text="Trending Discovery", badge_color=PURPLE)
+    section_title(f'{icon_html("star", 15)} New Opportunities', badge_text="Trending Discovery", badge_color=PURPLE)
 
     _n_total_opp_tickers = len(df_opps["ticker"].unique())
     if _n_total_opp_tickers > _OPP_TICKER_CAP:

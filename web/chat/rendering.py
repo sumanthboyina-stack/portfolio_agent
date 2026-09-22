@@ -22,8 +22,8 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
-    score_bar_html, ticker_label,
-    REC_STYLES, SUCCESS, PRIMARY, WARNING, NEUTRAL, NEUTRAL_LIGHT,
+    score_bar_html, ticker_label, icon_html, material, fmt_money, fmt_pct,
+    REC_STYLES, SUCCESS, PRIMARY, WARNING, DANGER, NEUTRAL, NEUTRAL_LIGHT,
 )
 
 
@@ -39,13 +39,13 @@ def _build_plan(ticker: str) -> dict:
     fund = get_stored_fundamentals(ticker)
     if fund:
         plan["sources"].append({
-            "icon": "✅", "label": "Fundamentals",
+            "icon": "check_circle", "label": "Fundamentals",
             "detail": f"As of {fund.get('as_of_date','?')} · Score {fund.get('fundamental_score','?')}/10",
             "live": False,
         })
     else:
         plan["gaps"].append("fundamentals")
-        plan["sources"].append({"icon": "⚡", "label": "Fundamentals",
+        plan["sources"].append({"icon": "bolt", "label": "Fundamentals",
                                 "detail": "Not in DB -- live agent will run", "live": True})
 
     res = get_stored_research(ticker)
@@ -53,7 +53,7 @@ def _build_plan(ticker: str) -> dict:
         fetched = (res.get("raw_fetched_at") or res.get("as_of_date") or "?")[:10]
         stale_7d = fetched < (date.today() - timedelta(days=7)).isoformat() if fetched != "?" else False
         plan["sources"].append({
-            "icon": "⚠️" if stale_7d else "✅",
+            "icon": "warning" if stale_7d else "check_circle",
             "label": "Broker Research",
             "detail": (
                 f"Last fetched {fetched} (>7d old -- using cached) · {res.get('consensus','?')}"
@@ -64,7 +64,7 @@ def _build_plan(ticker: str) -> dict:
         })
     else:
         plan["gaps"].append("research")
-        plan["sources"].append({"icon": "⚡", "label": "Broker Research",
+        plan["sources"].append({"icon": "bolt", "label": "Broker Research",
                                 "detail": "Not in DB -- live agent will run", "live": True})
 
     news_data = []
@@ -82,31 +82,31 @@ def _build_plan(ticker: str) -> dict:
         conn.close()
         cnt = len(news_data)
         if cnt > 0:
-            plan["sources"].append({"icon": "✅", "label": "News (7d)",
+            plan["sources"].append({"icon": "check_circle", "label": "News (7d)",
                                     "detail": f"{cnt} records found", "live": False})
         else:
             plan["gaps"].append("news")
-            plan["sources"].append({"icon": "⚡", "label": "News (7d)",
+            plan["sources"].append({"icon": "bolt", "label": "News (7d)",
                                     "detail": "No recent records -- live agent will run", "live": True})
     except Exception:
         plan["gaps"].append("news")
-        plan["sources"].append({"icon": "⚡", "label": "News (7d)",
+        plan["sources"].append({"icon": "bolt", "label": "News (7d)",
                                 "detail": "DB unavailable -- live agent will run", "live": True})
 
-    plan["sources"].append({"icon": "📡", "label": "Macro Snapshot",
+    plan["sources"].append({"icon": "sensors", "label": "Macro Snapshot",
                             "detail": "VIX · 10Y yield · S&P trend (yfinance)", "live": True})
 
     prior = get_latest_prediction(ticker)
     if prior:
         plan["prior"] = prior
         plan["sources"].append({
-            "icon": "📜", "label": "Prior Prediction",
+            "icon": "history", "label": "Prior Prediction",
             "detail": f"{prior.get('recommendation','?')} on {prior.get('created_at','')[:10]} "
                       f"· Confidence {prior.get('confidence','?')}/10",
             "live": False,
         })
     else:
-        plan["sources"].append({"icon": "🆕", "label": "Prior Prediction",
+        plan["sources"].append({"icon": "fiber_new", "label": "Prior Prediction",
                                 "detail": "First analysis for this ticker", "live": False})
 
     try:
@@ -137,10 +137,10 @@ def _render_plan_card(plan: dict) -> None:
 
     rows = ""
     for s in plan["sources"]:
-        dot_color = "#DC2626" if s["live"] else "#059669"
+        dot_color = DANGER if s["live"] else SUCCESS
         rows += (
             f'<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #F1F5F9">'
-            f'<span style="font-size:1rem;width:20px;text-align:center">{s["icon"]}</span>'
+            f'<span style="width:20px;text-align:center">{icon_html(s["icon"], 17, color="#475569")}</span>'
             f'<div style="flex:1">'
             f'<span style="font-weight:600;font-size:0.875rem;color:#0F172A">{s["label"]}</span>'
             f'<br><span style="font-size:0.8rem;color:#64748B">{s["detail"]}</span></div>'
@@ -154,7 +154,7 @@ def _render_plan_card(plan: dict) -> None:
         live_banner = (
             f'<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;'
             f'padding:8px 12px;margin-bottom:12px;font-size:0.83rem;color:#1E40AF">'
-            f'⚡ <strong>{len(gaps)} live agent(s)</strong> will run to fill data gaps: '
+            f'{icon_html("bolt", 14)} <strong>{len(gaps)} live agent(s)</strong> will run to fill data gaps: '
             f'{", ".join(gaps)}. Results stored for future use.</div>'
         )
 
@@ -179,9 +179,9 @@ def _render_plan_card(plan: dict) -> None:
         def _delta(key: str) -> str:
             diff = (w.get(key, 0) - BASE.get(key, 0)) * 100
             if diff > 0:
-                return f'<span style="color:#059669;font-size:0.7rem"> +{diff:.2f}%</span>'
+                return f'<span style="color:{SUCCESS};font-size:0.7rem"> {fmt_pct(diff, signed=True)}</span>'
             elif diff < 0:
-                return f'<span style="color:#DC2626;font-size:0.7rem"> {diff:.2f}%</span>'
+                return f'<span style="color:{DANGER};font-size:0.7rem"> {fmt_pct(diff, signed=True)}</span>'
             return ""
 
         weight_badge = (
@@ -195,11 +195,13 @@ def _render_plan_card(plan: dict) -> None:
             f'<div style="display:flex;gap:16px;flex-wrap:wrap">'
             + "".join(
                 f'<span style="font-size:0.8rem;color:#374151">'
-                f'<strong style="color:#0F172A">{lbl}</strong> '
-                f'{w.get(key,0)*100:.2f}%{_delta(key)}</span>'
-                for lbl, key in [
-                    ("📋 Fundamentals", "fundamentals"), ("🔬 Research", "research"),
-                    ("🌐 Macro", "macro"), ("📰 News", "news"),
+                f'<strong style="color:#0F172A">{icon_html(icon, 13)} {lbl}</strong> '
+                f'{fmt_pct(w.get(key,0)*100)}{_delta(key)}</span>'
+                for lbl, key, icon in [
+                    ("Fundamentals", "fundamentals", "assignment"),
+                    ("Research", "research", "biotech"),
+                    ("Macro", "macro", "public"),
+                    ("News", "news", "newspaper"),
                 ]
             )
             + f'</div>'
@@ -214,7 +216,10 @@ def _render_plan_card(plan: dict) -> None:
         weight_badge = (
             f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;'
             f'padding:6px 12px;margin-bottom:12px;font-size:0.78rem;color:#64748B">'
-            f'📋 Fundamentals 40% · 🔬 Research 30% · 🌐 Macro 20% · 📰 News 10% '
+            f'{icon_html("assignment", 13)} Fundamentals 40% · '
+            f'{icon_html("biotech", 13)} Research 30% · '
+            f'{icon_html("public", 13)} Macro 20% · '
+            f'{icon_html("newspaper", 13)} News 10% '
             f'<em>(default weights -- macro fetch pending)</em></div>'
         )
 
@@ -235,7 +240,7 @@ def _render_plan_card(plan: dict) -> None:
         f'<div style="background:white;border:1px solid #E2E8F0;border-radius:12px;'
         f'padding:16px 20px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">'
         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
-        f'<h4 style="margin:0;color:#0F172A;font-size:1rem">🗺️ Execution Plan -- <code>{ticker_label(ticker)}</code></h4>'
+        f'<h4 style="margin:0;color:#0F172A;font-size:1rem">{icon_html("map", 16)} Execution Plan -- <code>{ticker_label(ticker)}</code></h4>'
         f'</div>'
         f'{weight_badge}'
         f'{live_banner}{rows}'
@@ -260,7 +265,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
     wu = data.get("weights_used") or {}
     def _wpct(key: str, fallback: float) -> str:
         v = wu.get(key)
-        return f"{v*100:.2f}%" if v is not None else f"{fallback*100:.2f}%"
+        return fmt_pct(v * 100 if v is not None else fallback * 100)
 
     scores_html = "".join(
         f'<div class="pred-score-item">'
@@ -298,7 +303,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
             panel_html += (
                 f'<div style="background:#FEF9C3;border:1px solid #FDE68A;border-radius:6px;'
                 f'padding:6px 10px;margin-top:8px;font-size:0.8rem;color:#92400E">'
-                f'💬 <strong>Key debate:</strong> {_html.escape(str(panel["key_debate"]))}</div>'
+                f'{icon_html("chat_bubble", 13)} <strong>Key debate:</strong> {_html.escape(str(panel["key_debate"]))}</div>'
             )
         panel_html += "</div>"
 
@@ -313,12 +318,11 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         def _pt_fmt(v, cur=None):
             if v is None:
                 return '<span style="color:#94A3B8">--</span>'
-            s = f"${v:,.2f}"
+            s = fmt_money(v)
             if cur:
                 pct = (v - cur) / cur * 100
-                sign = "+" if pct >= 0 else ""
-                color = "#059669" if pct >= 0 else "#DC2626"
-                s += f' <span style="color:{color};font-size:0.75rem">({sign}{pct:.2f}%)</span>'
+                color = SUCCESS if pct >= 0 else DANGER
+                s += f' <span style="color:{color};font-size:0.75rem">({fmt_pct(pct, signed=True)})</span>'
             return s
         _n_str = f"{_pt_n} analyst{'s' if _pt_n and _pt_n != 1 else ''}" if _pt_n else ""
         _n_chip = (
@@ -327,7 +331,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         )
         _cur_chip = (
             f' &nbsp;&middot;&nbsp; <span style="color:#64748B;font-weight:400">'
-            f'Current ${_pt_cur:,.2f}</span>'
+            f'Current {fmt_money(_pt_cur)}</span>'
             if _pt_cur else ""
         )
         pt_html = (
@@ -370,7 +374,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
             _dico = _dir_icon.get(_dir, "?")
             _range_str = (
                 f'<span style="color:{_dcol};font-weight:700">'
-                f'{_dico} {_rlo:+.2f}% to {_rhi:+.2f}%</span>'
+                f'{_dico} {fmt_pct(_rlo, signed=True)} to {fmt_pct(_rhi, signed=True)}</span>'
                 if _rlo is not None and _rhi is not None
                 else f'<span style="color:{_dcol};font-weight:700">{_dico} {_dir}</span>'
                 if _dir else '<span style="color:#94A3B8">--</span>'
@@ -409,7 +413,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         changed_html = (
             f'<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;'
             f'padding:6px 10px;margin-top:8px;font-size:0.8rem;color:#92400E">'
-            f'🔄 Recommendation changed from '
+            f'{icon_html("autorenew", 13)} Recommendation changed from '
             f'<strong>{data.get("previous_recommendation","?")}</strong> → '
             f'<strong>{rec.replace("_"," ")}</strong></div>'
         )
@@ -419,11 +423,12 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         target_html = (
             f'<span style="background:#F0FDF4;color:#166534;border:1px solid #BBF7D0;'
             f'border-radius:6px;padding:3px 10px;font-size:0.8rem;font-weight:600;margin-right:6px">'
-            f'🎯 Target ${data["target_price"]:.2f}</span>'
+            f'{icon_html("target", 13)} Target {fmt_money(data["target_price"])}</span>'
         )
     horizon_html = (
         f'<span style="background:#F1F5F9;color:#475569;border-radius:6px;'
-        f'padding:3px 10px;font-size:0.8rem;font-weight:600">⏱ {data.get("horizon","1m")}</span>'
+        f'padding:3px 10px;font-size:0.8rem;font-weight:600">'
+        f'{icon_html("schedule", 13)} {data.get("horizon","1m")}</span>'
     )
 
     data_sources_html = (
@@ -476,7 +481,7 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         except Exception:
             fig_price = None
         if fig_price is not None:
-            with st.expander("📉 Price Chart", expanded=True):
+            with st.expander("Price Chart", expanded=True, icon=material("show_chart")):
                 st.plotly_chart(fig_price, use_container_width=True,
                                  config={"displayModeBar": False})
 
@@ -484,14 +489,15 @@ def _render_prediction_card(data: dict, elapsed: float = 0.0,
         from portfolio_agent.tools.prediction_db import get_prediction_history
         hist = get_prediction_history(data.get("ticker",""), limit=6)
         if len(hist) > 1:
-            with st.expander("📜 Prediction history for this ticker"):
+            with st.expander("Prediction history for this ticker", icon=material("history")):
                 rows = [
                     {"Date": h.get("created_at","")[:10],
                      "Horizon": f"{h['horizon_days']}d" if h.get("horizon_days") else h.get("horizon","--"),
                      "Recommendation": h.get("recommendation",""),
                      "Direction": h.get("predicted_direction","--"),
                      "Return Range": (
-                         f"{h['predicted_return_low']:+.2f}% to {h['predicted_return_high']:+.2f}%"
+                         f"{fmt_pct(h['predicted_return_low'], signed=True)} to "
+                         f"{fmt_pct(h['predicted_return_high'], signed=True)}"
                          if h.get("predicted_return_low") is not None and h.get("predicted_return_high") is not None
                          else "--"
                      ),
