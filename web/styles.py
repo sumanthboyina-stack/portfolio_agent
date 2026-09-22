@@ -414,6 +414,32 @@ def inject_global_css() -> None:
         box-shadow: 0 4px 14px rgba(37,99,235,0.35) !important;
     }
 
+    /* Trash icons on Portfolio broker / account tiles
+       (st.container(key="tile_del_...")). Declared AFTER the blue main-area
+       rules with higher specificity so they win: no background, no border,
+       no shadow — the icon sits directly on the tile's own colour. */
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button,
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:hover,
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:focus,
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:active {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        transform: none !important;
+        color: #9CA3AF !important;
+        padding: 2px 4px !important;
+        min-height: 0 !important;
+        float: right;
+    }
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:hover {
+        color: #DC2626 !important;
+    }
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button span,
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button p {
+        color: inherit !important;
+        background: transparent !important;
+    }
+
     /* ── Inputs & selects ───────────────────────────────────── */
     .stTextInput > div > div > input,
     .stTextArea > div > div > textarea {

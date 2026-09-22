@@ -9,6 +9,7 @@ anthropic==0.102.0
 # Financial data
 yfinance==1.3.0
 pandas==3.0.3
+openpyxl>=3.1.0        # engine for pd.read_excel (.xlsx holdings uploads)
 
 # FRED macroeconomic data
 requests==2.34.1

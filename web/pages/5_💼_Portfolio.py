@@ -62,6 +62,7 @@ from portfolio_agent.tools.holdings_db import (
     delete_broker_holdings, delete_account_holdings, get_price_history,
 )
 from portfolio_agent.tools.holdings_parser import parse_csv
+from portfolio_agent.tools.llm_holdings_parser import is_excel, parse_holdings_with_llm
 
 
 BROKER_META = {
@@ -70,23 +71,29 @@ BROKER_META = {
         "color": "#22863A",
         "bg": "#F0FDF4",
         "border": "#BBF7D0",
-        "instructions": (
-            "1. Log into fidelity.com\n"
-            "2. Go to **Accounts & Trade → Portfolio**\n"
-            "3. Click **Download** → **Download portfolio as spreadsheet (CSV)**\n"
-            "4. Upload the downloaded file below"
-        ),
     },
     "vanguard": {
         "label": "Vanguard",
         "color": "#9B1C1C",
         "bg": "#FFF5F5",
         "border": "#FECACA",
+    },
+    "other": {
+        "label": "Other broker",
+        "color": "#1D4ED8",
+        "bg": "#EFF6FF",
+        "border": "#BFDBFE",
+        "blurb": (
+            "Schwab, E*TRADE, Robinhood, Merrill, Webull, Chase, or any other broker. "
+            "Upload a holdings / positions export (CSV or Excel) and it will be read automatically — "
+            "no need to pick a format."
+        ),
         "instructions": (
-            "1. Log into vanguard.com\n"
-            "2. Go to **My Accounts → Holdings**\n"
-            "3. Click **Download** (spreadsheet icon)\n"
-            "4. Upload the downloaded CSV file below"
+            "1. Log into your broker's website\n"
+            "2. Open your **Holdings** / **Positions** page\n"
+            "3. Look for **Download**, **Export**, or a spreadsheet icon — CSV or Excel (.xlsx) both work\n"
+            "4. Upload the downloaded file below. Multi-sheet workbooks are fine; "
+            "cash, money-market and total rows are skipped automatically"
         ),
     },
 }
@@ -105,19 +112,28 @@ def _handle_upload(broker_key: str, meta: dict, uploaded) -> None:
     pending = st.session_state.get(state_key)
 
     if pending is None or pending["sig"] != file_sig:
-        with st.spinner(f"Parsing {meta['label']} CSV…"):
+        with st.spinner(f"Parsing {meta['label']} holdings file…"):
             try:
                 content = uploaded.read()
-                detected_broker, parsed = parse_csv(content)
-            except ValueError as e:
-                st.error(str(e))
-                return
+                # LLM-extracted files are saved under the card they were uploaded
+                # through ("other" for the generic card), so the accounts show up
+                # on that card and can be disconnected from it.
+                if is_excel(content, uploaded.name):
+                    # Spreadsheets always go through the generic LLM extractor —
+                    # the hardcoded Fidelity/Vanguard parsers only understand CSV text.
+                    detected_broker, parsed = broker_key, parse_holdings_with_llm(content, uploaded.name)
+                else:
+                    try:
+                        detected_broker, parsed = parse_csv(content)
+                    except ValueError:
+                        # Unrecognised CSV layout → fall back to the LLM extractor.
+                        detected_broker, parsed = broker_key, parse_holdings_with_llm(content, uploaded.name)
             except Exception as e:
                 st.error(f"Import failed: {e}")
                 return
 
         if not parsed:
-            st.error("No valid holdings found in this file. Check the CSV format.")
+            st.error("No valid holdings found in this file. Check that it is a holdings/positions export (CSV or Excel).")
             return
 
         pending = {"sig": file_sig, "broker": detected_broker, "parsed": parsed, "labels": {}, "saved": False}
@@ -177,7 +193,41 @@ def _handle_upload(broker_key: str, meta: dict, uploaded) -> None:
     st.rerun()
 
 
+@st.dialog("Remove holdings?")
+def _confirm_remove(scope: str, broker: str, account_number: str, label: str,
+                    n_positions: int, n_accounts: int = 1) -> None:
+    """
+    Warning screen shown when a trash button is clicked, so an accidental
+    click never deletes anything. Nothing is removed until "Yes, remove".
+    """
+    if scope == "broker":
+        what = (f"**all {n_positions} position{'s' if n_positions != 1 else ''}** across "
+                f"**{n_accounts} account{'s' if n_accounts != 1 else ''}** at **{label}**")
+    else:
+        what = f"**{n_positions} position{'s' if n_positions != 1 else ''}** in **{label}**"
+
+    st.warning(
+        f"You're about to remove {what} from your portfolio.\n\n"
+        "This can't be undone — to restore them you'll need to re-upload the holdings file.",
+        icon=material("warning"),
+    )
+    c1, c2 = st.columns(2)
+    if c1.button("Cancel", key="rm_cancel", use_container_width=True):
+        st.rerun()
+    if c2.button("Yes, remove", key="rm_confirm", type="primary",
+                 icon=material("delete"), use_container_width=True):
+        if scope == "broker":
+            n = delete_broker_holdings(broker)
+        else:
+            n = delete_account_holdings(broker, account_number)
+        st.session_state["holdings_flash"] = f"Removed {n} position{'s' if n != 1 else ''} from {label}."
+        st.rerun()
+
+
 def _render_holdings_tab() -> None:
+    if flash := st.session_state.pop("holdings_flash", None):
+        st.success(flash, icon=material("check_circle"))
+
     # ── Summary stats ─────────────────────────────────────────────────────────
     summary = get_holdings_summary()
     all_holdings = get_holdings()
@@ -324,12 +374,21 @@ def _render_holdings_tab() -> None:
     # BROKER CONNECTION CARDS
     # ══════════════════════════════════════════════════════════════════════════
 
-    section_title("Broker Connections", badge_text="CSV upload · ad-hoc")
+    section_title("Broker Connections", badge_text="CSV / Excel upload · ad-hoc")
 
-    broker_cols = st.columns(2)
+    # Per-broker tile tint — keyed containers expose a st-key-<key> class.
+    st.markdown(
+        "<style>" + "".join(
+            f'[class*="st-key-broker_tile_{k}"] {{ background:{m["bg"]} !important; '
+            f'border-color:{m["border"]} !important; border-radius:14px !important; }}'
+            for k, m in BROKER_META.items()
+        ) + "</style>",
+        unsafe_allow_html=True,
+    )
 
-    for col, broker_key in zip(broker_cols, ["fidelity", "vanguard"]):
-        meta = BROKER_META[broker_key]
+    broker_cols = st.columns(len(BROKER_META))
+
+    for col, (broker_key, meta) in zip(broker_cols, BROKER_META.items()):
         connected = broker_key in brokers_connected
         broker_holdings = [h for h in all_holdings if h.get("broker") == broker_key]
         broker_val = sum(h.get("current_value") or 0 for h in broker_holdings)
@@ -342,96 +401,91 @@ def _render_holdings_tab() -> None:
             f"{len(broker_holdings)} positions"
             if connected else f"{status_dot_html('#94A3B8')} Not connected"
         )
+        connect_blurb = meta.get("blurb") or f"Upload your {meta['label']} holdings export (CSV or Excel) to connect."
 
-        with col:
-            st.markdown(
-                f'<div style="background:{meta["bg"]};border:1px solid {meta["border"]};'
-                f'border-radius:14px;padding:18px 20px;min-height:200px">'
-                f'<div style="display:flex;justify-content:space-between;align-items:flex-start">'
-                f'<div>'
-                f'{status_dot_html(meta["color"], 12)}'
-                f'<span style="font-size:1.1rem;font-weight:800;color:{meta["color"]};margin-left:8px">'
-                f'{meta["label"]}</span>'
-                f'</div>'
-                f'<span style="font-size:0.78rem;color:{status_color};font-weight:600">{status_label}</span>'
-                f'</div>'
-                + (
-                    f'<div style="margin-top:8px;font-size:1.2rem;font-weight:800;color:#0F172A">'
-                    f'{fmt_money(broker_val)}</div>'
-                    f'<div style="font-size:0.75rem;color:#64748B">portfolio value</div>'
-                    if connected else
-                    f'<div style="margin-top:12px;font-size:0.8rem;color:#64748B;line-height:1.5">'
-                    f'Upload your {meta["label"]} holdings CSV to connect.</div>'
+        with col, st.container(border=True, key=f"broker_tile_{broker_key}"):
+            hdr_l, hdr_r = st.columns([6, 1], vertical_alignment="top")
+            with hdr_l:
+                st.markdown(
+                    f'<div>{status_dot_html(meta["color"], 12)}'
+                    f'<span style="font-size:1.1rem;font-weight:800;color:{meta["color"]};margin-left:8px">'
+                    f'{meta["label"]}</span></div>'
+                    f'<div style="font-size:0.78rem;color:{status_color};font-weight:600;margin-top:4px">'
+                    f'{status_label}</div>',
+                    unsafe_allow_html=True,
                 )
-                + f'</div>',
+            if connected:
+                # Trash icon in the tile's top-right corner → opens the warning dialog.
+                with hdr_r, st.container(key=f"tile_del_{broker_key}"):
+                    if st.button("", key=f"del_{broker_key}", icon=material("delete"),
+                                 help=f"Remove all {meta['label']} holdings"):
+                        _confirm_remove("broker", broker_key, "", meta["label"],
+                                        len(broker_holdings), len(broker_accounts))
+
+            st.markdown(
+                (
+                    f'<div style="margin-top:4px;font-size:1.2rem;font-weight:800;color:#0F172A">'
+                    f'{fmt_money(broker_val)}</div>'
+                    f'<div style="font-size:0.75rem;color:#64748B;margin-bottom:8px">portfolio value</div>'
+                    if connected else
+                    f'<div style="margin-top:8px;font-size:0.8rem;color:#64748B;line-height:1.5;margin-bottom:8px">'
+                    f'{connect_blurb}</div>'
+                ),
                 unsafe_allow_html=True,
             )
 
+            # Account rows inside the tile — one line per account (replaces the
+            # old separate "Connected Accounts" grid). Each row gets its own trash
+            # icon only when the broker has 2+ accounts; with a single account the
+            # tile's top-right icon already removes exactly that account.
+            show_row_trash = len(broker_accounts) > 1
+            for j, acct in enumerate(sorted(broker_accounts, key=lambda a: a["account_name"] or a["account_number"])):
+                acct_label = acct["account_name"] or acct["account_number"] or "Unnamed account"
+                acct_sub = acct["account_number"] if acct["account_name"] and acct["account_number"] else ""
+                row_l, row_r = st.columns([6, 1], vertical_alignment="center")
+                with row_l:
+                    st.markdown(
+                        f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
+                        f'gap:8px;padding:6px 0;border-top:1px solid rgba(0,0,0,0.06)">'
+                        f'<span style="font-size:0.85rem;font-weight:700;color:#0F172A;white-space:nowrap;'
+                        f'overflow:hidden;text-overflow:ellipsis" title="{acct_label}">{acct_label}'
+                        f'{f"<span style=&quot;font-weight:500;color:#94A3B8;margin-left:6px&quot;>{acct_sub}</span>" if acct_sub else ""}'
+                        f'</span>'
+                        f'<span style="font-size:0.82rem;color:#374151;white-space:nowrap">'
+                        f'<b>{fmt_money(acct["value"])}</b>'
+                        f'<span style="color:#94A3B8"> · {acct["count"]} pos</span></span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                if show_row_trash:
+                    with row_r, st.container(key=f"tile_del_acct_{broker_key}_{j}"):
+                        if st.button("", key=f"del_acct_{broker_key}_{j}", icon=material("delete"),
+                                     help=f"Remove holdings from {acct_label} only"):
+                            _confirm_remove("account", broker_key, acct["account_number"], acct_label, acct["count"])
+
             uploaded = st.file_uploader(
-                f"{'Re-upload / add account' if connected else 'Upload'} {meta['label']} CSV",
-                type=["csv"],
+                f"{'Re-upload / add account' if connected else 'Upload'} {meta['label']} holdings (CSV or Excel)",
+                type=["csv", "xlsx", "xls"],
                 key=f"upload_{broker_key}",
             )
             if connected:
                 st.caption("Uploading only adds/updates the account(s) in this file — other accounts are untouched.")
 
-            with st.expander("How to export from " + meta["label"]):
-                st.markdown(
-                    f'<div style="font-size:0.82rem;color:#374151;white-space:pre-line">'
-                    f'{meta["instructions"]}</div>',
-                    unsafe_allow_html=True,
-                )
+            if meta.get("instructions"):
+                with st.expander("How to export from your broker"):
+                    st.markdown(
+                        f'<div style="font-size:0.82rem;color:#374151;white-space:pre-line">'
+                        f'{meta["instructions"]}</div>',
+                        unsafe_allow_html=True,
+                    )
 
             if uploaded:
                 _handle_upload(broker_key, meta, uploaded)
 
-            if connected:
-                if st.button(f"Disconnect all {meta['label']} accounts", key=f"del_{broker_key}",
-                             icon=material("delete"),
-                             help="Remove every holding imported from this broker, across all accounts"):
-                    n = delete_broker_holdings(broker_key)
-                    st.success(f"Removed {n} {meta['label']} positions.")
-                    st.rerun()
-
     st.divider()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # CONNECTED ACCOUNTS (account-level cards)
-    # ══════════════════════════════════════════════════════════════════════════
-
+    # Still needed below for the holdings-table account filter.
     all_accounts = group_holdings_by_account(all_holdings)
-    if all_accounts:
-        section_title("Connected Accounts", badge_text=f"{len(all_accounts)} account(s)")
-        acct_cols = st.columns(3)
-        for i, acct in enumerate(sorted(all_accounts, key=lambda a: (a["broker"], a["account_name"] or a["account_number"]))):
-            meta = BROKER_META.get(acct["broker"], {
-                "label": acct["broker"].title(),
-                "color": "#334155", "bg": "#F8FAFC", "border": "#E2E8F0",
-            })
-            label = acct["account_name"] or acct["account_number"] or "Unnamed account"
-            with acct_cols[i % 3]:
-                st.markdown(
-                    f'<div style="background:white;border:1px solid {meta["border"]};border-radius:12px;'
-                    f'padding:14px 16px;margin-bottom:10px">'
-                    f'<div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;'
-                    f'letter-spacing:0.04em;color:{meta["color"]}">{status_dot_html(meta["color"], 7)} {meta["label"]}</div>'
-                    f'<div style="font-size:0.95rem;font-weight:800;color:#0F172A;margin-top:4px;'
-                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="{label}">{label}</div>'
-                    f'<div style="font-size:1.05rem;font-weight:800;color:#0F172A;margin-top:6px">'
-                    f'{fmt_money(acct["value"])}</div>'
-                    f'<div style="font-size:0.75rem;color:#64748B">{acct["count"]} position{"s" if acct["count"] != 1 else ""}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-                acct_key = f'{acct["broker"]}_{acct["account_number"] or "unnamed"}'
-                if st.button("Disconnect account", key=f"del_acct_{acct_key}",
-                             icon=material("delete"),
-                             help=f"Remove holdings from {label} only"):
-                    n = delete_account_holdings(acct["broker"], acct["account_number"])
-                    st.success(f"Removed {n} position(s) from {label}.")
-                    st.rerun()
-
-        st.divider()
 
     # ── Manual add ────────────────────────────────────────────────────────────
     with st.expander("Add holding manually", icon=material("add")):
