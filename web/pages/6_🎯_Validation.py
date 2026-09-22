@@ -58,6 +58,8 @@ from web.components.validation_charts import (
     build_signal_equity_curve_chart,
     build_score_vs_returns_chart,
     build_horizon_reliability_chart,
+    _METRIC_CFG,
+    OUTCOME_LABELS,
 )
 from web.components.validation_cards import _render_scorecard_tiles
 
@@ -278,7 +280,22 @@ with tabs[0]:
                 "Brier Score":    f"{row['brier_score']:.2f}"                if row.get("brier_score")            is not None else "—",
                 "Log-Loss":       f"{row['mean_log_loss']:.2f}"              if row.get("mean_log_loss")           is not None else "—",
             })
-        st.dataframe(pd.DataFrame(raw_rows), hide_index=True, use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(raw_rows),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Horizon":         st.column_config.Column(help="Prediction horizon — how many trading days ahead this call was for."),
+                "Evaluated Preds": st.column_config.Column(help="Number of matured, scored predictions at this horizon over the selected lookback period."),
+                "Dir Accuracy":    st.column_config.Column(help=_METRIC_CFG["directional_accuracy"]["defn"]),
+                "In-Range %":      st.column_config.Column(help=_METRIC_CFG["in_range_pct"]["defn"]),
+                "Excess Return":   st.column_config.Column(help=_METRIC_CFG["mean_excess_return"]["defn"]),
+                "Hi-Conv Acc":     st.column_config.Column(help=_METRIC_CFG["high_conviction_accuracy"]["defn"]),
+                "Lo-Conv Acc":     st.column_config.Column(help=_METRIC_CFG["low_conviction_accuracy"]["defn"]),
+                "Brier Score":     st.column_config.Column(help=_METRIC_CFG["brier_score"]["defn"]),
+                "Log-Loss":        st.column_config.Column(help=_METRIC_CFG["mean_log_loss"]["defn"]),
+            },
+        )
 
 # ── Tab 2: Prediction History — promoted right after Scorecard; once scoped
 # to "My Tickers" by default, this is every call made on tickers the viewer
@@ -314,11 +331,18 @@ with tabs[1]:
         f1, f2 = st.columns(2)
         with f1:
             h_opts = sorted({p["horizon_days"] for p in preds if p.get("horizon_days")})
-            h_filter = st.multiselect("Horizon", h_opts, default=h_opts,
-                                      format_func=lambda x: f"{x}d", key="pred_tab_h")
+            h_filter = st.multiselect(
+                "Horizon", h_opts, default=[],
+                format_func=lambda x: f"{x}d", key="pred_tab_h",
+                placeholder="All horizons — pick to narrow",
+            )
         with f2:
             o_opts = sorted({p["outcome"] for p in preds if p.get("outcome")})
-            o_filter = st.multiselect("Outcome", o_opts, default=o_opts, key="pred_tab_o")
+            o_filter = st.multiselect(
+                "Outcome", o_opts, default=[],
+                format_func=lambda o: OUTCOME_LABELS.get(o, o), key="pred_tab_o",
+                placeholder="All outcomes — pick to narrow",
+            )
 
         filtered = sorted(
             [p for p in preds
@@ -381,7 +405,28 @@ with tabs[1]:
                 "Segment":         p.get("risk_segment") or "unknown",
             })
 
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Date":             st.column_config.Column(help="Date the prediction was made."),
+                "Ticker":           st.column_config.Column(help="Stock ticker symbol."),
+                "Horizon":          st.column_config.Column(help="How many trading days ahead this call was for."),
+                "Predicted":        st.column_config.Column(help="Predicted direction: UP, DOWN, or FLAT."),
+                "Entry Price":      st.column_config.Column(help="Price at the time the prediction was made."),
+                "Pred Range %":     st.column_config.Column(help="Predicted return range (low – high) over the horizon."),
+                "Pred Price Range": st.column_config.Column(help="Predicted return range converted to a dollar price window off the entry price."),
+                "Actual %":         st.column_config.Column(help="Actual realized return over the horizon."),
+                "Actual Price":     st.column_config.Column(help="Realized price at the end of the horizon."),
+                "Distribution":     st.column_config.Column(help="Model's stated probability across 5 return buckets: ▼▼ strong down · ▼ moderate down · → flat · ▲ moderate up · ▲▲ strong up."),
+                "Bucket":           st.column_config.Column(help="Which of the 5 return buckets the actual return landed in."),
+                "Outcome":          st.column_config.Column(help="Whether the call was scored correct or wrong, and by how much (e.g. directionally correct vs. wrong significant)."),
+                "Conviction":       st.column_config.Column(help="Model's self-reported confidence in this call, 1 (low) – 10 (high)."),
+                "Excess vs SPY":    st.column_config.Column(help="Actual return minus the S&P 500's return over the same window. Positive = beat the market."),
+                "Segment":          st.column_config.Column(help="Risk segment this ticker was classified under at prediction time."),
+            },
+        )
         st.caption(
             f"{len(filtered)} of {len(preds)} evaluated predictions shown.  "
             "Entry Price = price at prediction date · Pred Price Range = estimated price window · "
@@ -423,7 +468,19 @@ with tabs[2]:
             "Portfolio Fit": f"{r['portfolio_fit_score']:.2f}" if r.get("portfolio_fit_score") is not None else "—",
             "Final":         f"{r['final_score']:.2f}" if r.get("final_score") is not None else "—",
         } for r in snap_rows]
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(table_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ticker":        st.column_config.Column(help="Stock ticker symbol."),
+                "APEX":          st.column_config.Column(help="4-analyst panel composite score (0–10) — Fundamentals, Research, Macro, and News blended."),
+                "Valuation":     st.column_config.Column(help="DCF-based valuation score (0–10) — how attractively priced vs. intrinsic value."),
+                "Opportunity":   st.column_config.Column(help="Opportunity Engine score (0–100) — momentum, correlation, and portfolio fit blended for new candidates."),
+                "Portfolio Fit": st.column_config.Column(help="Position-sizing / correlation fit score (0–100) — how well this ticker complements existing holdings."),
+                "Final":         st.column_config.Column(help="Weighted blend, normalized to 0–100: 30% APEX + 20% Valuation + 30% Opportunity + 20% Portfolio Fit."),
+            },
+        )
 
     st.divider()
 
