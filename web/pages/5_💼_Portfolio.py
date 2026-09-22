@@ -1,14 +1,15 @@
 """
-Portfolio Manager — import holdings from Fidelity / Vanguard CSV exports,
-view current positions, and sync to portfolio.yaml. Also hosts the Watchlist
-tab (tracked-but-not-owned tickers) alongside Holdings, sharing this screen.
+Portfolio Manager — import holdings from Fidelity / Vanguard CSV exports and
+view current positions, all DB-backed (portfolio_agent.tools.holdings_db).
+Also hosts the Watchlist tab (tracked-but-not-owned tickers) alongside
+Holdings, sharing this screen.
 
 Upload flow (ad-hoc, user-initiated):
   1. Click "Upload CSV" on the broker card
   2. Export Holdings CSV from your broker (Fidelity: Positions → Download CSV;
      Vanguard: My Accounts → Holdings → Download)
   3. Drop the file — parser auto-detects broker, imports rows, enriches with
-     live prices from yfinance, writes to DB and portfolio.yaml
+     live prices from yfinance, writes to the holdings DB
 """
 
 from __future__ import annotations
@@ -37,8 +38,6 @@ from web.components.portfolio_cards import _fmt_shares, _pnl_html
 from web.components.portfolio_charts import build_portfolio_trend_chart
 from portfolio_agent.tools.company_names import get_company_names, get_company_name, search_companies
 
-_YAML_PATH = str(_ROOT / "config" / "portfolio.yaml")
-
 st.set_page_config(
     page_title="Portfolio — Portfolio Intelligence",
     page_icon=material("work"),
@@ -53,14 +52,14 @@ with st.sidebar:
 
 page_header(
     "Portfolio Manager",
-    subtitle="Import holdings from Fidelity or Vanguard · Syncs to portfolio.yaml",
+    subtitle="Import holdings from Fidelity or Vanguard",
     icon="work",
 )
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 from portfolio_agent.tools.holdings_db import (
     upsert_holdings, get_holdings, get_holdings_summary,
-    delete_broker_holdings, delete_account_holdings, sync_to_yaml, get_price_history,
+    delete_broker_holdings, delete_account_holdings, get_price_history,
 )
 from portfolio_agent.tools.holdings_parser import parse_csv
 
@@ -171,10 +170,9 @@ def _handle_upload(broker_key: str, meta: dict, uploaded) -> None:
 
     today = date.today().isoformat()
     result = upsert_holdings(final_rows, pending["broker"], today)
-    sync_to_yaml(_YAML_PATH)
     pending["saved"] = True
 
-    st.success(f"Imported **{result['saved']} positions** from {meta['label']}. portfolio.yaml updated.",
+    st.success(f"Imported **{result['saved']} positions** from {meta['label']}.",
                icon=material("check_circle"))
     st.rerun()
 
@@ -392,7 +390,6 @@ def _render_holdings_tab() -> None:
                              icon=material("delete"),
                              help="Remove every holding imported from this broker, across all accounts"):
                     n = delete_broker_holdings(broker_key)
-                    sync_to_yaml(_YAML_PATH)
                     st.success(f"Removed {n} {meta['label']} positions.")
                     st.rerun()
 
@@ -431,7 +428,6 @@ def _render_holdings_tab() -> None:
                              icon=material("delete"),
                              help=f"Remove holdings from {label} only"):
                     n = delete_account_holdings(acct["broker"], acct["account_number"])
-                    sync_to_yaml(_YAML_PATH)
                     st.success(f"Removed {n} position(s) from {label}.")
                     st.rerun()
 
@@ -472,7 +468,6 @@ def _render_holdings_tab() -> None:
                 # Enrich with live price
                 enriched = _enrich_prices([holding])
                 upsert_holdings(enriched, "manual", date.today().isoformat())
-                sync_to_yaml(_YAML_PATH)
                 st.success(f"Added {m_ticker} to portfolio.")
                 st.rerun()
 
@@ -703,20 +698,6 @@ def _render_holdings_tab() -> None:
                 elif rebal["allocation"] or rebal["reduce"]:
                     st.caption("Portfolio impact projection unavailable (price history fetch failed) — allocation and reduce recommendations above are unaffected.")
 
-            # ── Sync button ───────────────────────────────────────────────────────
-            st.divider()
-            c1, c2 = st.columns([2, 6])
-            with c1:
-                if st.button("Sync to portfolio.yaml", type="primary", use_container_width=True,
-                             icon=material("save")):
-                    sync_to_yaml(_YAML_PATH)
-                    st.success("portfolio.yaml updated with current holdings.", icon=material("check_circle"))
-            with c2:
-                st.caption(
-                    "portfolio.yaml is used by the daily pipeline to prioritise your holdings for analysis. "
-                    "Sync after any import or manual change."
-                )
-
     else:
         st.info(
             "No holdings imported yet. Upload a Fidelity or Vanguard CSV above, "
@@ -730,7 +711,7 @@ def _render_holdings_tab() -> None:
             '<ol style="margin:0;color:#475569;font-size:0.85rem;line-height:2">'
             '<li>Export your holdings CSV from Fidelity or Vanguard (instructions in the cards above)</li>'
             '<li>Upload the file — broker is auto-detected, positions are parsed and prices fetched live</li>'
-            '<li>Holdings are saved to the portfolio database and <code>config/portfolio.yaml</code></li>'
+            '<li>Holdings are saved to the portfolio database</li>'
             '<li>The daily pipeline prioritises your portfolio tickers for analysis</li>'
             '</ol></div>',
             unsafe_allow_html=True,

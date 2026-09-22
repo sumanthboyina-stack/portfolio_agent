@@ -53,7 +53,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """One-time seed from the legacy config/restricted_list.yaml, if present and tables are empty."""
+    """
+    One-time seed from the legacy config/restricted_list.yaml — runs at most
+    once, ever. The DB is the source of truth from here on: after a
+    successful seed the YAML is renamed to `.migrated` so a later run never
+    re-reads it. That matters because gating this on "table is empty" (the
+    old approach) would silently resurrect entries from the stale YAML the
+    moment someone deleted the last row via the UI — indistinguishable from
+    the feature never having left YAML in the first place.
+    """
     if not _LEGACY_YAML.exists():
         return
     try:
@@ -62,29 +70,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
         return
     now = datetime.now(timezone.utc).isoformat()
 
-    if conn.execute("SELECT COUNT(*) FROM restricted_list").fetchone()[0] == 0:
-        restricted = data.get("restricted") or []
-        rows = [
-            (str(e.get("ticker", "")).upper(), e.get("reason"), now)
-            for e in restricted if e.get("ticker")
-        ]
-        if rows:
-            conn.executemany(
-                "INSERT OR IGNORE INTO restricted_list (ticker, reason, added_at) VALUES (?, ?, ?)",
-                rows,
-            )
+    restricted = data.get("restricted") or []
+    rows = [
+        (str(e.get("ticker", "")).upper(), e.get("reason"), now)
+        for e in restricted if e.get("ticker")
+    ]
+    if rows:
+        conn.executemany(
+            "INSERT OR IGNORE INTO restricted_list (ticker, reason, added_at) VALUES (?, ?, ?)",
+            rows,
+        )
 
-    if conn.execute("SELECT COUNT(*) FROM pipeline_skip").fetchone()[0] == 0:
-        skip = data.get("pipeline_skip") or {}
-        rows = [
-            (str(ticker).upper(), to_json_list(cfg.get("phases", [])), cfg.get("reason"), now)
-            for ticker, cfg in skip.items()
-        ]
-        if rows:
-            conn.executemany(
-                "INSERT OR IGNORE INTO pipeline_skip (ticker, phases, reason, added_at) VALUES (?, ?, ?, ?)",
-                rows,
-            )
+    skip = data.get("pipeline_skip") or {}
+    rows = [
+        (str(ticker).upper(), to_json_list(cfg.get("phases", [])), cfg.get("reason"), now)
+        for ticker, cfg in skip.items()
+    ]
+    if rows:
+        conn.executemany(
+            "INSERT OR IGNORE INTO pipeline_skip (ticker, phases, reason, added_at) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+
+    conn.commit()
+    try:
+        _LEGACY_YAML.rename(_LEGACY_YAML.with_name(_LEGACY_YAML.name + ".migrated"))
+    except OSError:
+        pass  # migration itself already succeeded; a rename failure just means we re-check next time
 
 
 # ── Compliance restricted list ────────────────────────────────────────────────

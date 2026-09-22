@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Optional
-
-import yaml
 
 from portfolio_agent.domain import Holding
 from portfolio_agent.tools.db import db_conn, migrate_columns
@@ -134,6 +131,15 @@ def upsert_holdings(holdings: list[dict], broker: str, as_of_date: str) -> dict:
         )
         conn.commit()
     return {"saved": len(rows_to_insert), "broker": broker}
+
+
+def get_portfolio_tickers() -> list[str]:
+    """Unique uppercase tickers across all current holdings, sorted — the
+    one shared helper every pipeline/UI consumer uses instead of each
+    re-reading a holdings file of its own."""
+    with _db() as conn:
+        rows = conn.execute("SELECT DISTINCT ticker FROM holdings ORDER BY ticker").fetchall()
+    return [r["ticker"] for r in rows]
 
 
 def get_holdings(broker: Optional[str] = None) -> list[Holding]:
@@ -443,27 +449,3 @@ def backfill_missing_price_snapshots() -> dict:
             conn.commit()
 
     return {"backfilled": len(rows_to_insert), "missing_days": len(missing)}
-
-
-def sync_to_yaml(yaml_path: str) -> None:
-    holdings = get_holdings()
-    records = []
-    for h in holdings:
-        record: dict = {"ticker": h["ticker"]}
-        if h.get("shares") is not None:
-            record["shares"] = h["shares"]
-        if h.get("avg_cost") is not None:
-            record["avg_cost"] = h["avg_cost"]
-        if h.get("sector"):
-            record["sector"] = h["sector"]
-        if h.get("account_name"):
-            record["account"] = h["account_name"]
-        if h.get("broker"):
-            record["broker"] = h["broker"]
-        records.append(record)
-
-    out = {"holdings": records}
-    path = Path(yaml_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        yaml.dump(out, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

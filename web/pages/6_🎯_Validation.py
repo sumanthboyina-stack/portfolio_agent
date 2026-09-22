@@ -16,7 +16,7 @@ narrows by *criteria*, never by an enumerable list of other people's specific
 tickers — so there's nothing on this page that could let one viewer page
 through a dropdown to infer what somebody else holds or watches. That
 property needs to be preserved if/when this becomes genuinely multi-user;
-today there's a single shared portfolio.yaml/watchlist, so the question is
+today there's a single shared holdings/watchlist DB, so the question is
 moot in practice but the filter design already assumes the stricter future.
 """
 from __future__ import annotations

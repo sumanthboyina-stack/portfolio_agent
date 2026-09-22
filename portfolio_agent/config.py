@@ -1,20 +1,15 @@
 """
-Config loader for the portfolio agent.
+Config loader for the portfolio agent — event-driven scheduling defaults.
 
-Reads portfolio.yaml at the project root and returns typed sub-sections.
-All public functions are cheap (cached after first read) and safe to call
-from any module — they never raise; missing keys fall back to defaults.
+Holdings moved to the DB-backed portfolio_agent.tools.holdings_db; this
+module no longer reads a YAML config file. The event_driven section was
+never actually overridden by anyone (config/portfolio.yaml only ever held
+`holdings:`), so these are now just the defaults directly — if per-deployment
+overrides are needed again later, they belong in a small settings table, not
+a reintroduced config file.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
-from typing import Any
-
-import yaml
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_PORTFOLIO_YAML = _PROJECT_ROOT / "config" / "portfolio.yaml"
 
 _DEFAULT_EVENT_DRIVEN: dict = {
     "enabled": True,
@@ -38,34 +33,7 @@ _DEFAULT_EVENT_DRIVEN: dict = {
     },
 }
 
-_cache: dict[str, Any] = {}
-
-
-def _load_yaml() -> dict:
-    if "_raw" not in _cache:
-        try:
-            with open(_PORTFOLIO_YAML) as f:
-                _cache["_raw"] = yaml.safe_load(f) or {}
-        except FileNotFoundError:
-            _cache["_raw"] = {}
-    return _cache["_raw"]
-
-
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into base, returning a new dict."""
-    result = dict(base)
-    for k, v in override.items():
-        if isinstance(v, dict) and isinstance(result.get(k), dict):
-            result[k] = _deep_merge(result[k], v)
-        else:
-            result[k] = v
-    return result
-
 
 def get_event_driven_config() -> dict:
-    """
-    Return the event_driven config section from portfolio.yaml,
-    merged with defaults so all keys are always present.
-    """
-    raw = _load_yaml().get("event_driven", {})
-    return _deep_merge(_DEFAULT_EVENT_DRIVEN, raw)
+    """Return the event-driven scheduling config (currently just the defaults)."""
+    return dict(_DEFAULT_EVENT_DRIVEN)

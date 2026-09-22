@@ -19,28 +19,18 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from datetime import date
 from pathlib import Path
-
-import yaml
 
 from portfolio_agent.log import get_logger as _get_logger
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _load_portfolio_tickers(pp: Path, extra: list[str] | None) -> list[str]:
-    """Read portfolio tickers from portfolio.yaml without triggering a trending scan."""
-    try:
-        data = yaml.safe_load(pp.read_text()) or {}
-    except Exception:
-        data = {}
-    holdings = data.get("holdings", [])
-    tickers = list(dict.fromkeys(
-        [h["ticker"].upper() for h in holdings if h.get("ticker")]
-        + (extra or [])
-    ))
+def _load_portfolio_tickers(extra: list[str] | None) -> list[str]:
+    """Portfolio tickers from the holdings DB, without triggering a trending scan."""
+    from portfolio_agent.tools.holdings_db import get_portfolio_tickers
+    tickers = list(dict.fromkeys(get_portfolio_tickers() + (extra or [])))
     return tickers
 
 
@@ -83,14 +73,9 @@ async def run_batch_intraday(
     Track B: new or event-triggered trending tickers → news + research.
     """
     log = _get_logger("batch.intraday")
-    pp = _PROJECT_ROOT / "config" / "portfolio.yaml"
-
-    if not pp.exists():
-        log.error("[error] config/portfolio.yaml not found.", event_type="error")
-        sys.exit(1)
 
     # ── Load tickers ──────────────────────────────────────────────────────────
-    portfolio_tickers = _load_portfolio_tickers(pp, extra_tickers)
+    portfolio_tickers = _load_portfolio_tickers(extra_tickers)
     portfolio_set = {t.upper() for t in portfolio_tickers}
 
     # Load current watchlist (needed to avoid double-adding tickers)

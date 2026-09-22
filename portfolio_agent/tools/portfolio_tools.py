@@ -1,25 +1,18 @@
 """Portfolio tools — holdings reader, concentration analysis, and restricted-list check."""
 
 import json
-from pathlib import Path
 
-import yaml
 import yfinance as yf
-
-_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
 
 def _load_portfolio() -> dict:
-    path = _CONFIG_DIR / "portfolio.yaml"
-    if not path.exists():
-        return {"holdings": []}
-    with open(path) as f:
-        return yaml.safe_load(f) or {"holdings": []}
+    from portfolio_agent.tools.holdings_db import get_holdings
+    return {"holdings": [h.to_dict() for h in get_holdings()]}
 
 
 def get_portfolio_holdings() -> str:
     """
-    Return current portfolio holdings from config/portfolio.yaml.
+    Return current portfolio holdings.
 
     Returns:
         JSON string with a list of holdings: ticker, shares, avg_cost, sector.

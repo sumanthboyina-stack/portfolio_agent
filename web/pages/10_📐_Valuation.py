@@ -332,7 +332,7 @@ else:
 
 if not group_tickers:
     st.info(
-        "No portfolio holdings found in config/portfolio.yaml." if group_choice == "Portfolio"
+        "No portfolio holdings found." if group_choice == "Portfolio"
         else "No tickers in this group yet.",
         icon=material("calculate"),
     )

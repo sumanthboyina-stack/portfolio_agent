@@ -43,23 +43,31 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """One-time seed from the legacy config/watchlist.yaml, if present and the table is empty."""
+    """
+    One-time seed from the legacy config/watchlist.yaml — runs at most once,
+    ever. The DB is the source of truth from here on: after a successful seed
+    the YAML is renamed to `.migrated` so a later run never re-reads it.
+    Gating this on "table is empty" instead would silently resurrect tickers
+    from the stale YAML the moment someone removed the last one via the UI.
+    """
     if not _LEGACY_YAML.exists():
-        return
-    if conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] > 0:
         return
     try:
         data = yaml.safe_load(_LEGACY_YAML.read_text()) or {}
     except Exception:
         return
     tickers = {str(t).upper() for t in data.get("tickers", [])}
-    if not tickers:
-        return
     now = datetime.now(timezone.utc).isoformat()
-    conn.executemany(
-        "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
-        [(t, now) for t in sorted(tickers)],
-    )
+    if tickers:
+        conn.executemany(
+            "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
+            [(t, now) for t in sorted(tickers)],
+        )
+    conn.commit()
+    try:
+        _LEGACY_YAML.rename(_LEGACY_YAML.with_name(_LEGACY_YAML.name + ".migrated"))
+    except OSError:
+        pass  # migration itself already succeeded; a rename failure just means we re-check next time
 
 
 def load_watchlist_tickers() -> list[str]:

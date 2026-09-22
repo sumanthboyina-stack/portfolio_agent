@@ -76,11 +76,8 @@ async def run_batch_morning(
     for every portfolio ticker using the legacy get_scheduled_horizons() logic.
     """
     log = _get_logger("batch.morning")
-    pp = _PROJECT_ROOT / "config" / "portfolio.yaml"
 
-    all_tickers, watchlist, portfolio_tickers, trending = load_all_tickers(
-        extra_tickers, pp
-    )
+    all_tickers, watchlist, portfolio_tickers, trending = load_all_tickers(extra_tickers)
     always_run = set((extra_tickers or []) + portfolio_tickers)
 
     run_id = os.environ.get("PIPELINE_RUN_ID", "")

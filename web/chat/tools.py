@@ -878,9 +878,8 @@ def _chat_tool_get_predictions_summary(segment: str = "all",
         seg_params: list = []
         if segment == "portfolio":
             try:
-                import yaml as _yaml
-                pdata = _yaml.safe_load((_ROOT / "config" / "portfolio.yaml").read_text()) or {}
-                ptickers = [h["ticker"].upper() for h in pdata.get("holdings", []) if "ticker" in h]
+                from portfolio_agent.tools.holdings_db import get_portfolio_tickers
+                ptickers = get_portfolio_tickers()
                 if ptickers:
                     ph = ",".join("?" * len(ptickers))
                     seg_clause = f"AND p.ticker IN ({ph})"

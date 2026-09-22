@@ -290,13 +290,10 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
 # ── Layer 2: Rolling metrics ───────────────────────────────────────────────────
 
 def _portfolio_tickers_for_segmentation() -> set[str]:
-    """Portfolio-holding tickers from config/portfolio.yaml, for segment bucketing."""
-    import yaml
-    from pathlib import Path
-    path = Path(__file__).resolve().parents[2] / "config" / "portfolio.yaml"
+    """Portfolio-holding tickers from the holdings DB, for segment bucketing."""
     try:
-        data = yaml.safe_load(path.read_text()) or {}
-        return {h["ticker"].upper() for h in data.get("holdings", []) if "ticker" in h}
+        from portfolio_agent.tools.holdings_db import get_portfolio_tickers
+        return set(get_portfolio_tickers())
     except Exception:
         return set()
 

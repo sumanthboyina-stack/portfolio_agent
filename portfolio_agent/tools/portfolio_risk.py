@@ -22,9 +22,10 @@ def _sectors_of_and_totals(
     holdings: list[dict], weight: dict[str, float]
 ) -> tuple[dict[str, str], dict[str, float]]:
     """
-    Map each ticker to a sector (portfolio.yaml's own sector field first, since
-    broker CSV import frequently leaves it blank, falling back to the cached
-    S&P/Nasdaq universe sector data), and aggregate position value by sector.
+    Map each ticker to a sector (the holdings table's own sector field first,
+    since broker CSV import frequently leaves it blank, falling back to the
+    cached S&P/Nasdaq universe sector data), and aggregate position value by
+    sector.
     """
     from portfolio_agent.tools.universe_db import get_sectors
 

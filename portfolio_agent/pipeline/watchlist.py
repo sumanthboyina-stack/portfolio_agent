@@ -10,16 +10,12 @@ tickers here.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import yaml
 
 from portfolio_agent.log import get_logger as _get_logger
 
 
 def load_all_tickers(
     extra_tickers: list[str] | None,
-    portfolio_path: Path,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """
     Merge extra, portfolio, market-trending, and watchlist tickers.
@@ -28,17 +24,10 @@ def load_all_tickers(
     log = _get_logger("main")
     from portfolio_agent.tools.news_sources import get_trending_tickers
     from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
+    from portfolio_agent.tools.holdings_db import get_portfolio_tickers
 
     watchlist = load_watchlist_tickers()
-
-    portfolio_tickers: list[str] = []
-    if portfolio_path.exists():
-        port_data = yaml.safe_load(portfolio_path.read_text()) or {}
-        portfolio_tickers = [
-            h["ticker"].upper()
-            for h in port_data.get("holdings", [])
-            if "ticker" in h
-        ]
+    portfolio_tickers = get_portfolio_tickers()
 
     log.info("  Scanning market news for trending tickers...", event_type="fetch_start")
     try:

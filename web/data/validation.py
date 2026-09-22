@@ -3,7 +3,7 @@ Validation dashboard data functions.
 
 Contains:
   - _load_metric_series          : per-prediction brier/log-loss series
-  - _load_portfolio_tickers      : ticker symbols from portfolio.yaml
+  - _load_portfolio_tickers      : ticker symbols from the holdings DB
   - _get_model_names             : distinct model_name values from predictions
   - _compute_filtered_metrics    : rolling metrics recomputed from predictions table
   - _load_rolling_metrics_series : historical rows from metrics_rolling table
@@ -19,8 +19,6 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
-
-import yaml as _yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
@@ -84,10 +82,10 @@ def _load_metric_series(
 
 
 def _load_portfolio_tickers() -> list[str]:
-    """Return unique portfolio ticker symbols from portfolio.yaml."""
+    """Return unique portfolio ticker symbols from the holdings DB."""
     try:
-        data = _yaml.safe_load((_ROOT / "config" / "portfolio.yaml").read_text()) or {}
-        return list({h["ticker"].upper() for h in data.get("holdings", []) if "ticker" in h})
+        from portfolio_agent.tools.holdings_db import get_portfolio_tickers
+        return get_portfolio_tickers()
     except Exception:
         return []
 

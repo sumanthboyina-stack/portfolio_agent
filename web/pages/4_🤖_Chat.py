@@ -176,11 +176,8 @@ def _known_tickers() -> frozenset[str]:
         pass
 
     try:
-        import yaml
-        pdata = yaml.safe_load((_ROOT / "config" / "portfolio.yaml").read_text()) or {}
-        known.update(
-            h["ticker"].upper() for h in pdata.get("holdings", []) if h.get("ticker")
-        )
+        from portfolio_agent.tools.holdings_db import get_portfolio_tickers
+        known.update(get_portfolio_tickers())
     except Exception:
         pass
 
