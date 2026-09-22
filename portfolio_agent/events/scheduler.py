@@ -12,6 +12,11 @@ Public API:
   get_trigger_type_for_scheduled(horizon_days, today)
       → str — trigger_type label for a calendar-scheduled prediction.
 
+  should_notify_trigger(trigger_type, severity, conviction, now)
+      → (bool, str) — whether an event-driven trigger should also *notify* the
+        user (personal filter from user_notifications; the pipeline run itself
+        is unaffected). Calendar-scheduled triggers never notify.
+
 Cadence rules (from config.event_driven.scheduled_cadence):
   "weekly_monday"             — only on calendar Mondays that are trading days
   "monthly_first_trading_day" — first trading day of the calendar month
@@ -20,7 +25,8 @@ Cadence rules (from config.event_driven.scheduled_cadence):
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Optional
 
 
 # ── Calendar helpers ──────────────────────────────────────────────────────────
@@ -143,3 +149,28 @@ def should_generate_prediction(
         return True, "event_material_news"
 
     return False, None
+
+
+# ── Notification filter (personal, on top of the pipeline trigger floor) ──────
+
+def should_notify_trigger(
+    trigger_type: Optional[str],
+    severity: Optional[int] = None,
+    conviction: Optional[float] = None,
+    now: Optional[datetime] = None,
+) -> tuple[bool, str]:
+    """
+    Decide whether an event-driven trigger should fire a *notification*.
+
+    Only "event_*" triggers (material news / intraday events) are eligible;
+    scheduled cadence runs never notify. Eligible triggers are then passed
+    through user_notifications.should_notify (channel, min severity, min
+    conviction, quiet hours). The underlying prediction run is decided
+    separately by should_generate_prediction() and is never affected here.
+
+    Returns (True, channel) or (False, reason).
+    """
+    if not trigger_type or not str(trigger_type).startswith("event_"):
+        return False, f"trigger {trigger_type!r} is not event-driven"
+    from portfolio_agent.tools.user_notifications_db import should_notify
+    return should_notify(severity=severity, conviction=conviction, now=now)

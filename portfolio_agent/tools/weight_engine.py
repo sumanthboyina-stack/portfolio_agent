@@ -503,16 +503,47 @@ def compute_dynamic_weights_for_horizon(
     return _normalize(raw, use_floor=True)
 
 
+def _preferred_horizon_days() -> set[int] | None:
+    """
+    Horizon days the user wants generated, from user_profile.preferred_horizons
+    (labels like "5d"). Returns None for "no filtering" — when the profile is
+    unavailable, or when the stored list is empty/unparseable (an empty
+    preference must never silently produce zero horizons).
+    """
+    try:
+        from portfolio_agent.tools.user_profile_db import get_user_profile
+        labels = get_user_profile().preferred_horizons
+    except Exception:
+        return None
+    days: set[int] = set()
+    for label in labels or []:
+        try:
+            days.add(int(str(label).strip().lower().rstrip("d")))
+        except ValueError:
+            continue
+    return days or None
+
+
+def filter_preferred_horizons(horizons: list[int]) -> list[int]:
+    """Keep only the horizons in the user's preferred_horizons (order preserved).
+    A pure output filter — it never changes how any remaining horizon is weighted."""
+    preferred = _preferred_horizon_days()
+    if preferred is None:
+        return list(horizons)
+    return [h for h in horizons if int(h) in preferred]
+
+
 def compute_dynamic_weights_all_horizons(
     ticker: str,
     horizons: list[int],
     db_context: dict,
     macro_snapshot: dict,
 ) -> dict[int, dict[str, float]]:
-    """Compute weights for all horizons in a single call."""
+    """Compute weights for all requested horizons in a single call, limited to
+    the user's preferred_horizons (see filter_preferred_horizons)."""
     return {
         h: compute_dynamic_weights_for_horizon(ticker, h, db_context, macro_snapshot)
-        for h in horizons
+        for h in filter_preferred_horizons(horizons)
     }
 
 
@@ -531,7 +562,9 @@ def compute_dynamic_weights(
     Compute context-aware weights for the APEX panel synthesis.
 
     When horizons is provided, also computes per-horizon weights under the
-    'weights_by_horizon' key.
+    'weights_by_horizon' key — for the subset of those horizons that appear in
+    the user's preferred_horizons (default: all). The weighting math for each
+    remaining horizon is unchanged; the preference only filters the output.
 
     Returns a dict with:
       weights              — single-horizon weights (legacy BASE)

@@ -13,6 +13,13 @@ Detectors:
   detect_macro_events(today, config)             — stub (future: macro calendar API)
 
 run_all_detectors(tickers, today, config) — convenience wrapper.
+
+Notifications: every detected event is also offered to _maybe_notify(), which
+applies the user's personal filter (user_notifications: channel, min severity,
+min conviction, quiet hours) via scheduler.should_notify_trigger. The pipeline
+run triggered by the event is unaffected by that filter — only whether a
+notification is emitted. Delivery is a structured "notification" log record
+carrying the channel; channel adapters (email/slack) plug in at _emit().
 """
 
 from __future__ import annotations
@@ -20,6 +27,43 @@ from __future__ import annotations
 from portfolio_agent.log import get_logger as _get_logger
 
 _log = _get_logger("events.detector")
+
+
+def _emit(channel: str, event: dict) -> None:
+    """Deliver one notification. Currently a structured log record tagged with
+    the channel — the single hook where a real email/slack sender attaches."""
+    summary = (event.get("summary") or "")[:120]
+    _log.info(
+        f"  [notify:{channel}] {event['ticker']} {event['event_type']} "
+        f"severity={event.get('severity')}: {summary}",
+        event_type="notification", channel=channel,
+        ticker=event["ticker"], trigger_event_id=event.get("id"),
+    )
+
+
+def _maybe_notify(event: dict) -> bool:
+    """
+    Personal notification filter for one detected event. Returns True when a
+    notification was emitted. Never raises — a failure here must not stop the
+    detector from returning its events to the pipeline.
+    """
+    from portfolio_agent.events.scheduler import should_notify_trigger
+    try:
+        ok, detail = should_notify_trigger(
+            f"event_{event['event_type']}",
+            severity=event.get("severity"),
+            conviction=event.get("conviction"),
+        )
+    except Exception as exc:
+        _log.warning(f"  [notify] filter failed for {event.get('ticker')}: {exc}",
+                     event_type="warning")
+        return False
+    if not ok:
+        _log.info(f"  [notify] {event['ticker']} suppressed — {detail}",
+                  event_type="notification_suppressed", ticker=event["ticker"])
+        return False
+    _emit(detail, event)
+    return True
 
 
 def detect_material_news(
@@ -69,18 +113,20 @@ def detect_material_news(
             source="news_filter_log",
             summary=summary,
         )
-        events.append({
+        event = {
             "id": ev_id,
             "ticker": ticker,
             "event_type": "material_news",
             "severity": int(score),
             "source": "news_filter_log",
             "summary": summary,
-        })
+        }
+        events.append(event)
         _log.info(
             f"  [event] {ticker} material_news severity={score}: {summary[:60]}",
             event_type="event_detected", ticker=ticker,
         )
+        _maybe_notify(event)
 
     return events
 

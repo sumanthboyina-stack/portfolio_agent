@@ -167,7 +167,11 @@ def test_compute_dynamic_weights_for_horizon_sums_to_one_and_respects_floor():
         assert all(v >= WEIGHT_FLOOR - 1e-9 for v in weights.values())
 
 
-def test_compute_dynamic_weights_legacy_includes_all_horizons_when_requested():
+def test_compute_dynamic_weights_legacy_includes_all_horizons_when_requested(tmp_path, monkeypatch):
+    # weights_by_horizon is filtered by user_profile.preferred_horizons, so read
+    # from a fresh temp DB (default = all horizons) rather than the live profile.
+    import portfolio_agent.tools.db as db_module
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
     result = compute_dynamic_weights(
         "AAPL",
         news_data=[],
@@ -179,3 +183,38 @@ def test_compute_dynamic_weights_legacy_includes_all_horizons_when_requested():
     assert sum(result["weights"].values()) == pytest.approx(1.0, abs=1e-3)
     assert set(result["weights_by_horizon"].keys()) == set(HORIZON_BASE_WEIGHTS.keys())
     
+
+# ── preferred_horizons filter (display/generation filter, not weighting math) ──
+
+def test_all_horizons_filtered_to_preferred_without_changing_weights(tmp_path, monkeypatch):
+    import portfolio_agent.tools.db as db_module
+    from portfolio_agent.tools.user_profile_db import update_user_profile
+    from portfolio_agent.tools.weight_engine import (
+        compute_dynamic_weights_all_horizons, filter_preferred_horizons,
+    )
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+
+    ctx = {"news": [], "research": None, "fundamentals": None, "valuation": None}
+    full = compute_dynamic_weights_all_horizons("AAPL", [5, 21, 63, 250], ctx, {})
+    assert set(full) == {5, 21, 63, 250}   # default preference = all → unchanged
+
+    update_user_profile(preferred_horizons=["5d", "63d"])
+    assert filter_preferred_horizons([5, 21, 63, 250]) == [5, 63]
+    filtered = compute_dynamic_weights_all_horizons("AAPL", [5, 21, 63, 250], ctx, {})
+    assert set(filtered) == {5, 63}
+    for h in (5, 63):
+        assert filtered[h] == full[h]      # weights for remaining horizons untouched
+
+    result = compute_dynamic_weights("AAPL", [], None, None, None, horizons=[5, 21, 63])
+    assert set(result["weights_by_horizon"]) == {5, 63}
+    assert result["weights"] == compute_dynamic_weights("AAPL", [], None, None, None)["weights"]
+
+
+def test_empty_preferred_horizons_means_no_filtering(tmp_path, monkeypatch):
+    import portfolio_agent.tools.db as db_module
+    from portfolio_agent.tools.user_profile_db import update_user_profile
+    from portfolio_agent.tools.weight_engine import filter_preferred_horizons
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+
+    update_user_profile(preferred_horizons=[])
+    assert filter_preferred_horizons([5, 21]) == [5, 21]

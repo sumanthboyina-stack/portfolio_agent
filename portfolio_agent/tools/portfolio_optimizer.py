@@ -15,10 +15,14 @@ from __future__ import annotations
 
 from typing import Optional
 
+# Mandate limits. These four are fallback defaults only — recommend_allocation()
+# reads the live values from the user_profile table (user_profile_db) and passes
+# them down explicitly; the module constants keep every other call site working.
 _SECTOR_CONCENTRATION_THRESHOLD = 25.0   # % of portfolio in one sector -> reduce candidate
 _ISSUER_CONCENTRATION_THRESHOLD = 15.0   # % of portfolio in one issuer (share classes) -> reduce candidate
 _MAX_PER_CANDIDATE_PCT_OF_CASH  = 0.4    # no single allocation > 40% of the new cash
 _MAX_POST_TRADE_POSITION_PCT    = 0.15   # no resulting position > 15% of post-trade total value
+# Modeling/UX parameters — not part of the user mandate, stay module-level.
 _ALLOCATION_SCORE_FLOOR         = 45.0   # candidates below this don't get cash
 _ROUND_TO                       = 50.0   # round dollar allocations to the nearest $50
 
@@ -45,23 +49,31 @@ def _consolidate_by_ticker(holdings: list[dict]) -> list[dict]:
     return list(by_ticker.values())
 
 
-def _overweight_penalty(sector_pct: Optional[float], issuer_pct: Optional[float]) -> float:
+def _overweight_penalty(
+    sector_pct: Optional[float],
+    issuer_pct: Optional[float],
+    sector_threshold: float = _SECTOR_CONCENTRATION_THRESHOLD,
+    issuer_threshold: float = _ISSUER_CONCENTRATION_THRESHOLD,
+) -> float:
     """0-20: an already-concentrated holding gets less new cash even with strong
     conviction — the point of new cash is diversifying, not doubling down."""
     penalty = 0.0
-    if sector_pct is not None and sector_pct > _SECTOR_CONCENTRATION_THRESHOLD:
-        penalty += min(12.0, (sector_pct - _SECTOR_CONCENTRATION_THRESHOLD) * 0.8)
-    if issuer_pct is not None and issuer_pct > _ISSUER_CONCENTRATION_THRESHOLD:
-        penalty += min(8.0, (issuer_pct - _ISSUER_CONCENTRATION_THRESHOLD) * 0.8)
+    if sector_pct is not None and sector_pct > sector_threshold:
+        penalty += min(12.0, (sector_pct - sector_threshold) * 0.8)
+    if issuer_pct is not None and issuer_pct > issuer_threshold:
+        penalty += min(8.0, (issuer_pct - issuer_threshold) * 0.8)
     return penalty
 
 
 def _existing_holding_candidates(
     holdings: list[dict], risk_ctx: dict, latest_preds: dict, exclude: set[str],
+    sector_threshold: float = _SECTOR_CONCENTRATION_THRESHOLD,
+    issuer_threshold: float = _ISSUER_CONCENTRATION_THRESHOLD,
 ) -> list[dict]:
     """Current holdings whose latest APEX call is BUY-classified — candidates to top up.
     exclude: tickers already flagged in the reduce list — never recommend adding to a
-    position in the same breath as flagging it for concentration/SELL risk."""
+    position in the same breath as flagging it for concentration/SELL risk.
+    sector/issuer thresholds are forwarded to _overweight_penalty."""
     from portfolio_agent.tools.opportunity_engine import _classify
     from portfolio_agent.tools.portfolio_risk import correlation_diversification_bonus
 
@@ -81,7 +93,10 @@ def _existing_holding_candidates(
         score = (
             (composite_score or 0) / 10 * 70
             + correlation_diversification_bonus(ctx.get("correlation_with_portfolio"))
-            - _overweight_penalty(ctx.get("sector_concentration_pct"), ctx.get("issuer_concentration_pct"))
+            - _overweight_penalty(
+                ctx.get("sector_concentration_pct"), ctx.get("issuer_concentration_pct"),
+                sector_threshold, issuer_threshold,
+            )
         )
         candidates.append({
             "ticker": ticker,
@@ -95,9 +110,13 @@ def _existing_holding_candidates(
     return candidates
 
 
-def _new_buy_candidates(existing_tickers: set[str]) -> list[dict]:
+def _new_buy_candidates(
+    existing_tickers: set[str],
+    sector_threshold: float = _SECTOR_CONCENTRATION_THRESHOLD,
+) -> list[dict]:
     """Today's Opportunity Engine BUY list, reshaped to the same candidate schema
-    used for existing holdings so both compete on one ranked list."""
+    used for existing holdings so both compete on one ranked list.
+    sector_threshold is forwarded to _overweight_penalty (no issuer data for new buys)."""
     from portfolio_agent.tools.opportunity_engine import get_daily_opportunities
     from portfolio_agent.tools.portfolio_risk import correlation_diversification_bonus
 
@@ -112,7 +131,9 @@ def _new_buy_candidates(existing_tickers: set[str]) -> list[dict]:
         score = (
             (opp["composite_score"] or 0) / 10 * 70
             + correlation_diversification_bonus(impact.get("correlation_with_portfolio"))
-            - _overweight_penalty(impact.get("candidate_sector_before_pct"), None)
+            - _overweight_penalty(
+                impact.get("candidate_sector_before_pct"), None, sector_threshold=sector_threshold,
+            )
         )
         candidates.append({
             "ticker": opp["ticker"],
@@ -126,11 +147,18 @@ def _new_buy_candidates(existing_tickers: set[str]) -> list[dict]:
     return candidates
 
 
-def _allocate_cash(candidates: list[dict], cash_amount: float, baseline: Optional[dict]) -> tuple[list[dict], float]:
+def _allocate_cash(
+    candidates: list[dict],
+    cash_amount: float,
+    baseline: Optional[dict],
+    max_per_candidate_pct_of_cash: float = _MAX_PER_CANDIDATE_PCT_OF_CASH,
+    max_post_trade_position_pct: float = _MAX_POST_TRADE_POSITION_PCT,
+) -> tuple[list[dict], float]:
     """
     Greedy proportional allocation: each qualifying candidate's target share of
     cash is proportional to its score among the ranked pool, capped so no single
-    allocation is oversized relative to the new cash or the resulting position.
+    allocation is oversized relative to the new cash (max_per_candidate_pct_of_cash)
+    or the resulting position (max_post_trade_position_pct of post-trade total).
     Capped/excluded amounts are NOT redistributed to other candidates — they show
     up honestly as CASH rather than being silently reallocated.
     """
@@ -156,9 +184,9 @@ def _allocate_cash(candidates: list[dict], cash_amount: float, baseline: Optiona
                 # isn't directly available here — caller passes it in via risk_ctx-derived
                 # weight when present; fall back to 0 (no cap tightening) otherwise.
                 current_value = c.get("current_value", 0.0)
-            position_cap = max(0.0, _MAX_POST_TRADE_POSITION_PCT * post_trade_total - current_value)
+            position_cap = max(0.0, max_post_trade_position_pct * post_trade_total - current_value)
 
-        cap = min(cash_amount * _MAX_PER_CANDIDATE_PCT_OF_CASH, position_cap, remaining)
+        cap = min(cash_amount * max_per_candidate_pct_of_cash, position_cap, remaining)
         amount = _round_dollars(min(raw_amount, cap))
         if amount <= 0:
             continue
@@ -177,10 +205,17 @@ def _allocate_cash(candidates: list[dict], cash_amount: float, baseline: Optiona
     return allocations, cash_reserved
 
 
-def _reduce_candidates(holdings: list[dict], risk_ctx: dict, latest_preds: dict, prices: dict) -> list[dict]:
+def _reduce_candidates(
+    holdings: list[dict],
+    risk_ctx: dict,
+    latest_preds: dict,
+    prices: dict,
+    sector_threshold: float = _SECTOR_CONCENTRATION_THRESHOLD,
+    issuer_threshold: float = _ISSUER_CONCENTRATION_THRESHOLD,
+) -> list[dict]:
     """Current holdings worth trimming: a SELL/STRONG_SELL call, or concentration
-    (sector or issuer) past threshold. Suggested trim is a simple proportional
-    pull-back, not a precise target-weight solve."""
+    (sector or issuer) past the given thresholds. Suggested trim is a simple
+    proportional pull-back, not a precise target-weight solve."""
     reduce_list = []
     for h in holdings:
         ticker = str(h["ticker"]).upper()
@@ -198,21 +233,21 @@ def _reduce_candidates(holdings: list[dict], risk_ctx: dict, latest_preds: dict,
             trim_pct = max(trim_pct, 30.0)
 
         sector_pct = ctx.get("sector_concentration_pct")
-        if sector_pct is not None and sector_pct > _SECTOR_CONCENTRATION_THRESHOLD:
-            reasons.append(f"{sector_pct:.1f}% of portfolio is in this ticker's sector (>{_SECTOR_CONCENTRATION_THRESHOLD:.0f}% threshold)")
-            trim_pct = max(trim_pct, min(50.0, (sector_pct - _SECTOR_CONCENTRATION_THRESHOLD) / sector_pct * 100))
+        if sector_pct is not None and sector_pct > sector_threshold:
+            reasons.append(f"{sector_pct:.1f}% of portfolio is in this ticker's sector (>{sector_threshold:.0f}% threshold)")
+            trim_pct = max(trim_pct, min(50.0, (sector_pct - sector_threshold) / sector_pct * 100))
 
         issuer_pct = ctx.get("issuer_concentration_pct")
         has_issuer_peers = bool(ctx.get("issuer_peers"))
-        if issuer_pct is not None and issuer_pct > _ISSUER_CONCENTRATION_THRESHOLD:
+        if issuer_pct is not None and issuer_pct > issuer_threshold:
             # issuer_concentration_pct with no issuer_peers just IS this ticker's own
             # portfolio weight — phrase it as position size, not share-class overlap.
             label = (
                 f"across share classes with {', '.join(ctx['issuer_peers'])}"
                 if has_issuer_peers else "in this single position"
             )
-            reasons.append(f"{issuer_pct:.1f}% of portfolio is {label} (>{_ISSUER_CONCENTRATION_THRESHOLD:.0f}% threshold)")
-            trim_pct = max(trim_pct, min(50.0, (issuer_pct - _ISSUER_CONCENTRATION_THRESHOLD) / issuer_pct * 100))
+            reasons.append(f"{issuer_pct:.1f}% of portfolio is {label} (>{issuer_threshold:.0f}% threshold)")
+            trim_pct = max(trim_pct, min(50.0, (issuer_pct - issuer_threshold) / issuer_pct * 100))
 
         if not reasons:
             continue
@@ -267,6 +302,9 @@ def recommend_allocation(cash_amount: float, top_n_candidates: int = 5) -> dict:
     Degrades gracefully: if the aggregate-metrics/risk-context yfinance calls
     fail, still returns allocation/reduce lists with impact=None rather than
     failing outright.
+
+    Mandate limits (sector/issuer concentration, per-candidate cash cap,
+    post-trade position cap) come from the user_profile table, read once here.
     """
     import json
     from portfolio_agent.tools.portfolio_tools import get_portfolio_holdings
@@ -274,6 +312,11 @@ def recommend_allocation(cash_amount: float, top_n_candidates: int = 5) -> dict:
         compute_portfolio_aggregate_metrics, compute_portfolio_risk_context,
     )
     from portfolio_agent.tools.prediction_db import get_all_latest_predictions
+    from portfolio_agent.tools.user_profile_db import get_user_profile
+
+    profile = get_user_profile()
+    sector_threshold = profile.max_sector_pct
+    issuer_threshold = profile.max_issuer_pct
 
     raw_holdings = json.loads(get_portfolio_holdings()).get("holdings", [])
     holdings = _consolidate_by_ticker(raw_holdings)
@@ -284,11 +327,20 @@ def recommend_allocation(cash_amount: float, top_n_candidates: int = 5) -> dict:
 
     # Reduce list first: a ticker already flagged for concentration/SELL risk
     # is never also offered new cash in the same recommendation.
-    reduce_list = _reduce_candidates(holdings, risk_ctx, latest_preds, prices) if holdings else []
+    reduce_list = (
+        _reduce_candidates(
+            holdings, risk_ctx, latest_preds, prices,
+            sector_threshold=sector_threshold, issuer_threshold=issuer_threshold,
+        )
+        if holdings else []
+    )
     reduce_tickers = {r["ticker"] for r in reduce_list}
 
     existing_tickers = {str(h["ticker"]).upper() for h in holdings}
-    candidates = _existing_holding_candidates(holdings, risk_ctx, latest_preds, exclude=reduce_tickers)
+    candidates = _existing_holding_candidates(
+        holdings, risk_ctx, latest_preds, exclude=reduce_tickers,
+        sector_threshold=sector_threshold, issuer_threshold=issuer_threshold,
+    )
 
     # Fold in each existing candidate's current $ value so _allocate_cash can
     # cap post-trade position size correctly.
@@ -297,11 +349,15 @@ def recommend_allocation(cash_amount: float, top_n_candidates: int = 5) -> dict:
             (h.get("shares") or 0 for h in holdings if str(h["ticker"]).upper() == c["ticker"]), 0
         )) * prices.get(c["ticker"], 0.0)
 
-    new_candidates = _new_buy_candidates(existing_tickers)
+    new_candidates = _new_buy_candidates(existing_tickers, sector_threshold=sector_threshold)
     new_candidate_prices = {c["ticker"]: c["candidate_price"] for c in new_candidates}
 
     ranked = sorted(candidates + new_candidates, key=lambda c: c["score"], reverse=True)[:top_n_candidates]
-    allocations, cash_reserved = _allocate_cash(ranked, cash_amount, baseline)
+    allocations, cash_reserved = _allocate_cash(
+        ranked, cash_amount, baseline,
+        max_per_candidate_pct_of_cash=profile.max_per_candidate_pct_of_cash,
+        max_post_trade_position_pct=profile.max_post_trade_position_pct,
+    )
 
     after = None
     if baseline is not None:

@@ -7,6 +7,8 @@ Five core entities — all stdlib dataclasses (no extra dependencies):
   ResearchSnapshot     — sell-side broker consensus + LLM summary
   NewsSummary          — daily news headline pair + sentiment for one ticker
   Prediction           — one APEX horizon prediction row
+  UserProfile          — the single user_profile row (mandate limits + preferences)
+  UserNotificationPrefs — the single user_notifications row (channel, thresholds, quiet hours)
 
 Design:
   - DB read functions return typed models; write functions keep their existing
@@ -167,6 +169,148 @@ class Holding(_DictCompat):
             "synced_at": self.synced_at,
             "unrealized_gain_loss": self.unrealized_gain_loss,
             "unrealized_gain_loss_pct": self.unrealized_gain_loss_pct,
+        }
+
+
+# ── UserProfile ────────────────────────────────────────────────────────────────
+
+# Horizon labels as stored in user_profile.preferred_horizons; days = int(label[:-1]).
+ALL_HORIZON_LABELS = ("5d", "21d", "63d", "250d")
+
+
+@dataclass
+class UserProfile(_DictCompat):
+    """The single user_profile row: identity, mandate limits, preferences."""
+    id: int = 1
+    display_name: str | None = None
+    base_currency: str = "USD"
+    timezone: str = "America/Chicago"
+    max_sector_pct: float = 25.0
+    max_issuer_pct: float = 15.0
+    max_per_candidate_pct_of_cash: float = 0.4
+    max_post_trade_position_pct: float = 0.15
+    sector_exclusions: list = field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
+    # compliance
+    employer: str | None = None
+    pre_clearance_required: bool = True
+    blackout_start: str | None = None   # ISO date, inclusive
+    blackout_end: str | None = None     # ISO date, inclusive
+    disclaimer_accepted_at: str | None = None
+    # horizons the user wants generated/shown; default = all four (no filtering)
+    preferred_horizons: list = field(default_factory=lambda: list(ALL_HORIZON_LABELS))
+
+    @classmethod
+    def from_db_row(cls, row: dict) -> "UserProfile":
+        defaults = cls()
+
+        def _num(key: str, default: float) -> float:
+            # NULL falls back to the default; an explicit 0.0 is kept as-is.
+            v = _safe_float(row.get(key))
+            return default if v is None else v
+
+        return cls(
+            id=row.get("id") or 1,
+            display_name=row.get("display_name"),
+            base_currency=row.get("base_currency") or defaults.base_currency,
+            timezone=row.get("timezone") or defaults.timezone,
+            max_sector_pct=_num("max_sector_pct", defaults.max_sector_pct),
+            max_issuer_pct=_num("max_issuer_pct", defaults.max_issuer_pct),
+            max_per_candidate_pct_of_cash=_num(
+                "max_per_candidate_pct_of_cash", defaults.max_per_candidate_pct_of_cash
+            ),
+            max_post_trade_position_pct=_num(
+                "max_post_trade_position_pct", defaults.max_post_trade_position_pct
+            ),
+            sector_exclusions=_parse_json_list(row.get("sector_exclusions")),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            employer=row.get("employer"),
+            pre_clearance_required=(
+                defaults.pre_clearance_required
+                if row.get("pre_clearance_required") is None
+                else bool(row.get("pre_clearance_required"))
+            ),
+            blackout_start=row.get("blackout_start") or None,
+            blackout_end=row.get("blackout_end") or None,
+            disclaimer_accepted_at=row.get("disclaimer_accepted_at") or None,
+            # NULL (pre-migration row) → all horizons; an explicit list is kept as-is
+            preferred_horizons=(
+                list(ALL_HORIZON_LABELS)
+                if row.get("preferred_horizons") is None
+                else _parse_json_list(row.get("preferred_horizons"))
+            ),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "base_currency": self.base_currency,
+            "timezone": self.timezone,
+            "max_sector_pct": self.max_sector_pct,
+            "max_issuer_pct": self.max_issuer_pct,
+            "max_per_candidate_pct_of_cash": self.max_per_candidate_pct_of_cash,
+            "max_post_trade_position_pct": self.max_post_trade_position_pct,
+            "sector_exclusions": self.sector_exclusions,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "employer": self.employer,
+            "pre_clearance_required": self.pre_clearance_required,
+            "blackout_start": self.blackout_start,
+            "blackout_end": self.blackout_end,
+            "disclaimer_accepted_at": self.disclaimer_accepted_at,
+            "preferred_horizons": self.preferred_horizons,
+        }
+
+
+# ── UserNotificationPrefs ──────────────────────────────────────────────────────
+
+NOTIFICATION_CHANNELS = ("none", "email", "slack")
+
+
+@dataclass
+class UserNotificationPrefs(_DictCompat):
+    """The single user_notifications row: personal filter on event notifications."""
+    id: int = 1
+    channel: str = "none"
+    min_severity_threshold: int = 3
+    min_conviction_threshold: int | None = None
+    quiet_hours_start: str | None = None   # "HH:MM" in the profile's timezone
+    quiet_hours_end: str | None = None     # "HH:MM"; start > end spans midnight
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @classmethod
+    def from_db_row(cls, row: dict) -> "UserNotificationPrefs":
+        defaults = cls()
+        sev = _safe_int(row.get("min_severity_threshold"))
+        return cls(
+            id=row.get("id") or 1,
+            channel=row.get("channel") or defaults.channel,
+            min_severity_threshold=defaults.min_severity_threshold if sev is None else sev,
+            min_conviction_threshold=_safe_int(row.get("min_conviction_threshold")),
+            quiet_hours_start=row.get("quiet_hours_start") or None,
+            quiet_hours_end=row.get("quiet_hours_end") or None,
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self.channel != "none"
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "channel": self.channel,
+            "min_severity_threshold": self.min_severity_threshold,
+            "min_conviction_threshold": self.min_conviction_threshold,
+            "quiet_hours_start": self.quiet_hours_start,
+            "quiet_hours_end": self.quiet_hours_end,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
 

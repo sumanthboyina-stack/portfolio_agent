@@ -663,6 +663,48 @@ def inject_global_css() -> None:
         border-bottom-color: #BFDBFE !important;
     }
 
+    /* ── Sidebar settings nav (vertical) ────────────────────── */
+    .side-nav-title {
+        display: flex; align-items: center; gap: 6px;
+        font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.08em; color: #9CA3AF !important;
+        padding: 4px 10px 8px; margin: 0;
+    }
+    .side-nav-title span { color: #9CA3AF !important; }
+    .side-nav-item {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 10px; margin: 2px 0;
+        border-radius: 8px; font-size: 0.9rem; font-weight: 600;
+        color: #F9FAFB !important; background: rgba(37,99,235,0.28);
+        border-left: 3px solid #60A5FA;
+    }
+    .side-nav-item span { color: #F9FAFB !important; }
+    .side-nav-end {
+        height: 1px; background: #1F2937; margin: 10px 0 14px;
+    }
+    /* Sidebar page links: vertical rows, not the 58px underline tabs used in the top nav */
+    [data-testid="stSidebar"] [data-testid="stPageLink"] p {
+        height: auto !important;
+        padding: 8px 10px !important;
+        margin: 2px 0 !important;
+        border-bottom: none !important;
+        border-left: 3px solid transparent !important;
+        border-radius: 8px !important;
+        font-size: 0.9rem !important;
+        gap: 8px !important;
+        color: #D1D5DB !important;
+        transition: background 0.12s, color 0.12s !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPageLink"] p:hover {
+        background: rgba(255,255,255,0.06) !important;
+        color: #FFFFFF !important;
+        border-bottom: none !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPageLink"] span,
+    [data-testid="stSidebar"] [data-testid="stPageLink"] [data-testid="stIconMaterial"] {
+        color: inherit !important;
+    }
+
     /* ── Checkbox & radio (main area) ───────────────────────── */
     .stCheckbox label span:first-child,
     .stRadio label span:first-child {
@@ -727,10 +769,12 @@ _NAV_ADMIN = [
     ("database",    "database",       "Database",      "pages/1_📊_Database.py"),
     ("restricted",  "block",          "Restricted List", "pages/8_🚫_Restricted_List.py"),
     ("validation_qa", "science",      "Validation QA", "pages/11_🔬_Validation_QA.py"),
+    ("profile",     "person",         "Profile",       "pages/12_👤_Profile.py"),
 ]
 
 def top_nav(active: str = "dashboard") -> None:
-    """Render a sticky top nav: primary tabs, secondary tabs, and an admin drawer toggle."""
+    """Render a sticky top nav (primary + secondary tabs) and the vertical
+    Settings nav at the top of the left sidebar (see _sidebar_settings_nav)."""
     st.markdown(
         '<div class="top-nav-wrap">'
         f'<div class="nav-brand">{icon_html("trending_up", 19)} Portfolio Intelligence</div>'
@@ -743,16 +787,14 @@ def top_nav(active: str = "dashboard") -> None:
     def _w(label: str) -> float:
         return 0.75 + 0.11 * len(label)
 
-    n_primary, n_secondary = len(_NAV_PRIMARY), len(_NAV_SECONDARY)
+    n_primary = len(_NAV_PRIMARY)
     widths = (
         [_w(label) for _, _, label, _ in _NAV_PRIMARY] + [0.3]
-        + [_w(label) for _, _, label, _ in _NAV_SECONDARY] + [0.3, 0.6]
+        + [_w(label) for _, _, label, _ in _NAV_SECONDARY]
     )
     cols = st.columns(widths, gap="small")
     divider_1 = n_primary
     secondary_start = n_primary + 1
-    divider_2 = secondary_start + n_secondary
-    admin_col = divider_2 + 1
 
     for i, (key, icon, label, path) in enumerate(_NAV_PRIMARY):
         with cols[i]:
@@ -781,38 +823,31 @@ def top_nav(active: str = "dashboard") -> None:
             else:
                 st.page_link(path, label=label, icon=material(icon), use_container_width=True)
 
-    with cols[divider_2]:
-        st.markdown(
-            '<div style="width:1px;background:#E5E7EB;height:30px;margin:14px auto"></div>',
-            unsafe_allow_html=True,
-        )
-
-    with cols[admin_col]:
-        if st.button("", icon=material("settings"), key="admin_drawer_toggle",
-                     help="Admin: Schedule & Database", use_container_width=True):
-            st.session_state["_admin_drawer_open"] = not st.session_state.get("_admin_drawer_open", False)
-
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-    if st.session_state.get("_admin_drawer_open", False) or active in ("schedule", "database", "restricted", "validation_qa"):
+    _sidebar_settings_nav(active)
+
+
+def _sidebar_settings_nav(active: str) -> None:
+    """Vertical Settings nav (Schedule, Database, Restricted List, Validation QA,
+    Profile) pinned to the top of the left sidebar. Pages add their own sidebar
+    content below it, since top_nav() runs first on every page."""
+    with st.sidebar:
         st.markdown(
-            '<div style="padding:6px 24px 0;display:flex;gap:6px;align-items:center">'
-            '<span style="font-size:0.7rem;font-weight:700;text-transform:uppercase;'
-            'letter-spacing:0.08em;color:#9CA3AF;margin-right:4px">Admin</span></div>',
+            '<div class="side-nav">'
+            f'<div class="side-nav-title">{icon_html("settings", 15)} <span>Settings</span></div>'
+            '</div>',
             unsafe_allow_html=True,
         )
-        _admin_widths = [_w(label) for _, _, label, _ in _NAV_ADMIN]
-        admin_cols = st.columns(_admin_widths + [sum(_admin_widths) * 2])
-        for i, (key, icon, label, path) in enumerate(_NAV_ADMIN):
-            with admin_cols[i]:
-                if key == active:
-                    st.markdown(
-                        f'<div class="nav-tab active" style="font-size:0.85rem">'
-                        f'{icon_html(icon, 15)} <span>{label}</span></div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.page_link(path, label=label, icon=material(icon), use_container_width=True)
+        for key, icon, label, path in _NAV_ADMIN:
+            if key == active:
+                st.markdown(
+                    f'<div class="side-nav-item active">{icon_html(icon, 17)} <span>{label}</span></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.page_link(path, label=label, icon=material(icon), use_container_width=True)
+        st.markdown('<div class="side-nav-end"></div>', unsafe_allow_html=True)
 
 
 # ── Icon system (Material Symbols Rounded — same font Streamlit's own
