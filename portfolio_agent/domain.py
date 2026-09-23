@@ -94,9 +94,13 @@ class _DictCompat:
 
 # ── Holding ────────────────────────────────────────────────────────────────────
 
+# The single local owner every request resolves to until multi-user auth exists.
+LOCAL_OWNER = "local"
+
+
 @dataclass
 class Holding(_DictCompat):
-    """One brokerage position row from the holdings table."""
+    """One position row as read from the `holdings` view (id = position_id)."""
     ticker: str
     id: int | None = None
     description: str | None = None
@@ -112,6 +116,12 @@ class Holding(_DictCompat):
     sector: str | None = None
     as_of_date: str | None = None
     synced_at: str | None = None
+    price_as_of: str | None = None   # trading date current_price was observed
+    account_id: int | None = None    # accounts.account_id — the account's real identity
+    portfolio_id: int | None = None
+    version: int | None = None       # optimistic-concurrency token for set_position()
+    source_import_id: int | None = None
+    instrument_id: int | None = None  # instruments.instrument_id — the security's permanent identity
 
     def __post_init__(self) -> None:
         self.ticker = self.ticker.upper()
@@ -134,6 +144,12 @@ class Holding(_DictCompat):
             sector=row.get("sector"),
             as_of_date=row.get("as_of_date"),
             synced_at=row.get("synced_at"),
+            price_as_of=row.get("price_as_of"),
+            account_id=_safe_int(row.get("account_id")),
+            portfolio_id=_safe_int(row.get("portfolio_id")),
+            version=_safe_int(row.get("version")),
+            source_import_id=_safe_int(row.get("source_import_id")),
+            instrument_id=_safe_int(row.get("instrument_id")),
         )
 
     @property
@@ -167,6 +183,10 @@ class Holding(_DictCompat):
             "sector": self.sector,
             "as_of_date": self.as_of_date,
             "synced_at": self.synced_at,
+            "price_as_of": self.price_as_of,
+            "account_id": self.account_id,
+            "instrument_id": self.instrument_id,
+            "version": self.version,
             "unrealized_gain_loss": self.unrealized_gain_loss,
             "unrealized_gain_loss_pct": self.unrealized_gain_loss_pct,
         }
@@ -793,3 +813,74 @@ class Prediction(_DictCompat):
             "brier_score": self.brier_score,
             "log_loss": self.log_loss,
         }
+
+
+# ── Portfolio summary (pure) ──────────────────────────────────────────────────
+
+def _min_max(values: list) -> dict:
+    vals = [v for v in values if v]
+    return {"oldest": min(vals) if vals else None, "newest": max(vals) if vals else None}
+
+
+def summarize_holdings(holdings: list, cash_rows: list[dict] | None = None) -> dict:
+    """
+    Portfolio-level totals with their coverage made explicit, over whatever
+    holdings (dicts or Holding rows) and cash rows the caller passes — a whole
+    portfolio or one account.
+
+    securities_value sums ONLY positions that have a current_value; positions
+    without one are counted in unvalued_count and listed, never treated as $0.
+    Cash is tracked separately (cash_balance) and never added to
+    securities_value; total_value is the same number, kept for older callers.
+    `freshness` keeps statement date, import time and price observation date
+    apart because they answer different questions.
+    """
+    cash_rows = cash_rows or []
+    valued = [h for h in holdings if h.get("current_value") is not None]
+    unvalued = [h for h in holdings if h.get("current_value") is None]
+    securities_value = sum(h["current_value"] for h in valued)
+    cost_known = sum(1 for h in valued if h.get("cost_basis_total") is not None)
+    cost = sum(h["cost_basis_total"] for h in valued if h.get("cost_basis_total") is not None)
+    cash_total = sum(c["amount"] for c in cash_rows if c.get("amount") is not None)
+
+    by_sector: dict[str, float] = {}
+    by_broker: dict[str, dict] = {}
+    for h in holdings:
+        bb = by_broker.setdefault(h.get("broker") or "unknown", {"count": 0, "value": 0.0, "unvalued": 0})
+        bb["count"] += 1
+        value = h.get("current_value")
+        if value is None:
+            bb["unvalued"] += 1
+            continue
+        bb["value"] += value
+        sector = h.get("sector") or "Unknown"
+        by_sector[sector] = by_sector.get(sector, 0.0) + value
+
+    synced = [h.get("synced_at") for h in holdings]
+    return {
+        "total_value": round(securities_value, 2),
+        "securities_value": round(securities_value, 2),
+        "holding_count": len(holdings),
+        "valued_count": len(valued),
+        "unvalued_count": len(unvalued),
+        "unvalued_tickers": sorted({h["ticker"] for h in unvalued}),
+        "cost_basis": round(cost, 2),
+        "cost_known_count": cost_known,
+        "unrealized": round(securities_value - cost, 2) if cost_known else None,
+        "unrealized_pct": round((securities_value - cost) / cost * 100, 2) if cost else None,
+        "cash_balance": round(cash_total, 2),
+        "cash_accounts": len(cash_rows),
+        "cash_included": False,
+        "brokers": sorted(by_broker),
+        "by_broker": {b: {"count": v["count"], "value": round(v["value"], 2), "unvalued": v["unvalued"]}
+                      for b, v in sorted(by_broker.items())},
+        "by_sector": {k: round(v, 2) for k, v in sorted(by_sector.items(), key=lambda kv: -kv[1])},
+        # Kept for older callers: this is the NEWEST import time, not price age.
+        "last_synced_at": _min_max(synced)["newest"],
+        "freshness": {
+            "statement_date": _min_max([h.get("as_of_date") for h in holdings]),
+            "imported_at": _min_max(synced),
+            "price_as_of": _min_max([h.get("price_as_of") for h in holdings]),
+            "price_missing": sum(1 for h in holdings if h.get("current_price") is None),
+        },
+    }

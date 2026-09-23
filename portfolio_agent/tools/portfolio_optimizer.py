@@ -113,15 +113,20 @@ def _existing_holding_candidates(
 def _new_buy_candidates(
     existing_tickers: set[str],
     sector_threshold: float = _SECTOR_CONCENTRATION_THRESHOLD,
+    opportunities: list[dict] | None = None,
 ) -> list[dict]:
     """Today's Opportunity Engine BUY list, reshaped to the same candidate schema
     used for existing holdings so both compete on one ranked list.
-    sector_threshold is forwarded to _overweight_penalty (no issuer data for new buys)."""
-    from portfolio_agent.tools.opportunity_engine import get_daily_opportunities
+    sector_threshold is forwarded to _overweight_penalty (no issuer data for new buys).
+    Pass *opportunities* (already fetched) to keep this step free of I/O."""
     from portfolio_agent.tools.portfolio_risk import correlation_diversification_bonus
 
+    if opportunities is None:
+        from portfolio_agent.tools.opportunity_engine import get_daily_opportunities
+        opportunities = get_daily_opportunities(top_n=15)
+
     candidates = []
-    for opp in get_daily_opportunities(top_n=15):
+    for opp in opportunities:
         if opp["call"] != "BUY" or opp["ticker"] in existing_tickers:
             continue
         impact = opp.get("portfolio_impact") or {}
@@ -293,83 +298,66 @@ def _apply_trades_to_holdings(
     return synthetic
 
 
-def recommend_allocation(cash_amount: float, top_n_candidates: int = 5) -> dict:
+def recommend_allocation(cash_amount: float, top_n_candidates: int = 5,
+                         holdings: list[dict] | None = None, scope: str = "all") -> dict:
     """
-    Answers "where should $cash_amount go," "which existing holding should get
-    more," and "what should I trim" in one call. See module docstring for the
-    data sources reused.
+    Compatibility entry point: prepare frozen inputs → propose → evaluate, and
+    return the legacy {allocation, reduce, cash_reserved, impact} shape built
+    from the EVALUATED trades (rounded down to whole shares, every constraint
+    checked), plus the full scenario under "scenario" and its pinned inputs
+    under "inputs". See portfolio_agent.scenarios.
 
-    Degrades gracefully: if the aggregate-metrics/risk-context yfinance calls
-    fail, still returns allocation/reduce lists with impact=None rather than
-    failing outright.
-
-    Mandate limits (sector/issuer concentration, per-candidate cash cap,
-    post-trade position cap) come from the user_profile table, read once here.
+    "impact" keeps the live before/after risk projection (beta, volatility,
+    correlation) from portfolio_risk — a market-fetched estimate, not part of
+    the deterministic result; the engine's own pinned estimates are in
+    scenario["risk"].
     """
     import json
+    from portfolio_agent.scenarios.engine import evaluate
+    from portfolio_agent.scenarios.prepare import prepare_inputs
+    from portfolio_agent.scenarios.propose import propose_trades
+    from portfolio_agent.tools.portfolio_risk import compute_portfolio_aggregate_metrics
     from portfolio_agent.tools.portfolio_tools import get_portfolio_holdings
-    from portfolio_agent.tools.portfolio_risk import (
-        compute_portfolio_aggregate_metrics, compute_portfolio_risk_context,
-    )
-    from portfolio_agent.tools.prediction_db import get_all_latest_predictions
-    from portfolio_agent.tools.user_profile_db import get_user_profile
 
-    profile = get_user_profile()
-    sector_threshold = profile.max_sector_pct
-    issuer_threshold = profile.max_issuer_pct
+    raw_holdings = ([dict(h) for h in holdings] if holdings is not None
+                    else json.loads(get_portfolio_holdings()).get("holdings", []))
+    inputs, ctx = prepare_inputs(scope=scope, holdings=raw_holdings, contribution=cash_amount)
+    trades = propose_trades(inputs, ctx, top_n=top_n_candidates)
+    result = evaluate(inputs, trades)
 
-    raw_holdings = json.loads(get_portfolio_holdings()).get("holdings", [])
-    holdings = _consolidate_by_ticker(raw_holdings)
-    baseline = compute_portfolio_aggregate_metrics(holdings) if holdings else None
-    risk_ctx = compute_portfolio_risk_context(holdings) if holdings else {}
-    latest_preds = get_all_latest_predictions()
-    prices = baseline.get("prices", {}) if baseline else {}
+    held = {p.ticker for p in inputs.positions}
+    allocation, reduce_by_ticker = [], {}
+    for et in result.trades:
+        t = et.trade
+        if t.side == "BUY":
+            allocation.append({"ticker": t.ticker, "kind": t.meta.get("kind", "existing" if t.ticker in held else "new"),
+                               "amount": float(et.gross), "shares": float(et.quantity), "why": t.why or "",
+                               "composite_score": t.meta.get("composite_score"),
+                               "recommendation": t.meta.get("recommendation")})
+        else:
+            r = reduce_by_ticker.setdefault(t.ticker, {"ticker": t.ticker, "rationale": t.why or "",
+                                                        "suggested_trim_dollars": 0.0, "shares": 0.0})
+            r["suggested_trim_dollars"] = round(r["suggested_trim_dollars"] + float(et.gross), 2)
+            r["shares"] = round(r["shares"] + float(et.quantity), 4)
+    reduce_list = list(reduce_by_ticker.values())
+    cash_reserved = round(float(cash_amount) - sum(a["amount"] for a in allocation), 2)
 
-    # Reduce list first: a ticker already flagged for concentration/SELL risk
-    # is never also offered new cash in the same recommendation.
-    reduce_list = (
-        _reduce_candidates(
-            holdings, risk_ctx, latest_preds, prices,
-            sector_threshold=sector_threshold, issuer_threshold=issuer_threshold,
-        )
-        if holdings else []
-    )
-    reduce_tickers = {r["ticker"] for r in reduce_list}
-
-    existing_tickers = {str(h["ticker"]).upper() for h in holdings}
-    candidates = _existing_holding_candidates(
-        holdings, risk_ctx, latest_preds, exclude=reduce_tickers,
-        sector_threshold=sector_threshold, issuer_threshold=issuer_threshold,
-    )
-
-    # Fold in each existing candidate's current $ value so _allocate_cash can
-    # cap post-trade position size correctly.
-    for c in candidates:
-        c["current_value"] = float(next(
-            (h.get("shares") or 0 for h in holdings if str(h["ticker"]).upper() == c["ticker"]), 0
-        )) * prices.get(c["ticker"], 0.0)
-
-    new_candidates = _new_buy_candidates(existing_tickers, sector_threshold=sector_threshold)
-    new_candidate_prices = {c["ticker"]: c["candidate_price"] for c in new_candidates}
-
-    ranked = sorted(candidates + new_candidates, key=lambda c: c["score"], reverse=True)[:top_n_candidates]
-    allocations, cash_reserved = _allocate_cash(
-        ranked, cash_amount, baseline,
-        max_per_candidate_pct_of_cash=profile.max_per_candidate_pct_of_cash,
-        max_post_trade_position_pct=profile.max_post_trade_position_pct,
-    )
-
+    baseline = ctx.get("baseline")
     after = None
     if baseline is not None:
-        synthetic_holdings = _apply_trades_to_holdings(
-            holdings, allocations, reduce_list, prices, new_candidate_prices,
-        )
-        after = compute_portfolio_aggregate_metrics(synthetic_holdings)
+        synthetic = _apply_trades_to_holdings(ctx["consolidated"], allocation, reduce_list,
+                                              {t: float(p) for t, p in inputs.prices.items()}, {})
+        try:
+            after = compute_portfolio_aggregate_metrics(synthetic)
+        except Exception:
+            after = None
 
     return {
         "cash_amount": cash_amount,
-        "allocation": allocations,
+        "allocation": allocation,
         "cash_reserved": cash_reserved,
         "reduce": reduce_list,
         "impact": {"before": baseline, "after": after},
+        "scenario": result.to_dict(),
+        "inputs": inputs.to_dict(),
     }

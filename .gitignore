@@ -10,3 +10,4 @@ data/sec_cik_cache.json
 nohup.out
 node_modules/
 package-lock.json
+data/backups/

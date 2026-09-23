@@ -35,6 +35,37 @@ _MONEY_MARKET_RE = re.compile(
 )
 
 
+_CASH_LABELS = ("CASH", "PENDING ACTIVITY", "CASH & CASH INVESTMENTS")
+
+
+def is_cash_like(symbol: str) -> bool:
+    """Money-market / sweep / cash / pending-activity line: a cash balance, not a security."""
+    sym = (symbol or "").strip()
+    if not sym:
+        return False
+    return sym.upper() in _CASH_LABELS or bool(_MONEY_MARKET_RE.search(sym))
+
+
+def split_cash_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Separate parser output into (securities, cash rows flagged is_cash)."""
+    securities = [r for r in rows if not r.get("is_cash")]
+    cash = [r for r in rows if r.get("is_cash")]
+    return securities, cash
+
+
+def _cash_row(symbol: str, description: str, value, account_name: str,
+              account_number: str, account_type: str) -> dict:
+    return {
+        "is_cash": True,
+        "ticker": symbol.strip().upper(),
+        "description": description,
+        "current_value": value,
+        "account_name": account_name,
+        "account_number": account_number,
+        "account_type": account_type,
+    }
+
+
 def _is_invalid_ticker(ticker: str) -> bool:
     if not ticker:
         return True
@@ -156,6 +187,16 @@ def parse_fidelity_csv(content: str | bytes) -> list[dict]:
             return ""
         return row[idx].strip()
 
+    # Fidelity footers start with the download date ("MM/DD/YYYY ...") — that
+    # is the statement date the prices/values are as of.
+    statement_date = None
+    for row in all_rows:
+        first = row[0].strip() if row else ""
+        m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})", first)
+        if m:
+            statement_date = f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+            break
+
     results = []
     for sec_idx, (header_idx, headers, sec_account_name, sec_account_number) in enumerate(sections):
         next_header = sections[sec_idx + 1][0] if sec_idx + 1 < len(sections) else len(all_rows)
@@ -183,14 +224,22 @@ def parse_fidelity_csv(content: str | bytes) -> list[dict]:
                 continue
 
             symbol = _get(row, i_symbol)
+            account_name   = _get(row, i_account_name) or sec_account_name
+            account_number = _get(row, i_account_number) or sec_account_number
+
+            if is_cash_like(symbol):
+                value = _clean_float(_get(row, i_current_value))
+                if value is not None:
+                    results.append(_cash_row(symbol, _get(row, i_description), value, account_name,
+                                             account_number, _fidelity_account_type(account_name)))
+                continue
             if _is_invalid_ticker(symbol):
                 continue
 
             ticker = symbol.upper()
-            account_name   = _get(row, i_account_name) or sec_account_name
-            account_number = _get(row, i_account_number) or sec_account_number
 
             results.append({
+                "as_of_date": statement_date,
                 "ticker": ticker,
                 "description": _get(row, i_description),
                 "shares": _clean_float(_get(row, i_quantity)),
@@ -261,7 +310,12 @@ def parse_vanguard_csv(content: str | bytes) -> list[dict]:
         symbol = _get(row, i_symbol)
         if not symbol or symbol.upper() in ("N/A", "--", ""):
             continue
-        if _MONEY_MARKET_RE.search(symbol):
+        if is_cash_like(symbol):
+            value = _clean_float(_get(row, i_total_value))
+            if value is not None:
+                acct_no = _get(row, i_account_number)
+                results.append(_cash_row(symbol, _get(row, i_name), value, "Vanguard", acct_no,
+                                         _vanguard_account_type(acct_no, _get(row, i_name))))
             continue
         # Vanguard sometimes has rows with more than 5 chars for bond/fund codes
         ticker = symbol.strip().upper()

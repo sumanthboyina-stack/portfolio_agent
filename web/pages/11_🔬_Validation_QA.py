@@ -20,7 +20,7 @@ sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 import streamlit as st
-from web.styles import inject_global_css, top_nav, icon_html, material, fmt_pct
+from web.styles import inject_global_css, top_nav, icon_html, material, fmt_pct, section_tile
 
 st.set_page_config(
     page_title="Validation QA — Portfolio Intelligence",
@@ -152,123 +152,124 @@ tabs = st.tabs([
 # ── Tab 1: Metric Trends ──────────────────────────────────────────────────────
 
 with tabs[0]:
-    st.subheader(f"{material('trending_up')} Prediction Quality Metrics Over Time")
-    st.caption(
-        "Each data point is one evaluated prediction. Rolling average smooths the trend. "
-        f"Populates after {material('nights_stay')} **Evening** ({material('calendar_month')} "
-        "Schedule page) scores matured predictions."
-    )
-
-    metric_df  = _load_metric_series(_seg_sel, _portfolio_tickers, _watchlist_tickers)
-    rolling_df = _load_rolling_metrics_series(_seg_sel)
-
-    if _model_filter and not metric_df.empty and "model_name" in metric_df.columns:
-        metric_df = metric_df[metric_df["model_name"].isin(_model_filter)]
-    if _model_filter and not rolling_df.empty:
-        st.caption(f"{material('info')} Aggregate rolling metrics (dashed lines) are not model-filtered — they reflect all models.")
-
-    H_COLORS = {5: "#2563EB", 21: "#7C3AED", 63: "#059669"}
-    H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
-
-    if metric_df.empty:
-        st.info(
-            "No evaluated predictions with Brier/log-loss values yet.\n\n"
-            "Predictions become evaluable once their horizon has elapsed "
-            "(e.g., a 5-day prediction from Monday is scored the following Monday). "
-            f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
-            "Schedule page to score any matured predictions.",
-            icon=material("bar_chart"),
-        )
-    else:
-        n_eval = len(metric_df)
-        horizons_present = sorted(metric_df["horizon_days"].dropna().unique())
-
-        m1, m2 = st.columns(2)
-        with m1:
-            horizon_sel = st.multiselect(
-                "Horizon filter",
-                options=horizons_present,
-                default=list(horizons_present),
-                format_func=lambda h: H_LABELS.get(int(h), f"{int(h)}d"),
-                key="valqa_trend_horizon",
-            )
-        with m2:
-            roll_window = st.select_slider(
-                "Rolling average window",
-                options=[5, 10, 20],
-                value=10,
-                key="valqa_trend_roll",
+    _tile_1 = section_tile(f"{material('trending_up')} Prediction Quality Metrics Over Time", expanded=True, key="validation_qa_1")
+    if _tile_1:
+        with _tile_1:
+            st.caption(
+                "Each data point is one evaluated prediction. Rolling average smooths the trend. "
+                f"Populates after {material('nights_stay')} **Evening** ({material('calendar_month')} "
+                "Schedule page) scores matured predictions."
             )
 
-        d1, d2 = st.columns(2)
-        with d1:
-            show_points = st.checkbox(
-                "Show individual predictions", value=False, key="valqa_trend_show_points",
-                help="Raw per-prediction dots behind the rolling average — adds one layer of detail, and clutter.",
-            )
-        with d2:
-            show_aggregate = st.checkbox(
-                "Show unfiltered aggregate overlay", value=False, key="valqa_trend_show_aggregate",
-                help="A second line from the nightly metrics_rolling table, computed across ALL models "
-                     "regardless of the model filter above.",
-            )
+            metric_df  = _load_metric_series(_seg_sel, _portfolio_tickers, _watchlist_tickers)
+            rolling_df = _load_rolling_metrics_series(_seg_sel)
 
-        fdf = metric_df[metric_df["horizon_days"].isin(horizon_sel)] if horizon_sel else metric_df
-        st.caption(f"Showing {len(fdf)} of {n_eval} evaluated predictions")
+            if _model_filter and not metric_df.empty and "model_name" in metric_df.columns:
+                metric_df = metric_df[metric_df["model_name"].isin(_model_filter)]
+            if _model_filter and not rolling_df.empty:
+                st.caption(f"{material('info')} Aggregate rolling metrics (dashed lines) are not model-filtered — they reflect all models.")
 
-        st.subheader("Brier Score — Rolling Average")
-        st.caption(
-            "Lower is better. Baseline (uniform guesser) ≈ 0.32. "
-            "Below 0.20 = mild edge. Below 0.18 = genuine skill."
-        )
-        fig_brier = build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                             H_COLORS, H_LABELS, show_points=show_points, show_aggregate=show_aggregate)
-        st.plotly_chart(fig_brier, use_container_width=True)
+            H_COLORS = {5: "#2563EB", 21: "#7C3AED", 63: "#059669"}
+            H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
 
-        st.divider()
+            if metric_df.empty:
+                st.info(
+                    "No evaluated predictions with Brier/log-loss values yet.\n\n"
+                    "Predictions become evaluable once their horizon has elapsed "
+                    "(e.g., a 5-day prediction from Monday is scored the following Monday). "
+                    f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
+                    "Schedule page to score any matured predictions.",
+                    icon=material("bar_chart"),
+                )
+            else:
+                n_eval = len(metric_df)
+                horizons_present = sorted(metric_df["horizon_days"].dropna().unique())
 
-        st.subheader("Log-Loss — Rolling Average")
-        st.caption(
-            "Lower is better. Baseline (coin flip / uniform) ≈ 0.693. "
-            "Below 0.5 = model provides useful probability estimates."
-        )
-        fig_ll = build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                            H_COLORS, H_LABELS, show_points=show_points, show_aggregate=show_aggregate)
-        st.plotly_chart(fig_ll, use_container_width=True)
+                m1, m2 = st.columns(2)
+                with m1:
+                    horizon_sel = st.multiselect(
+                        "Horizon filter",
+                        options=horizons_present,
+                        default=list(horizons_present),
+                        format_func=lambda h: H_LABELS.get(int(h), f"{int(h)}d"),
+                        key="valqa_trend_horizon",
+                    )
+                with m2:
+                    roll_window = st.select_slider(
+                        "Rolling average window",
+                        options=[5, 10, 20],
+                        value=10,
+                        key="valqa_trend_roll",
+                    )
 
-        st.divider()
+                d1, d2 = st.columns(2)
+                with d1:
+                    show_points = st.checkbox(
+                        "Show individual predictions", value=False, key="valqa_trend_show_points",
+                        help="Raw per-prediction dots behind the rolling average — adds one layer of detail, and clutter.",
+                    )
+                with d2:
+                    show_aggregate = st.checkbox(
+                        "Show unfiltered aggregate overlay", value=False, key="valqa_trend_show_aggregate",
+                        help="A second line from the nightly metrics_rolling table, computed across ALL models "
+                             "regardless of the model filter above.",
+                    )
 
-        st.subheader("Directional Accuracy — Rolling Average")
-        st.caption("Rolling % of predictions where predicted direction matched actual direction. 50% = random baseline.")
-        fig_dir = build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                                     H_COLORS, H_LABELS, show_aggregate=show_aggregate)
-        st.plotly_chart(fig_dir, use_container_width=True)
+                fdf = metric_df[metric_df["horizon_days"].isin(horizon_sel)] if horizon_sel else metric_df
+                st.caption(f"Showing {len(fdf)} of {n_eval} evaluated predictions")
 
-        st.divider()
+                st.subheader("Brier Score — Rolling Average")
+                st.caption(
+                    "Lower is better. Baseline (uniform guesser) ≈ 0.32. "
+                    "Below 0.20 = mild edge. Below 0.18 = genuine skill."
+                )
+                fig_brier = build_brier_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
+                                                     H_COLORS, H_LABELS, show_points=show_points, show_aggregate=show_aggregate)
+                st.plotly_chart(fig_brier, use_container_width=True)
 
-        st.subheader("Predicted Return Midpoint vs Actual Return")
-        st.caption(
-            "X = midpoint of predicted return range. Y = actual return. "
-            "Points on the diagonal = perfect predictions. Color = prediction outcome."
-        )
-        scatter_df = fdf.dropna(subset=["actual_return", "predicted_return_low", "predicted_return_high"]).copy()
-        if scatter_df.empty:
-            st.info("No predictions with both predicted range and actual return yet.", icon=material("trending_down"))
-        else:
-            fig_scatter = build_predicted_vs_actual_scatter(scatter_df)
-            st.plotly_chart(fig_scatter, use_container_width=True)
-            st.caption("Marker size = conviction score (larger = higher conviction).")
+                st.divider()
 
-        st.divider()
+                st.subheader("Log-Loss — Rolling Average")
+                st.caption(
+                    "Lower is better. Baseline (coin flip / uniform) ≈ 0.693. "
+                    "Below 0.5 = model provides useful probability estimates."
+                )
+                fig_ll = build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
+                                                    H_COLORS, H_LABELS, show_points=show_points, show_aggregate=show_aggregate)
+                st.plotly_chart(fig_ll, use_container_width=True)
 
-        st.subheader("Prediction Volume by Horizon")
-        vol_data = get_volume_by_horizon(lookback_days=lookback)
-        if not vol_data:
-            st.info("No volume data yet.")
-        else:
-            fig_vol = build_volume_by_horizon_chart(vol_data)
-            st.plotly_chart(fig_vol, use_container_width=True)
+                st.divider()
 
+                st.subheader("Directional Accuracy — Rolling Average")
+                st.caption("Rolling % of predictions where predicted direction matched actual direction. 50% = random baseline.")
+                fig_dir = build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
+                                                             H_COLORS, H_LABELS, show_aggregate=show_aggregate)
+                st.plotly_chart(fig_dir, use_container_width=True)
+
+                st.divider()
+
+                st.subheader("Predicted Return Midpoint vs Actual Return")
+                st.caption(
+                    "X = midpoint of predicted return range. Y = actual return. "
+                    "Points on the diagonal = perfect predictions. Color = prediction outcome."
+                )
+                scatter_df = fdf.dropna(subset=["actual_return", "predicted_return_low", "predicted_return_high"]).copy()
+                if scatter_df.empty:
+                    st.info("No predictions with both predicted range and actual return yet.", icon=material("trending_down"))
+                else:
+                    fig_scatter = build_predicted_vs_actual_scatter(scatter_df)
+                    st.plotly_chart(fig_scatter, use_container_width=True)
+                    st.caption("Marker size = conviction score (larger = higher conviction).")
+
+                st.divider()
+
+                st.subheader("Prediction Volume by Horizon")
+                vol_data = get_volume_by_horizon(lookback_days=lookback)
+                if not vol_data:
+                    st.info("No volume data yet.")
+                else:
+                    fig_vol = build_volume_by_horizon_chart(vol_data)
+                    st.plotly_chart(fig_vol, use_container_width=True)
 # ── Tab 2: Confidence Calibration ─────────────────────────────────────────────
 
 with tabs[1]:
@@ -332,52 +333,54 @@ perfect = 0.0 · coin flip = 0.25 · worst = 1.0
 """, unsafe_allow_html=True)
 
     st.divider()
-    st.subheader("Reliability Diagram")
-    st.caption(
-        "Stated p_up confidence (x-axis) vs actual 'up' hit rate (y-axis). "
-        "Points on the diagonal = perfectly calibrated. "
-        "**Below** diagonal = overconfident. **Above** = underconfident."
-    )
-    if not reliability:
-        st.info("No reliability data yet — needs evaluated predictions with distribution.", icon=material("info"))
-    else:
-        fig = build_reliability_diagram(reliability)
-        st.plotly_chart(fig, use_container_width=True)
+    _tile_2 = section_tile("Reliability Diagram", expanded=True, key="validation_qa_2")
+    if _tile_2:
+        with _tile_2:
+            st.caption(
+                "Stated p_up confidence (x-axis) vs actual 'up' hit rate (y-axis). "
+                "Points on the diagonal = perfectly calibrated. "
+                "**Below** diagonal = overconfident. **Above** = underconfident."
+            )
+            if not reliability:
+                st.info("No reliability data yet — needs evaluated predictions with distribution.", icon=material("info"))
+            else:
+                fig = build_reliability_diagram(reliability)
+                st.plotly_chart(fig, use_container_width=True)
+    _tile_3 = section_tile("Prediction Count per Confidence Bucket", expanded=False, key="validation_qa_3")
+    if _tile_3:
+        with _tile_3:
+            st.caption("Sample size per bin is critical — thin bins (< 30) are unreliable.")
+            st.dataframe(pd.DataFrame(bucket_table), use_container_width=True, hide_index=True)
+            st.caption("Per-horizon Brier/log-loss breakdown lives on the user-facing Validation page's Scorecard tab.")
+    _tile_4 = section_tile("Conviction Score vs Directional Accuracy", expanded=False, key="validation_qa_4")
+    if _tile_4:
+        with _tile_4:
+            st.caption("Conviction (1–10) vs whether the predicted direction was correct.")
+            if len(conviction_cal) < 2:
+                st.info("Insufficient data — needs predictions across at least 2 conviction buckets.")
+            else:
+                fig2 = build_conviction_calibration_chart(conviction_cal)
+                st.plotly_chart(fig2, use_container_width=True)
 
-    st.subheader("Prediction Count per Confidence Bucket")
-    st.caption("Sample size per bin is critical — thin bins (< 30) are unreliable.")
-    st.dataframe(pd.DataFrame(bucket_table), use_container_width=True, hide_index=True)
-    st.caption("Per-horizon Brier/log-loss breakdown lives on the user-facing Validation page's Scorecard tab.")
-
-    st.divider()
-    st.subheader("Conviction Score vs Directional Accuracy")
-    st.caption("Conviction (1–10) vs whether the predicted direction was correct.")
-    if len(conviction_cal) < 2:
-        st.info("Insufficient data — needs predictions across at least 2 conviction buckets.")
-    else:
-        fig2 = build_conviction_calibration_chart(conviction_cal)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # ── Brier + Log-Loss distribution — moved here from the user-facing
-    # Prediction History tab, since it's the same probability-calibration
-    # detail this tab already covers, not something a friend needs to see ──
-    from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
-    _hist_preds = get_recent_evaluated_predictions(limit=1000, lookback_days=lookback)
-    if _model_filter:
-        _hist_preds = [p for p in _hist_preds if p.get("model_name") in _model_filter]
-    b_vals  = [p["brier_score"] for p in _hist_preds if p.get("brier_score") is not None]
-    ll_vals = [p["log_loss"] for p in _hist_preds if p.get("log_loss") is not None]
-    if b_vals or ll_vals:
-        st.divider()
-        st.subheader("Distribution of Brier Score & Log-Loss (evaluated set)")
-        hc1, hc2 = st.columns(2)
-        with hc1:
-            if b_vals:
-                st.plotly_chart(build_brier_histogram(b_vals), use_container_width=True)
-        with hc2:
-            if ll_vals:
-                st.plotly_chart(build_logloss_histogram(ll_vals), use_container_width=True)
-
+            # ── Brier + Log-Loss distribution — moved here from the user-facing
+            # Prediction History tab, since it's the same probability-calibration
+            # detail this tab already covers, not something a friend needs to see ──
+            from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
+            _hist_preds = get_recent_evaluated_predictions(limit=1000, lookback_days=lookback)
+            if _model_filter:
+                _hist_preds = [p for p in _hist_preds if p.get("model_name") in _model_filter]
+            b_vals  = [p["brier_score"] for p in _hist_preds if p.get("brier_score") is not None]
+            ll_vals = [p["log_loss"] for p in _hist_preds if p.get("log_loss") is not None]
+            if b_vals or ll_vals:
+                st.divider()
+                st.subheader("Distribution of Brier Score & Log-Loss (evaluated set)")
+                hc1, hc2 = st.columns(2)
+                with hc1:
+                    if b_vals:
+                        st.plotly_chart(build_brier_histogram(b_vals), use_container_width=True)
+                with hc2:
+                    if ll_vals:
+                        st.plotly_chart(build_logloss_histogram(ll_vals), use_container_width=True)
 # ── Tab 3: Post-mortems ───────────────────────────────────────────────────────
 
 with tabs[2]:
@@ -390,25 +393,25 @@ with tabs[2]:
     else:
         for report in reports:
             period = (report.get("period") or "weekly").capitalize()
-            st.subheader(f"{period} — {report['report_date']}")
-            if report.get("llm_summary"):
-                st.write(report["llm_summary"])
-            pi   = report.get("patterns_identified") or {}
-            pats = pi.get("patterns", [])
-            sugs = pi.get("suggestions", [])
-            if pats:
-                st.write("**Patterns detected:**")
-                for pat in pats:
-                    st.write(f"- {pat}")
-            if sugs:
-                st.write("**Suggested improvements:**")
-                for sug in sugs:
-                    st.write(f"- {sug}")
-            snap = report.get("metrics_snapshot") or {}
-            if snap.get("wrong_count"):
-                st.caption(f"Analyzed {snap['wrong_count']} wrong predictions.")
-            st.divider()
-
+            _tile_5 = section_tile(f"{period} — {report['report_date']}", expanded=True, key="validation_qa_5")
+            if _tile_5:
+                with _tile_5:
+                    if report.get("llm_summary"):
+                        st.write(report["llm_summary"])
+                    pi   = report.get("patterns_identified") or {}
+                    pats = pi.get("patterns", [])
+                    sugs = pi.get("suggestions", [])
+                    if pats:
+                        st.write("**Patterns detected:**")
+                        for pat in pats:
+                            st.write(f"- {pat}")
+                    if sugs:
+                        st.write("**Suggested improvements:**")
+                        for sug in sugs:
+                            st.write(f"- {sug}")
+                    snap = report.get("metrics_snapshot") or {}
+                    if snap.get("wrong_count"):
+                        st.caption(f"Analyzed {snap['wrong_count']} wrong predictions.")
 # ── Tab 4: Version Comparison ─────────────────────────────────────────────────
 
 with tabs[3]:
@@ -420,8 +423,7 @@ with tabs[3]:
         if len(unique_ver) <= 1:
             st.info("Only one system version in history. "
                     "Comparison becomes available after prompt or model changes are tagged.")
-            st.subheader(f"Current baseline — version {next(iter(unique_ver), CURRENT_SYSTEM_VERSION)}")
-
+            _tile_6 = section_tile(f"Current baseline — version {next(iter(unique_ver), CURRENT_SYSTEM_VERSION)}", expanded=True, key="validation_qa_6")
         rows_ver = [{
             "Version":            r.get("sys_ver") or "v1.0",
             "Horizon":            f"{r.get('horizon_days')}d" if r.get("horizon_days") else "—",

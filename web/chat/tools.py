@@ -791,7 +791,7 @@ def _compute_day_performance(conn: "sqlite3.Connection", holdings: list[dict]) -
     Today's $ / % portfolio change vs. the most recent prior trading day.
 
     Primary source: portfolio_price_history, snapshotted nightly by the evening
-    batch pipeline (portfolio_agent.tools.holdings_db.snapshot_portfolio_prices).
+    batch pipeline (portfolio_agent.tools.holdings_prices.snapshot_portfolio_prices).
     Falls back to a live yfinance 2-day pull (previous close) if that table has
     no rows yet -- e.g. the evening batch hasn't run since holdings were loaded.
     """

@@ -20,6 +20,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
+    section_tile,
     inject_global_css, page_header, section_title, top_nav, material, card, badge_html,
     PRIMARY, SUCCESS, WARNING, NEUTRAL, SUCCESS_LIGHT, WARNING_LIGHT,
 )
@@ -163,105 +164,114 @@ st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
 with st.form("profile_form"):
     # Identity
-    section_title("Identity", badge_text="display · currency · timezone")
-    i1, i2, i3 = st.columns([3, 1.2, 2.5])
-    display_name = i1.text_input("Display name", value=profile.display_name or "", placeholder="Your name")
-    base_currency = i2.text_input("Base currency", value=profile.base_currency, max_chars=3,
-                                  help="3-letter ISO code used for reporting")
-    tz_name = i3.text_input("Timezone", value=profile.timezone,
-                            help="IANA name, e.g. America/Chicago — used for blackout dates and quiet hours")
+    _tile_1 = section_tile("Identity", badge_text="display · currency · timezone", expanded=True, key="profile_1", native=True)
+    if _tile_1:
+        with _tile_1:
+            i1, i2, i3 = st.columns([3, 1.2, 2.5])
+            display_name = i1.text_input("Display name", value=profile.display_name or "", placeholder="Your name")
+            base_currency = i2.text_input("Base currency", value=profile.base_currency, max_chars=3,
+                                          help="3-letter ISO code used for reporting")
+            tz_name = i3.text_input("Timezone", value=profile.timezone,
+                                    help="IANA name, e.g. America/Chicago — used for blackout dates and quiet hours")
 
-    # Mandate limits
-    section_title("Mandate Limits", badge_text="used by the portfolio optimizer")
-    st.caption(
-        "Concentration thresholds are percentages of total portfolio value; cash caps are fractions. "
-        "The defaults (25 / 15 / 0.40 / 0.15) match the optimizer's built-in fallbacks."
-    )
-    m1, m2, m3, m4 = st.columns(4)
-    max_sector_pct = m1.number_input(
-        "Max sector concentration (%)", min_value=0.0, step=1.0, format="%.1f",
-        value=float(profile.max_sector_pct),
-        help="Holdings pushing a sector past this share are flagged for trimming and penalised as top-up candidates.",
-    )
-    max_issuer_pct = m2.number_input(
-        "Max issuer concentration (%)", min_value=0.0, step=1.0, format="%.1f",
-        value=float(profile.max_issuer_pct),
-        help="Same as sector, but for a single issuer across share classes.",
-    )
-    max_per_candidate = m3.number_input(
-        "Max share of new cash per candidate", min_value=0.0, step=0.05, format="%.2f",
-        value=float(profile.max_per_candidate_pct_of_cash),
-        help="Fraction 0–1. 0.40 = no single allocation exceeds 40% of the new cash.",
-    )
-    max_post_trade = m4.number_input(
-        "Max post-trade position", min_value=0.0, step=0.01, format="%.2f",
-        value=float(profile.max_post_trade_position_pct),
-        help="Fraction 0–1 of post-trade total value any one position may reach.",
-    )
-    sector_options = sorted(set(_GICS_SECTORS) | set(profile.sector_exclusions or []))
-    sector_exclusions = st.multiselect(
-        "Sector exclusions", options=sector_options, default=list(profile.sector_exclusions or []),
-        accept_new_options=True,
-        help="Sectors you never want recommended. Type to add a custom name.",
-    )
+            # Mandate limits
+    _tile_2 = section_tile("Mandate Limits", badge_text="used by the portfolio optimizer", expanded=False, key="profile_2", native=True)
+    if _tile_2:
+        with _tile_2:
+            st.caption(
+                "Concentration thresholds are percentages of total portfolio value; cash caps are fractions. "
+                "The defaults (25 / 15 / 0.40 / 0.15) match the optimizer's built-in fallbacks."
+            )
+            m1, m2, m3, m4 = st.columns(4)
+            max_sector_pct = m1.number_input(
+                "Max sector concentration (%)", min_value=0.0, step=1.0, format="%.1f",
+                value=float(profile.max_sector_pct),
+                help="Holdings pushing a sector past this share are flagged for trimming and penalised as top-up candidates.",
+            )
+            max_issuer_pct = m2.number_input(
+                "Max issuer concentration (%)", min_value=0.0, step=1.0, format="%.1f",
+                value=float(profile.max_issuer_pct),
+                help="Same as sector, but for a single issuer across share classes.",
+            )
+            max_per_candidate = m3.number_input(
+                "Max share of new cash per candidate", min_value=0.0, step=0.05, format="%.2f",
+                value=float(profile.max_per_candidate_pct_of_cash),
+                help="Fraction 0–1. 0.40 = no single allocation exceeds 40% of the new cash.",
+            )
+            max_post_trade = m4.number_input(
+                "Max post-trade position", min_value=0.0, step=0.01, format="%.2f",
+                value=float(profile.max_post_trade_position_pct),
+                help="Fraction 0–1 of post-trade total value any one position may reach.",
+            )
+            sector_options = sorted(set(_GICS_SECTORS) | set(profile.sector_exclusions or []))
+            sector_exclusions = st.multiselect(
+                "Sector exclusions", options=sector_options, default=list(profile.sector_exclusions or []),
+                accept_new_options=True,
+                help="Sectors you never want recommended. Type to add a custom name.",
+            )
 
-    # Compliance
-    section_title("Compliance", badge_text="clearance agent")
-    k1, k2 = st.columns([3, 2])
-    employer = k1.text_input("Employer", value=profile.employer or "", placeholder="Optional")
-    pre_clearance_required = k2.toggle(
-        "Pre-trade clearance required", value=bool(profile.pre_clearance_required),
-        help="When off, the clearance step is skipped for `--agent clearance` and inside the full pipeline.",
-    )
-    b1, b2, b3 = st.columns([1.5, 1.5, 3])
-    blackout_start = b1.date_input("Blackout start", value=_parse_date(profile.blackout_start),
-                                   format="YYYY-MM-DD", help="Inclusive. Leave empty for no blackout.")
-    blackout_end = b2.date_input("Blackout end", value=_parse_date(profile.blackout_end),
-                                 format="YYYY-MM-DD", help="Inclusive. Leave empty for an open-ended window.")
-    with b3:
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        disclaimer_accepted = st.checkbox(
-            "I have read and accept the disclaimer",
-            value=bool(profile.disclaimer_accepted_at),
-            help=f"Accepted: {_fmt_ts(profile.disclaimer_accepted_at)}",
-        )
+            # Compliance
+    _tile_3 = section_tile("Compliance", badge_text="clearance agent", expanded=False, key="profile_3", native=True)
+    if _tile_3:
+        with _tile_3:
+            k1, k2 = st.columns([3, 2])
+            employer = k1.text_input("Employer", value=profile.employer or "", placeholder="Optional")
+            pre_clearance_required = k2.toggle(
+                "Pre-trade clearance required", value=bool(profile.pre_clearance_required),
+                help="When off, the clearance step is skipped for `--agent clearance` and inside the full pipeline.",
+            )
+            b1, b2, b3 = st.columns([1.5, 1.5, 3])
+            blackout_start = b1.date_input("Blackout start", value=_parse_date(profile.blackout_start),
+                                           format="YYYY-MM-DD", help="Inclusive. Leave empty for no blackout.")
+            blackout_end = b2.date_input("Blackout end", value=_parse_date(profile.blackout_end),
+                                         format="YYYY-MM-DD", help="Inclusive. Leave empty for an open-ended window.")
+            with b3:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                disclaimer_accepted = st.checkbox(
+                    "I have read and accept the disclaimer",
+                    value=bool(profile.disclaimer_accepted_at),
+                    help=f"Accepted: {_fmt_ts(profile.disclaimer_accepted_at)}",
+                )
 
-    # Notifications
-    section_title("Notifications", badge_text="personal filter on event alerts")
-    st.caption(
-        "The pipeline still runs on every event that clears the global severity floor; these settings "
-        "only decide whether you are told about it."
-    )
-    n1, n2, n3, n4 = st.columns([1.5, 1.5, 1.2, 1.5])
-    channel = n1.selectbox(
-        "Channel", options=list(NOTIFICATION_CHANNELS),
-        index=list(NOTIFICATION_CHANNELS).index(notif.channel) if notif.channel in NOTIFICATION_CHANNELS else 0,
-        help="'none' silences all notifications.",
-    )
-    min_severity = n2.number_input("Min severity (1–5)", min_value=1, max_value=5, step=1,
-                                   value=int(notif.min_severity_threshold))
-    use_conviction = n3.checkbox("Apply conviction floor", value=notif.min_conviction_threshold is not None)
-    min_conviction = n4.number_input(
-        "Min conviction (0–10)", min_value=0, max_value=10, step=1,
-        value=int(notif.min_conviction_threshold if notif.min_conviction_threshold is not None else 6),
-        help="Only enforced when a conviction is known (i.e. after a prediction) and the box is ticked.",
-    )
-    q1, q2, _ = st.columns([1.5, 1.5, 3])
-    quiet_start = q1.time_input("Quiet hours start", value=_parse_time(notif.quiet_hours_start), step=900)
-    quiet_end = q2.time_input("Quiet hours end", value=_parse_time(notif.quiet_hours_end), step=900,
-                              help="A start later than the end spans midnight (e.g. 22:00 → 07:00).")
+            # Notifications
+    _tile_4 = section_tile("Notifications", badge_text="personal filter on event alerts", expanded=False, key="profile_4", native=True)
+    if _tile_4:
+        with _tile_4:
+            st.caption(
+                "The pipeline still runs on every event that clears the global severity floor; these settings "
+                "only decide whether you are told about it."
+            )
+            n1, n2, n3, n4 = st.columns([1.5, 1.5, 1.2, 1.5])
+            channel = n1.selectbox(
+                "Channel", options=list(NOTIFICATION_CHANNELS),
+                index=list(NOTIFICATION_CHANNELS).index(notif.channel) if notif.channel in NOTIFICATION_CHANNELS else 0,
+                help="'none' silences all notifications.",
+            )
+            min_severity = n2.number_input("Min severity (1–5)", min_value=1, max_value=5, step=1,
+                                           value=int(notif.min_severity_threshold))
+            use_conviction = n3.checkbox("Apply conviction floor", value=notif.min_conviction_threshold is not None)
+            min_conviction = n4.number_input(
+                "Min conviction (0–10)", min_value=0, max_value=10, step=1,
+                value=int(notif.min_conviction_threshold if notif.min_conviction_threshold is not None else 6),
+                help="Only enforced when a conviction is known (i.e. after a prediction) and the box is ticked.",
+            )
+            q1, q2, _ = st.columns([1.5, 1.5, 3])
+            quiet_start = q1.time_input("Quiet hours start", value=_parse_time(notif.quiet_hours_start), step=900)
+            quiet_end = q2.time_input("Quiet hours end", value=_parse_time(notif.quiet_hours_end), step=900,
+                                      help="A start later than the end spans midnight (e.g. 22:00 → 07:00).")
 
-    # Horizons
-    section_title("Prediction Horizons", badge_text="generation filter")
-    preferred_horizons = st.multiselect(
-        "Preferred horizons", options=list(ALL_HORIZON_LABELS),
-        default=[h for h in profile.preferred_horizons if h in ALL_HORIZON_LABELS] or list(ALL_HORIZON_LABELS),
-        format_func=lambda h: f"{h} · {_HORIZON_HELP.get(h, '')}",
-        help="Only these horizons get per-horizon weights and predictions. Weighting math is unchanged.",
-    )
+            # Horizons
+    _tile_5 = section_tile("Prediction Horizons", badge_text="generation filter", expanded=False, key="profile_5", native=True)
+    if _tile_5:
+        with _tile_5:
+            preferred_horizons = st.multiselect(
+                "Preferred horizons", options=list(ALL_HORIZON_LABELS),
+                default=[h for h in profile.preferred_horizons if h in ALL_HORIZON_LABELS] or list(ALL_HORIZON_LABELS),
+                format_func=lambda h: f"{h} · {_HORIZON_HELP.get(h, '')}",
+                help="Only these horizons get per-horizon weights and predictions. Weighting math is unchanged.",
+            )
 
-    submitted = st.form_submit_button("Save profile", type="primary", icon=material("save"))
-
+            submitted = st.form_submit_button("Save profile", type="primary", icon=material("save"))
 if submitted:
     values = {
         "display_name": display_name.strip() or None,

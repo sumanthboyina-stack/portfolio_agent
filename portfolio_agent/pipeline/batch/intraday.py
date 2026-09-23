@@ -258,7 +258,7 @@ async def run_batch_intraday(
     if tracker:
         tracker.start_phase("price_backfill", total=1)
     try:
-        from portfolio_agent.tools.holdings_db import backfill_missing_price_snapshots
+        from portfolio_agent.tools.holdings_prices import backfill_missing_price_snapshots
         rb = backfill_missing_price_snapshots()
         if rb.get("backfilled", 0) > 0:
             _pb_note = f"{rb['backfilled']} rows inserted for {rb['missing_days']} missing day(s)"

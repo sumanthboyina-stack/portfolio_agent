@@ -16,6 +16,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
+    section_tile,
     inject_global_css, page_header, section_title, top_nav, ticker_label,
     SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, REC_STYLES,
     icon_html, material, status_dot_html, fmt_money, fmt_pct,
@@ -366,59 +367,59 @@ with tab1:
             "model_provider":         "Provider",
         })
 
-        section_title("Grid", badge_text=f"{len(df)} rows", badge_color=PRIMARY)
-        st.caption("Click any column header to sort · Use the filter row beneath each header to filter · Click a row to see details below")
+        _tile_1 = section_tile("Grid", badge_text=f"{len(df)} rows", badge_color=PRIMARY, expanded=True, key="database_1")
+        if _tile_1:
+            with _tile_1:
+                st.caption("Click any column header to sort · Use the filter row beneath each header to filter · Click a row to see details below")
 
-        col_defs = [
-            {"field": "As Of Date",        "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",       "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Filing",       "width": 80,  "filter": "agTextColumnFilter"},
-            {"field": "Filing Date",  "width": 110, "filter": "agDateColumnFilter"},
-            {"field": "Rev Gth %",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
-            {"field": "Net Margin %", "width": 110, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
-            {"field": "FCF ($)",      "width": 110, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + (value/1e9).toFixed(2) + 'B' : '—'"},
-            {"field": "D/E",          "width": 80,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
-            {"field": "Score",        "width": 80,  "filter": "agNumberColumnFilter"},
-            {"field": "Top Strength", "width": 220, "filter": "agTextColumnFilter"},
-            {"field": "Top Risk",     "width": 220, "filter": "agTextColumnFilter"},
-            {"field": "Model",        "width": 160, "filter": "agTextColumnFilter"},
-            {"field": "Provider",     "width": 110, "filter": "agTextColumnFilter"},
-        ]
+                col_defs = [
+                    {"field": "As Of Date",        "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
+                    {"field": "Ticker",       "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                    {"field": "Filing",       "width": 80,  "filter": "agTextColumnFilter"},
+                    {"field": "Filing Date",  "width": 110, "filter": "agDateColumnFilter"},
+                    {"field": "Rev Gth %",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
+                    {"field": "Net Margin %", "width": 110, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
+                    {"field": "FCF ($)",      "width": 110, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + (value/1e9).toFixed(2) + 'B' : '—'"},
+                    {"field": "D/E",          "width": 80,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
+                    {"field": "Score",        "width": 80,  "filter": "agNumberColumnFilter"},
+                    {"field": "Top Strength", "width": 220, "filter": "agTextColumnFilter"},
+                    {"field": "Top Risk",     "width": 220, "filter": "agTextColumnFilter"},
+                    {"field": "Model",        "width": 160, "filter": "agTextColumnFilter"},
+                    {"field": "Provider",     "width": 110, "filter": "agTextColumnFilter"},
+                ]
 
-        selected = _aggrid(grid_df, col_defs, height=440, key="fund_grid")
+                selected = _aggrid(grid_df, col_defs, height=440, key="fund_grid")
 
-        if selected:
-            hit = selected[0]
-            ticker = hit.get("Ticker", "")
-            row_matches = raw_df[raw_df["ticker"] == ticker]
-            if not row_matches.empty:
-                row = row_matches.iloc[0]
-                st.divider()
-                section_title(f"Detail — {ticker_label(ticker)}", badge_text=row.get('filing_type',''), badge_color=PRIMARY)
-                dc1, dc2 = st.columns(2)
-                with dc1:
-                    _detail_card("Financials", [
-                        ("Revenue Growth", fmt_pct(row.get('revenue_growth_yoy_pct'))),
-                        ("Net Margin",     fmt_pct(row.get('net_margin'))),
-                        ("FCF",            f"${(row.get('fcf') or 0)/1e9:.2f}B" if row.get('fcf') else "—"),
-                        ("Debt/Equity",    f"{row.get('debt_to_equity') or '—'}"),
-                        ("Score",          f"{_score_color(row.get('fundamental_score'))} {row.get('fundamental_score') or '—'}/10"),
-                        ("As Of Date",          str(row.get('as_of_date') or '—')),
-                        ("Filing Date",    str(row.get('filing_date') or '—')),
-                    ])
-                with dc2:
-                    strengths = _pj(row.get("key_strengths"), [])
-                    risks     = _pj(row.get("key_risks"), [])
-                    if strengths:
-                        st.markdown(f"**{icon_html('check_circle', 15, color=SUCCESS)} Key Strengths**", unsafe_allow_html=True)
-                        for s in strengths[:5]: st.markdown(f"- {s}")
-                    if risks:
-                        st.markdown(f"**{icon_html('warning', 15, color=WARNING)} Key Risks**", unsafe_allow_html=True)
-                        for r in risks[:5]: st.markdown(f"- {r}")
-                if row.get("summary"):
-                    st.markdown(f"> {row['summary']}")
-
-
+                if selected:
+                    hit = selected[0]
+                    ticker = hit.get("Ticker", "")
+                    row_matches = raw_df[raw_df["ticker"] == ticker]
+                    if not row_matches.empty:
+                        row = row_matches.iloc[0]
+                        st.divider()
+                        section_title(f"Detail — {ticker_label(ticker)}", badge_text=row.get('filing_type',''), badge_color=PRIMARY)
+                        dc1, dc2 = st.columns(2)
+                        with dc1:
+                            _detail_card("Financials", [
+                                ("Revenue Growth", fmt_pct(row.get('revenue_growth_yoy_pct'))),
+                                ("Net Margin",     fmt_pct(row.get('net_margin'))),
+                                ("FCF",            f"${(row.get('fcf') or 0)/1e9:.2f}B" if row.get('fcf') else "—"),
+                                ("Debt/Equity",    f"{row.get('debt_to_equity') or '—'}"),
+                                ("Score",          f"{_score_color(row.get('fundamental_score'))} {row.get('fundamental_score') or '—'}/10"),
+                                ("As Of Date",          str(row.get('as_of_date') or '—')),
+                                ("Filing Date",    str(row.get('filing_date') or '—')),
+                            ])
+                        with dc2:
+                            strengths = _pj(row.get("key_strengths"), [])
+                            risks     = _pj(row.get("key_risks"), [])
+                            if strengths:
+                                st.markdown(f"**{icon_html('check_circle', 15, color=SUCCESS)} Key Strengths**", unsafe_allow_html=True)
+                                for s in strengths[:5]: st.markdown(f"- {s}")
+                            if risks:
+                                st.markdown(f"**{icon_html('warning', 15, color=WARNING)} Key Risks**", unsafe_allow_html=True)
+                                for r in risks[:5]: st.markdown(f"- {r}")
+                        if row.get("summary"):
+                            st.markdown(f"> {row['summary']}")
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — NEWS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -471,60 +472,60 @@ with tab2:
             "model_provider":    "Provider",
         })
 
-        section_title("Grid", badge_text=f"{len(df)} rows", badge_color=PRIMARY)
-        st.caption("Inline filter row below each header · Click row for details")
+        _tile_2 = section_tile("Grid", badge_text=f"{len(df)} rows", badge_color=PRIMARY, expanded=True, key="database_2")
+        if _tile_2:
+            with _tile_2:
+                st.caption("Inline filter row below each header · Click row for details")
 
-        col_defs = [
-            {"field": "As Of Date",      "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",     "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Sentiment",  "width": 110, "filter": "agTextColumnFilter"},
-            {"field": "Score",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
-            {"field": "Headline 1", "width": 280, "filter": "agTextColumnFilter"},
-            {"field": "Headline 2", "width": 280, "filter": "agTextColumnFilter"},
-            {"field": "Themes",     "width": 200, "filter": "agTextColumnFilter"},
-            {"field": "Trending",   "width": 200, "filter": "agTextColumnFilter"},
-            {"field": "Source",     "width": 130, "filter": "agTextColumnFilter"},
-            {"field": "Impacted",   "width": 140, "filter": "agTextColumnFilter"},
-            {"field": "Model",      "width": 160, "filter": "agTextColumnFilter"},
-            {"field": "Provider",   "width": 110, "filter": "agTextColumnFilter"},
-        ]
+                col_defs = [
+                    {"field": "As Of Date",      "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
+                    {"field": "Ticker",     "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                    {"field": "Sentiment",  "width": 110, "filter": "agTextColumnFilter"},
+                    {"field": "Score",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
+                    {"field": "Headline 1", "width": 280, "filter": "agTextColumnFilter"},
+                    {"field": "Headline 2", "width": 280, "filter": "agTextColumnFilter"},
+                    {"field": "Themes",     "width": 200, "filter": "agTextColumnFilter"},
+                    {"field": "Trending",   "width": 200, "filter": "agTextColumnFilter"},
+                    {"field": "Source",     "width": 130, "filter": "agTextColumnFilter"},
+                    {"field": "Impacted",   "width": 140, "filter": "agTextColumnFilter"},
+                    {"field": "Model",      "width": 160, "filter": "agTextColumnFilter"},
+                    {"field": "Provider",   "width": 110, "filter": "agTextColumnFilter"},
+                ]
 
-        selected = _aggrid(grid_df, col_defs, height=440, key="news_grid")
+                selected = _aggrid(grid_df, col_defs, height=440, key="news_grid")
 
-        if selected:
-            hit = selected[0]
-            ticker  = hit.get("Ticker", "")
-            dt      = hit.get("As Of Date", "")
-            row_matches = raw_df[(raw_df["ticker"] == ticker) & (raw_df["as_of_date"] == dt)]
-            if not row_matches.empty:
-                row = row_matches.iloc[0]
-                st.divider()
-                section_title(f"Detail — {ticker_label(ticker)}  {dt}", badge_color=PRIMARY)
-                sent = (row.get("sentiment") or "").upper()
-                sent_col = SUCCESS if sent == "POSITIVE" else (DANGER if sent == "NEGATIVE" else NEUTRAL)
-                score = row.get("sentiment_score")
-                st.markdown(
-                    f'<span style="background:{sent_col};color:white;padding:3px 10px;'
-                    f'border-radius:12px;font-size:0.8rem;font-weight:700">{sent}</span>'
-                    f'&nbsp; Score: <strong>{f"{score:+.2f}" if score is not None else "—"}</strong>',
-                    unsafe_allow_html=True,
-                )
-                if row.get("headline_1"): st.markdown(f"**►** {row['headline_1']}")
-                if row.get("headline_2"): st.markdown(f"**►** {row['headline_2']}")
-                if row.get("trending"):   st.info(row["trending"])
-                themes = _pj(row.get("top_themes"), [])
-                if themes:
-                    st.markdown("**Themes:** " + "  ·  ".join(f"`{t}`" for t in themes[:8]))
-                meta_parts = []
-                if row.get("source"):            meta_parts.append(f"{icon_html('sensors', 14)} Source: **{row['source']}**")
-                if row.get("impacted_tickers"):  meta_parts.append(f"{icon_html('track_changes', 14)} Impacted: **{row['impacted_tickers']}**")
-                if meta_parts:
-                    st.markdown("  ·  ".join(meta_parts), unsafe_allow_html=True)
-                model = row.get("model_name")
-                if model:
-                    st.caption(f"{icon_html('smart_toy', 13)} Model: {model}  ·  Provider: {row.get('model_provider','—')}", unsafe_allow_html=True)
-
-
+                if selected:
+                    hit = selected[0]
+                    ticker  = hit.get("Ticker", "")
+                    dt      = hit.get("As Of Date", "")
+                    row_matches = raw_df[(raw_df["ticker"] == ticker) & (raw_df["as_of_date"] == dt)]
+                    if not row_matches.empty:
+                        row = row_matches.iloc[0]
+                        st.divider()
+                        section_title(f"Detail — {ticker_label(ticker)}  {dt}", badge_color=PRIMARY)
+                        sent = (row.get("sentiment") or "").upper()
+                        sent_col = SUCCESS if sent == "POSITIVE" else (DANGER if sent == "NEGATIVE" else NEUTRAL)
+                        score = row.get("sentiment_score")
+                        st.markdown(
+                            f'<span style="background:{sent_col};color:white;padding:3px 10px;'
+                            f'border-radius:12px;font-size:0.8rem;font-weight:700">{sent}</span>'
+                            f'&nbsp; Score: <strong>{f"{score:+.2f}" if score is not None else "—"}</strong>',
+                            unsafe_allow_html=True,
+                        )
+                        if row.get("headline_1"): st.markdown(f"**►** {row['headline_1']}")
+                        if row.get("headline_2"): st.markdown(f"**►** {row['headline_2']}")
+                        if row.get("trending"):   st.info(row["trending"])
+                        themes = _pj(row.get("top_themes"), [])
+                        if themes:
+                            st.markdown("**Themes:** " + "  ·  ".join(f"`{t}`" for t in themes[:8]))
+                        meta_parts = []
+                        if row.get("source"):            meta_parts.append(f"{icon_html('sensors', 14)} Source: **{row['source']}**")
+                        if row.get("impacted_tickers"):  meta_parts.append(f"{icon_html('track_changes', 14)} Impacted: **{row['impacted_tickers']}**")
+                        if meta_parts:
+                            st.markdown("  ·  ".join(meta_parts), unsafe_allow_html=True)
+                        model = row.get("model_name")
+                        if model:
+                            st.caption(f"{icon_html('smart_toy', 13)} Model: {model}  ·  Provider: {row.get('model_provider','—')}", unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — RESEARCH
 # ══════════════════════════════════════════════════════════════════════════════
@@ -592,63 +593,63 @@ with tab3:
             "model_provider":       "Provider",
         })
 
-        section_title("Grid", badge_text=f"{len(df)} rows", badge_color=PRIMARY)
-        st.caption("Inline filter row below each header · Click row for details")
+        _tile_3 = section_tile("Grid", badge_text=f"{len(df)} rows", badge_color=PRIMARY, expanded=True, key="database_3")
+        if _tile_3:
+            with _tile_3:
+                st.caption("Inline filter row below each header · Click row for details")
 
-        col_defs = [
-            {"field": "As Of Date",    "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",        "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Consensus",     "width": 110, "filter": "agTextColumnFilter"},
-            {"field": "Rec Trend",     "width": 105, "filter": "agTextColumnFilter"},
-            {"field": "Mean Rtg",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
-            {"field": "Analysts",      "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? Math.round(value) : '—'"},
-            {"field": "Target Avg",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Target Med",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Target High",   "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Target Low",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Price",         "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Upside %",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
-            {"field": "Last Upgrade",  "width": 110, "filter": "agDateColumnFilter"},
-            {"field": "Score",         "width": 80,  "filter": "agNumberColumnFilter"},
-            {"field": "Model",         "width": 160, "filter": "agTextColumnFilter"},
-            {"field": "Provider",      "width": 110, "filter": "agTextColumnFilter"},
-        ]
+                col_defs = [
+                    {"field": "As Of Date",    "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
+                    {"field": "Ticker",        "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                    {"field": "Consensus",     "width": 110, "filter": "agTextColumnFilter"},
+                    {"field": "Rec Trend",     "width": 105, "filter": "agTextColumnFilter"},
+                    {"field": "Mean Rtg",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
+                    {"field": "Analysts",      "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? Math.round(value) : '—'"},
+                    {"field": "Target Avg",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+                    {"field": "Target Med",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+                    {"field": "Target High",   "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+                    {"field": "Target Low",    "width": 100, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+                    {"field": "Price",         "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+                    {"field": "Upside %",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) + '%' : '—'"},
+                    {"field": "Last Upgrade",  "width": 110, "filter": "agDateColumnFilter"},
+                    {"field": "Score",         "width": 80,  "filter": "agNumberColumnFilter"},
+                    {"field": "Model",         "width": 160, "filter": "agTextColumnFilter"},
+                    {"field": "Provider",      "width": 110, "filter": "agTextColumnFilter"},
+                ]
 
-        selected = _aggrid(grid_df, col_defs, height=440, key="res_grid")
+                selected = _aggrid(grid_df, col_defs, height=440, key="res_grid")
 
-        if selected:
-            hit = selected[0]
-            ticker = hit.get("Ticker", "")
-            row_matches = raw_df[raw_df["ticker"] == ticker]
-            if not row_matches.empty:
-                row = row_matches.iloc[0]
-                st.divider()
-                section_title(f"Detail — {ticker_label(ticker)}", badge_color=PRIMARY)
-                dc1, dc2 = st.columns(2)
-                with dc1:
-                    _detail_card("Broker Data", [
-                        ("Consensus",    (row.get("consensus") or "—").upper().replace("_"," ")),
-                        ("Rec Trend",    str(row.get("rec_trend") or "—")),
-                        ("Mean Rating",  f"{row.get('consensus_mean') or '—'}"),
-                        ("# Analysts",   str(int(row.get("num_analysts") or 0) or "—")),
-                        ("Target Avg",   fmt_money(row.get('price_target_avg'))),
-                        ("Target Median",fmt_money(row.get('price_target_median'))),
-                        ("Target High",  fmt_money(row.get('price_target_high'))),
-                        ("Target Low",   fmt_money(row.get('price_target_low'))),
-                        ("Current",      fmt_money(row.get('current_price'))),
-                        ("Upside",       fmt_pct(row.get('upside_to_mean_pct'))),
-                        ("Last Upgrade", str(row.get('latest_upgrade_date') or '—')),
-                        ("Score",        f"{_score_color(row.get('research_score'))} {row.get('research_score') or '—'}/10"),
-                    ])
-                with dc2:
-                    highlights = _pj(row.get("highlights"), [])
-                    if highlights:
-                        st.markdown("**Highlights**")
-                        for h in highlights[:6]: st.markdown(f"- {h}")
-                if row.get("summary"):
-                    st.markdown(f"> {row['summary']}")
-
-
+                if selected:
+                    hit = selected[0]
+                    ticker = hit.get("Ticker", "")
+                    row_matches = raw_df[raw_df["ticker"] == ticker]
+                    if not row_matches.empty:
+                        row = row_matches.iloc[0]
+                        st.divider()
+                        section_title(f"Detail — {ticker_label(ticker)}", badge_color=PRIMARY)
+                        dc1, dc2 = st.columns(2)
+                        with dc1:
+                            _detail_card("Broker Data", [
+                                ("Consensus",    (row.get("consensus") or "—").upper().replace("_"," ")),
+                                ("Rec Trend",    str(row.get("rec_trend") or "—")),
+                                ("Mean Rating",  f"{row.get('consensus_mean') or '—'}"),
+                                ("# Analysts",   str(int(row.get("num_analysts") or 0) or "—")),
+                                ("Target Avg",   fmt_money(row.get('price_target_avg'))),
+                                ("Target Median",fmt_money(row.get('price_target_median'))),
+                                ("Target High",  fmt_money(row.get('price_target_high'))),
+                                ("Target Low",   fmt_money(row.get('price_target_low'))),
+                                ("Current",      fmt_money(row.get('current_price'))),
+                                ("Upside",       fmt_pct(row.get('upside_to_mean_pct'))),
+                                ("Last Upgrade", str(row.get('latest_upgrade_date') or '—')),
+                                ("Score",        f"{_score_color(row.get('research_score'))} {row.get('research_score') or '—'}/10"),
+                            ])
+                        with dc2:
+                            highlights = _pj(row.get("highlights"), [])
+                            if highlights:
+                                st.markdown("**Highlights**")
+                                for h in highlights[:6]: st.markdown(f"- {h}")
+                        if row.get("summary"):
+                            st.markdown(f"> {row['summary']}")
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — PREDICTIONS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -714,94 +715,94 @@ with tab4:
             "model_name":            "Model",
         })
 
-        section_title("Grid", badge_text=f"{len(df)} rows", badge_color="#7C3AED")
-        st.caption("Inline filter row below each header · Click row for details")
+        _tile_4 = section_tile("Grid", badge_text=f"{len(df)} rows", badge_color="#7C3AED", expanded=True, key="database_4")
+        if _tile_4:
+            with _tile_4:
+                st.caption("Inline filter row below each header · Click row for details")
 
-        col_defs = [
-            {"field": "As Of Date",  "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",      "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Created",     "width": 140, "filter": "agTextColumnFilter"},
-            {"field": "Rec",         "width": 120, "filter": "agTextColumnFilter"},
-            {"field": "Direction",   "width": 100, "filter": "agTextColumnFilter"},
-            {"field": "Horizon",     "width": 75,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value + 'd' : '—'"},
-            {"field": "Conf",        "width": 65,  "filter": "agNumberColumnFilter"},
-            {"field": "Composite",   "width": 90,  "filter": "agNumberColumnFilter"},
-            {"field": "Fund",        "width": 65,  "filter": "agNumberColumnFilter"},
-            {"field": "Research",    "width": 80,  "filter": "agNumberColumnFilter"},
-            {"field": "Macro",       "width": 70,  "filter": "agNumberColumnFilter"},
-            {"field": "News",        "width": 65,  "filter": "agNumberColumnFilter"},
-            {"field": "Trigger",     "width": 170, "filter": "agTextColumnFilter"},
-            {"field": "Changed",     "width": 85,  "filter": "agTextColumnFilter"},
-            {"field": "Prev Rec",    "width": 110, "filter": "agTextColumnFilter"},
-            {"field": "Model",       "width": 160, "filter": "agTextColumnFilter"},
-        ]
+                col_defs = [
+                    {"field": "As Of Date",  "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
+                    {"field": "Ticker",      "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                    {"field": "Created",     "width": 140, "filter": "agTextColumnFilter"},
+                    {"field": "Rec",         "width": 120, "filter": "agTextColumnFilter"},
+                    {"field": "Direction",   "width": 100, "filter": "agTextColumnFilter"},
+                    {"field": "Horizon",     "width": 75,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value + 'd' : '—'"},
+                    {"field": "Conf",        "width": 65,  "filter": "agNumberColumnFilter"},
+                    {"field": "Composite",   "width": 90,  "filter": "agNumberColumnFilter"},
+                    {"field": "Fund",        "width": 65,  "filter": "agNumberColumnFilter"},
+                    {"field": "Research",    "width": 80,  "filter": "agNumberColumnFilter"},
+                    {"field": "Macro",       "width": 70,  "filter": "agNumberColumnFilter"},
+                    {"field": "News",        "width": 65,  "filter": "agNumberColumnFilter"},
+                    {"field": "Trigger",     "width": 170, "filter": "agTextColumnFilter"},
+                    {"field": "Changed",     "width": 85,  "filter": "agTextColumnFilter"},
+                    {"field": "Prev Rec",    "width": 110, "filter": "agTextColumnFilter"},
+                    {"field": "Model",       "width": 160, "filter": "agTextColumnFilter"},
+                ]
 
-        selected = _aggrid(grid_df, col_defs, height=440, key="pred_grid")
+                selected = _aggrid(grid_df, col_defs, height=440, key="pred_grid")
 
-        if selected:
-            hit = selected[0]
-            ticker = hit.get("Ticker", "")
-            created = hit.get("Created", "")
-            row_matches = raw_df[raw_df["ticker"] == ticker]
-            if not row_matches.empty:
-                row = row_matches.iloc[0]
-                for _, candidate in row_matches.iterrows():
-                    if str(candidate.get("created_at", "")).startswith(created[:16]):
-                        row = candidate
-                        break
+                if selected:
+                    hit = selected[0]
+                    ticker = hit.get("Ticker", "")
+                    created = hit.get("Created", "")
+                    row_matches = raw_df[raw_df["ticker"] == ticker]
+                    if not row_matches.empty:
+                        row = row_matches.iloc[0]
+                        for _, candidate in row_matches.iterrows():
+                            if str(candidate.get("created_at", "")).startswith(created[:16]):
+                                row = candidate
+                                break
 
-                st.divider()
-                rec = row.get("recommendation", "HOLD")
-                col_hex, _, label = REC_STYLES.get(rec, (NEUTRAL, "#F1F5F9", rec))
-                section_title(f"Detail — {ticker_label(ticker)}", badge_text=label, badge_color=col_hex)
+                        st.divider()
+                        rec = row.get("recommendation", "HOLD")
+                        col_hex, _, label = REC_STYLES.get(rec, (NEUTRAL, "#F1F5F9", rec))
+                        section_title(f"Detail — {ticker_label(ticker)}", badge_text=label, badge_color=col_hex)
 
-                xc1, xc2, xc3 = st.columns(3)
-                with xc1:
-                    _detail_card("Scores", [
-                        ("Composite",    f"{row.get('composite_score') or '—'}/10"),
-                        ("Confidence",   f"{row.get('confidence') or '—'}/10"),
-                        ("Fundamentals", f"{_score_color(row.get('fundamental_score'))} {row.get('fundamental_score') or '—'}/10"),
-                        ("Research",     f"{_score_color(row.get('research_score'))} {row.get('research_score') or '—'}/10"),
-                        ("Macro",        f"{_score_color(row.get('macro_score'))} {row.get('macro_score') or '—'}/10"),
-                        ("News",         f"{_score_color(row.get('news_score'))} {row.get('news_score') or '—'}/10"),
-                    ])
-                with xc2:
-                    trigger_raw = row.get("trigger_type") or "—"
-                    trigger_fmt = trigger_raw.replace("_", " ").title() if trigger_raw != "—" else "—"
-                    _detail_card("Meta", [
-                        ("Direction",  row.get("prediction", "—")),
-                        ("Horizon",    f"{row.get('horizon_days') or '—'}d"),
-                        ("Trigger",    trigger_fmt),
-                        ("Created",    (str(row.get("created_at") or ""))[:16]),
-                        ("Model",      row.get("model_name", "—") or "—"),
-                        ("Changed?",   f"{icon_html('autorenew', 14, color=PRIMARY)} Yes" if row.get("changed_from_previous") else "No"),
-                        ("Previous",   row.get("previous_prediction", "—") or "—"),
-                    ])
-                with xc3:
-                    try:
-                        panel = _pj(row.get("panel_summary"), {})
-                        if panel:
-                            st.markdown("**Panel Verdicts**")
-                            for k, icon_name, name in [
-                                ("chen_verdict",  "calculate",   "Fundamental Analyst"),
-                                ("webb_verdict",  "bar_chart",   "Research Analyst"),
-                                ("varga_verdict", "public",      "Macro Analyst"),
-                                ("park_verdict",  "newspaper",   "News Analyst"),
-                            ]:
-                                if panel.get(k):
-                                    st.markdown(
-                                        f"**{icon_html(icon_name, 14)} {name}:** {panel[k]}",
-                                        unsafe_allow_html=True,
-                                    )
-                            if panel.get("key_debate"):
-                                st.info(panel["key_debate"], icon=material("chat_bubble"))
-                    except Exception:
-                        pass
+                        xc1, xc2, xc3 = st.columns(3)
+                        with xc1:
+                            _detail_card("Scores", [
+                                ("Composite",    f"{row.get('composite_score') or '—'}/10"),
+                                ("Confidence",   f"{row.get('confidence') or '—'}/10"),
+                                ("Fundamentals", f"{_score_color(row.get('fundamental_score'))} {row.get('fundamental_score') or '—'}/10"),
+                                ("Research",     f"{_score_color(row.get('research_score'))} {row.get('research_score') or '—'}/10"),
+                                ("Macro",        f"{_score_color(row.get('macro_score'))} {row.get('macro_score') or '—'}/10"),
+                                ("News",         f"{_score_color(row.get('news_score'))} {row.get('news_score') or '—'}/10"),
+                            ])
+                        with xc2:
+                            trigger_raw = row.get("trigger_type") or "—"
+                            trigger_fmt = trigger_raw.replace("_", " ").title() if trigger_raw != "—" else "—"
+                            _detail_card("Meta", [
+                                ("Direction",  row.get("prediction", "—")),
+                                ("Horizon",    f"{row.get('horizon_days') or '—'}d"),
+                                ("Trigger",    trigger_fmt),
+                                ("Created",    (str(row.get("created_at") or ""))[:16]),
+                                ("Model",      row.get("model_name", "—") or "—"),
+                                ("Changed?",   f"{icon_html('autorenew', 14, color=PRIMARY)} Yes" if row.get("changed_from_previous") else "No"),
+                                ("Previous",   row.get("previous_prediction", "—") or "—"),
+                            ])
+                        with xc3:
+                            try:
+                                panel = _pj(row.get("panel_summary"), {})
+                                if panel:
+                                    st.markdown("**Panel Verdicts**")
+                                    for k, icon_name, name in [
+                                        ("chen_verdict",  "calculate",   "Fundamental Analyst"),
+                                        ("webb_verdict",  "bar_chart",   "Research Analyst"),
+                                        ("varga_verdict", "public",      "Macro Analyst"),
+                                        ("park_verdict",  "newspaper",   "News Analyst"),
+                                    ]:
+                                        if panel.get(k):
+                                            st.markdown(
+                                                f"**{icon_html(icon_name, 14)} {name}:** {panel[k]}",
+                                                unsafe_allow_html=True,
+                                            )
+                                    if panel.get("key_debate"):
+                                        st.info(panel["key_debate"], icon=material("chat_bubble"))
+                            except Exception:
+                                pass
 
-                if row.get("reasoning"):
-                    st.markdown(f"> {row['reasoning']}")
-
-
+                        if row.get("reasoning"):
+                            st.markdown(f"> {row['reasoning']}")
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — HOLDINGS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -864,60 +865,60 @@ with tab5:
             "as_of_date":       "As Of Date",
         })
 
-        section_title("Holdings", badge_text=f"{len(df)} positions", badge_color=PRIMARY)
-        st.caption("Sorted by current value · Click row for detail")
+        _tile_5 = section_tile("Holdings", badge_text=f"{len(df)} positions", badge_color=PRIMARY, expanded=True, key="database_5")
+        if _tile_5:
+            with _tile_5:
+                st.caption("Sorted by current value · Click row for detail")
 
-        col_defs = [
-            {"field": "As Of Date",      "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",     "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Name",       "width": 200, "filter": "agTextColumnFilter"},
-            {"field": "Shares",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
-            {"field": "Avg Cost",   "width": 95,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Cost Basis", "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
-            {"field": "Price",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
-            {"field": "Value",      "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
-            {"field": "Gain/Loss",  "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value >= 0 ? '+$' : '-$') + Math.abs(value).toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
-            {"field": "G/L %",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value >= 0 ? '+' : '') + value.toFixed(2) + '%' : '—'"},
-            {"field": "Account",    "width": 120, "filter": "agTextColumnFilter"},
-            {"field": "Type",       "width": 100, "filter": "agTextColumnFilter"},
-            {"field": "Broker",     "width": 100, "filter": "agTextColumnFilter"},
-            {"field": "Sector",     "width": 130, "filter": "agTextColumnFilter"},
-        ]
+                col_defs = [
+                    {"field": "As Of Date",      "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
+                    {"field": "Ticker",     "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                    {"field": "Name",       "width": 200, "filter": "agTextColumnFilter"},
+                    {"field": "Shares",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? value.toFixed(2) : '—'"},
+                    {"field": "Avg Cost",   "width": 95,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+                    {"field": "Cost Basis", "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
+                    {"field": "Price",      "width": 90,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toFixed(2) : '—'"},
+                    {"field": "Value",      "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? '$' + value.toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
+                    {"field": "Gain/Loss",  "width": 105, "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value >= 0 ? '+$' : '-$') + Math.abs(value).toLocaleString('en-US', {maximumFractionDigits:0}) : '—'"},
+                    {"field": "G/L %",     "width": 85,  "filter": "agNumberColumnFilter", "valueFormatter": "value != null ? (value >= 0 ? '+' : '') + value.toFixed(2) + '%' : '—'"},
+                    {"field": "Account",    "width": 120, "filter": "agTextColumnFilter"},
+                    {"field": "Type",       "width": 100, "filter": "agTextColumnFilter"},
+                    {"field": "Broker",     "width": 100, "filter": "agTextColumnFilter"},
+                    {"field": "Sector",     "width": 130, "filter": "agTextColumnFilter"},
+                ]
 
-        selected = _aggrid(grid_df, col_defs, height=460, key="hold_grid")
+                selected = _aggrid(grid_df, col_defs, height=460, key="hold_grid")
 
-        if selected:
-            hit    = selected[0]
-            ticker = hit.get("Ticker", "")
-            row_m  = df[df["ticker"] == ticker]
-            if not row_m.empty:
-                row = row_m.iloc[0]
-                st.divider()
-                _gl_val = row.get("gain_loss") or 0
-                gl_icon = status_dot_html(SUCCESS if _gl_val >= 0 else DANGER)
-                section_title(f"Detail — {ticker_label(ticker)}", badge_text=str(row.get("description",""))[:40], badge_color=PRIMARY)
-                dc1, dc2 = st.columns(2)
-                with dc1:
-                    _detail_card("Position", [
-                        ("Shares",      f"{row.get('shares'):.2f}" if row.get('shares') else "—"),
-                        ("Avg Cost",    fmt_money(row.get('avg_cost'))),
-                        ("Cost Basis",  fmt_money(row.get('cost_basis_total'))),
-                        ("Price",       fmt_money(row.get('current_price'))),
-                        ("Value",       fmt_money(row.get('current_value'))),
-                        ("Gain/Loss",   f"{gl_icon} {fmt_money(_gl_val, signed=True)}"),
-                        ("G/L %",       fmt_pct(row.get('gain_loss_pct'), signed=True)),
-                    ])
-                with dc2:
-                    _detail_card("Account", [
-                        ("Account",    str(row.get('account_name') or '—')),
-                        ("Type",       str(row.get('account_type') or '—')),
-                        ("Broker",     str(row.get('broker') or '—')),
-                        ("Sector",     str(row.get('sector') or '—')),
-                        ("As Of Date",      str(row.get('as_of_date') or '—')),
-                        ("Synced At",  str(row.get('synced_at') or '—')[:16]),
-                    ])
-
-
+                if selected:
+                    hit    = selected[0]
+                    ticker = hit.get("Ticker", "")
+                    row_m  = df[df["ticker"] == ticker]
+                    if not row_m.empty:
+                        row = row_m.iloc[0]
+                        st.divider()
+                        _gl_val = row.get("gain_loss") or 0
+                        gl_icon = status_dot_html(SUCCESS if _gl_val >= 0 else DANGER)
+                        section_title(f"Detail — {ticker_label(ticker)}", badge_text=str(row.get("description",""))[:40], badge_color=PRIMARY)
+                        dc1, dc2 = st.columns(2)
+                        with dc1:
+                            _detail_card("Position", [
+                                ("Shares",      f"{row.get('shares'):.2f}" if row.get('shares') else "—"),
+                                ("Avg Cost",    fmt_money(row.get('avg_cost'))),
+                                ("Cost Basis",  fmt_money(row.get('cost_basis_total'))),
+                                ("Price",       fmt_money(row.get('current_price'))),
+                                ("Value",       fmt_money(row.get('current_value'))),
+                                ("Gain/Loss",   f"{gl_icon} {fmt_money(_gl_val, signed=True)}"),
+                                ("G/L %",       fmt_pct(row.get('gain_loss_pct'), signed=True)),
+                            ])
+                        with dc2:
+                            _detail_card("Account", [
+                                ("Account",    str(row.get('account_name') or '—')),
+                                ("Type",       str(row.get('account_type') or '—')),
+                                ("Broker",     str(row.get('broker') or '—')),
+                                ("Sector",     str(row.get('sector') or '—')),
+                                ("As Of Date",      str(row.get('as_of_date') or '—')),
+                                ("Synced At",  str(row.get('synced_at') or '—')[:16]),
+                            ])
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1005,75 +1006,75 @@ with tab6:
             "actual_return_pct":  "Actual Rtn %",
         })
 
-        section_title("Grid", badge_text=f"{len(grid_df)} evaluated predictions", badge_color="#10B981")
-        st.caption("Click any column header to sort · Use the filter row beneath each header to filter · Click a row to see details below")
+        _tile_6 = section_tile("Grid", badge_text=f"{len(grid_df)} evaluated predictions", badge_color="#10B981", expanded=True, key="database_6")
+        if _tile_6:
+            with _tile_6:
+                st.caption("Click any column header to sort · Use the filter row beneath each header to filter · Click a row to see details below")
 
-        col_defs = [
-            {"field": "As Of Date",   "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Pred Date",    "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
-            {"field": "Ticker",       "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
-            {"field": "Horizon",      "width": 80,  "filter": "agNumberColumnFilter"},
-            {"field": "Pred Model",   "width": 160, "filter": "agTextColumnFilter"},
-            {"field": "Pred Dir",     "width": 90,  "filter": "agTextColumnFilter"},
-            {"field": "Actual Dir",   "width": 90,  "filter": "agTextColumnFilter"},
-            {"field": "Outcome",      "width": 170, "filter": "agTextColumnFilter"},
-            {"field": "Brier",        "width": 80,  "filter": "agNumberColumnFilter"},
-            {"field": "Log-Loss",     "width": 85,  "filter": "agNumberColumnFilter"},
-            {"field": "Excess Rtn %", "width": 105, "filter": "agNumberColumnFilter",
-             "valueFormatter": "value != null ? value.toFixed(2)+'%' : '—'"},
-            {"field": "Conviction",   "width": 95,  "filter": "agNumberColumnFilter"},
-            {"field": "In Range",     "width": 85,  "filter": "agTextColumnFilter"},
-            {"field": "Pred Low %",   "width": 95,  "filter": "agNumberColumnFilter"},
-            {"field": "Pred High %",  "width": 95,  "filter": "agNumberColumnFilter"},
-            {"field": "Actual Rtn %", "width": 100, "filter": "agNumberColumnFilter",
-             "valueFormatter": "value != null ? value.toFixed(2)+'%' : '—'"},
-        ]
+                col_defs = [
+                    {"field": "As Of Date",   "width": 110, "filter": "agDateColumnFilter",   "pinned": "left"},
+                    {"field": "Pred Date",    "width": 105, "filter": "agDateColumnFilter",   "pinned": "left"},
+                    {"field": "Ticker",       "width": 85,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                    {"field": "Horizon",      "width": 80,  "filter": "agNumberColumnFilter"},
+                    {"field": "Pred Model",   "width": 160, "filter": "agTextColumnFilter"},
+                    {"field": "Pred Dir",     "width": 90,  "filter": "agTextColumnFilter"},
+                    {"field": "Actual Dir",   "width": 90,  "filter": "agTextColumnFilter"},
+                    {"field": "Outcome",      "width": 170, "filter": "agTextColumnFilter"},
+                    {"field": "Brier",        "width": 80,  "filter": "agNumberColumnFilter"},
+                    {"field": "Log-Loss",     "width": 85,  "filter": "agNumberColumnFilter"},
+                    {"field": "Excess Rtn %", "width": 105, "filter": "agNumberColumnFilter",
+                     "valueFormatter": "value != null ? value.toFixed(2)+'%' : '—'"},
+                    {"field": "Conviction",   "width": 95,  "filter": "agNumberColumnFilter"},
+                    {"field": "In Range",     "width": 85,  "filter": "agTextColumnFilter"},
+                    {"field": "Pred Low %",   "width": 95,  "filter": "agNumberColumnFilter"},
+                    {"field": "Pred High %",  "width": 95,  "filter": "agNumberColumnFilter"},
+                    {"field": "Actual Rtn %", "width": 100, "filter": "agNumberColumnFilter",
+                     "valueFormatter": "value != null ? value.toFixed(2)+'%' : '—'"},
+                ]
 
-        selected = _aggrid(grid_df, col_defs, height=440, key="val_grid")
+                selected = _aggrid(grid_df, col_defs, height=440, key="val_grid")
 
-        if selected:
-            hit = selected[0]
-            ticker = hit.get("Ticker", "")
-            pred_date = hit.get("Pred Date", "")
-            row_matches = raw_val[
-                (raw_val["ticker"] == ticker) &
-                (raw_val["pred_date"].astype(str).str.startswith(str(pred_date)[:10]))
-            ]
-            if not row_matches.empty:
-                row = row_matches.iloc[0]
-                st.divider()
-                outcome = row.get("outcome", "—")
-                outcome_color = {
-                    "strong_correct": SUCCESS, "directionally_correct": SUCCESS,
-                    "flat_correct": PRIMARY, "wrong_minor": WARNING,
-                    "wrong_significant": DANGER,
-                }.get(str(outcome), NEUTRAL)
-                section_title(
-                    f"Detail — {ticker}  ·  {pred_date}  ·  {row.get('horizon_days')}d",
-                    badge_text=str(outcome).replace("_", " ").title(),
-                    badge_color=outcome_color,
-                )
-                dc1, dc2 = st.columns(2)
-                with dc1:
-                    _detail_card("Prediction", [
-                        ("Pred Model",    row.get("model_name") or "—"),
-                        ("Predicted Dir", row.get("predicted_direction") or "—"),
-                        ("Actual Dir",    row.get("actual_direction") or "—"),
-                        ("Pred Range",    f"{fmt_pct(row.get('pred_low'))} – {fmt_pct(row.get('pred_high'))}"),
-                        ("Actual Return", fmt_pct(row.get('actual_return_pct'))),
-                        ("In Range",      row.get("in_range") or "—"),
-                        ("Conviction",    f"{row.get('conviction_score') or '—'}/10"),
-                    ])
-                with dc2:
-                    _detail_card("Scores", [
-                        ("Brier Score",   f"{row.get('brier_score') or '—'}"),
-                        ("Log-Loss",      f"{row.get('log_loss') or '—'}"),
-                        ("Excess Return", fmt_pct(row.get('excess_return_pct'))),
-                        ("Outcome",       str(outcome).replace("_", " ").title()),
-                        ("Evaluated At",  str(row.get("evaluated_at") or "—")[:16]),
-                    ])
-
-
+                if selected:
+                    hit = selected[0]
+                    ticker = hit.get("Ticker", "")
+                    pred_date = hit.get("Pred Date", "")
+                    row_matches = raw_val[
+                        (raw_val["ticker"] == ticker) &
+                        (raw_val["pred_date"].astype(str).str.startswith(str(pred_date)[:10]))
+                    ]
+                    if not row_matches.empty:
+                        row = row_matches.iloc[0]
+                        st.divider()
+                        outcome = row.get("outcome", "—")
+                        outcome_color = {
+                            "strong_correct": SUCCESS, "directionally_correct": SUCCESS,
+                            "flat_correct": PRIMARY, "wrong_minor": WARNING,
+                            "wrong_significant": DANGER,
+                        }.get(str(outcome), NEUTRAL)
+                        section_title(
+                            f"Detail — {ticker}  ·  {pred_date}  ·  {row.get('horizon_days')}d",
+                            badge_text=str(outcome).replace("_", " ").title(),
+                            badge_color=outcome_color,
+                        )
+                        dc1, dc2 = st.columns(2)
+                        with dc1:
+                            _detail_card("Prediction", [
+                                ("Pred Model",    row.get("model_name") or "—"),
+                                ("Predicted Dir", row.get("predicted_direction") or "—"),
+                                ("Actual Dir",    row.get("actual_direction") or "—"),
+                                ("Pred Range",    f"{fmt_pct(row.get('pred_low'))} – {fmt_pct(row.get('pred_high'))}"),
+                                ("Actual Return", fmt_pct(row.get('actual_return_pct'))),
+                                ("In Range",      row.get("in_range") or "—"),
+                                ("Conviction",    f"{row.get('conviction_score') or '—'}/10"),
+                            ])
+                        with dc2:
+                            _detail_card("Scores", [
+                                ("Brier Score",   f"{row.get('brier_score') or '—'}"),
+                                ("Log-Loss",      f"{row.get('log_loss') or '—'}"),
+                                ("Excess Return", fmt_pct(row.get('excess_return_pct'))),
+                                ("Outcome",       str(outcome).replace("_", " ").title()),
+                                ("Evaluated At",  str(row.get("evaluated_at") or "—")[:16]),
+                            ])
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 7 — TRIGGER EVENTS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1105,60 +1106,64 @@ with tab7:
                     m4.metric("Unique Tickers", ev_df["ticker"].nunique())
 
                     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-                    section_title("Events", badge_text=f"{len(ev_df)} rows", badge_color=PRIMARY)
-                    st.caption("Showing latest 500 events · Click row for details")
+                    _tile_7 = section_tile("Events", badge_text=f"{len(ev_df)} rows", badge_color=PRIMARY, expanded=True, key="database_7")
+                    if _tile_7:
+                        with _tile_7:
+                            st.caption("Showing latest 500 events · Click row for details")
 
-                    ev_df["processed"] = ev_df["processed"].apply(lambda v: "Yes" if v else "No")
-                    ev_df["detected_at"] = ev_df["detected_at"].apply(
-                        lambda v: str(v)[:19].replace("T", " ") if isinstance(v, str) else ""
-                    )
-                    ev_df["processed_at"] = ev_df["processed_at"].apply(
-                        lambda v: str(v)[:19].replace("T", " ") if isinstance(v, str) else ""
-                    )
+                            ev_df["processed"] = ev_df["processed"].apply(lambda v: "Yes" if v else "No")
+                            ev_df["detected_at"] = ev_df["detected_at"].apply(
+                                lambda v: str(v)[:19].replace("T", " ") if isinstance(v, str) else ""
+                            )
+                            ev_df["processed_at"] = ev_df["processed_at"].apply(
+                                lambda v: str(v)[:19].replace("T", " ") if isinstance(v, str) else ""
+                            )
 
-                    grid_ev = ev_df.rename(columns={
-                        "id":            "ID",
-                        "detected_at":   "Detected At",
-                        "ticker":        "Ticker",
-                        "event_type":    "Event Type",
-                        "severity":      "Severity",
-                        "source":        "Source",
-                        "summary":       "Summary",
-                        "processed":     "Processed",
-                        "processed_at":  "Processed At",
-                        "prediction_id": "Pred ID",
-                    })
-                    ev_col_defs = [
-                        {"field": "Detected At",  "width": 155, "filter": "agTextColumnFilter",   "pinned": "left"},
-                        {"field": "Ticker",        "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
-                        {"field": "Severity",      "width": 85,  "filter": "agNumberColumnFilter"},
-                        {"field": "Event Type",    "width": 160, "filter": "agTextColumnFilter"},
-                        {"field": "Source",        "width": 120, "filter": "agTextColumnFilter"},
-                        {"field": "Summary",       "width": 320, "filter": "agTextColumnFilter"},
-                        {"field": "Processed",     "width": 95,  "filter": "agTextColumnFilter"},
-                        {"field": "Processed At",  "width": 155, "filter": "agTextColumnFilter"},
-                        {"field": "Pred ID",       "width": 80,  "filter": "agNumberColumnFilter"},
-                        {"field": "ID",            "width": 65,  "filter": "agNumberColumnFilter"},
-                    ]
-                    _aggrid(grid_ev, ev_col_defs, height=440, key="events_grid")
+                            grid_ev = ev_df.rename(columns={
+                                "id":            "ID",
+                                "detected_at":   "Detected At",
+                                "ticker":        "Ticker",
+                                "event_type":    "Event Type",
+                                "severity":      "Severity",
+                                "source":        "Source",
+                                "summary":       "Summary",
+                                "processed":     "Processed",
+                                "processed_at":  "Processed At",
+                                "prediction_id": "Pred ID",
+                            })
+                            ev_col_defs = [
+                                {"field": "Detected At",  "width": 155, "filter": "agTextColumnFilter",   "pinned": "left"},
+                                {"field": "Ticker",        "width": 90,  "filter": "agTextColumnFilter",   "pinned": "left"},
+                                {"field": "Severity",      "width": 85,  "filter": "agNumberColumnFilter"},
+                                {"field": "Event Type",    "width": 160, "filter": "agTextColumnFilter"},
+                                {"field": "Source",        "width": 120, "filter": "agTextColumnFilter"},
+                                {"field": "Summary",       "width": 320, "filter": "agTextColumnFilter"},
+                                {"field": "Processed",     "width": 95,  "filter": "agTextColumnFilter"},
+                                {"field": "Processed At",  "width": 155, "filter": "agTextColumnFilter"},
+                                {"field": "Pred ID",       "width": 80,  "filter": "agNumberColumnFilter"},
+                                {"field": "ID",            "width": 65,  "filter": "agNumberColumnFilter"},
+                            ]
+                            _aggrid(grid_ev, ev_col_defs, height=440, key="events_grid")
 
-                    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-                    section_title("Trigger Breakdown (last 7 days)", badge_color=PRIMARY)
-                    try:
-                        breakdown = c.execute(
-                            """SELECT COALESCE(trigger_type, 'none') as trigger_type, COUNT(*) AS cnt
-                               FROM predictions
-                               WHERE as_of_date >= date('now', '-7 days')
-                               GROUP BY trigger_type
-                               ORDER BY cnt DESC"""
-                        ).fetchall()
-                        if breakdown:
-                            br_df = pd.DataFrame([dict(r) for r in breakdown])
-                            br_df.columns = ["Trigger Type", "Count"]
-                            st.dataframe(br_df, use_container_width=True, hide_index=True)
-                        else:
-                            st.caption("No predictions in the last 7 days.")
-                    except Exception:
-                        pass
+                            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+                    _tile_8 = section_tile("Trigger Breakdown (last 7 days)", badge_color=PRIMARY, expanded=False, key="database_8")
+                    if _tile_8:
+                        with _tile_8:
+                            try:
+                                breakdown = c.execute(
+                                    """SELECT COALESCE(trigger_type, 'none') as trigger_type, COUNT(*) AS cnt
+                                       FROM predictions
+                                       WHERE as_of_date >= date('now', '-7 days')
+                                       GROUP BY trigger_type
+                                       ORDER BY cnt DESC"""
+                                ).fetchall()
+                                if breakdown:
+                                    br_df = pd.DataFrame([dict(r) for r in breakdown])
+                                    br_df.columns = ["Trigger Type", "Count"]
+                                    st.dataframe(br_df, use_container_width=True, hide_index=True)
+                                else:
+                                    st.caption("No predictions in the last 7 days.")
+                            except Exception:
+                                pass
     except Exception as exc:
         st.error(f"Query error: {exc}")

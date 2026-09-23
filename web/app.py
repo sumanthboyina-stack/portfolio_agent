@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from web.styles import (
+    section_tile,
     inject_global_css, top_nav, section_title, ticker_label,
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, PURPLE,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
@@ -51,28 +52,45 @@ def _load() -> dict:
     with db_conn(_DB) as c:
 
         # ── Holdings ────────────────────────────────────────────────────────
-        rows = c.execute("""
+        # SUM() skips NULL current_value on its own — an unpriced position stays
+        # unknown (counted in n_unvalued) instead of silently becoming $0.
+        # Cash is not in the holdings table at all, so this is securities only.
+        cols = {r[1] for r in c.execute("PRAGMA table_info(holdings)").fetchall()}
+        price_col = "MIN(price_as_of)" if "price_as_of" in cols else "NULL"
+        rows = c.execute(f"""
             SELECT ticker,
                    SUM(shares) shares,
-                   SUM(COALESCE(current_value,0)) value,
+                   SUM(current_value) value,
+                   SUM(CASE WHEN current_value IS NULL THEN 1 ELSE 0 END) n_unvalued,
+                   COUNT(*) n_rows,
                    SUM(COALESCE(cost_basis_total, shares*avg_cost, 0)) cost_basis,
-                   MIN(synced_at) oldest_sync
+                   MIN(synced_at) oldest_sync,
+                   MAX(synced_at) newest_sync,
+                   {price_col} oldest_price
             FROM holdings GROUP BY ticker ORDER BY value DESC
         """).fetchall()
         holdings = [dict(r) for r in rows]
-        tv = sum(h["value"] for h in holdings)
+        tv = sum(h["value"] or 0 for h in holdings)
         tc = sum(h["cost_basis"] for h in holdings)
         for h in holdings:
-            h["weight_pct"] = h["value"] / tv * 100 if tv else 0
+            h["weight_pct"] = (h["value"] or 0) / tv * 100 if tv else 0
         d["holdings"]      = holdings
-        d["total_value"]   = tv
+        d["total_value"]   = tv                      # securities only, valued rows only
         d["total_cost"]    = tc
+        d["n_positions"]   = sum(h["n_rows"] for h in holdings)
+        d["n_unvalued"]    = sum(h["n_unvalued"] for h in holdings)
         d["unreal_pct"]    = (tv - tc) / tc * 100 if tc else None
         d["holding_set"]   = {h["ticker"] for h in holdings}
         d["holding_map"]   = {h["ticker"]: h for h in holdings}
-        oldest = min((h["oldest_sync"] or "") for h in holdings) if holdings else ""
-        d["data_stale"]    = oldest < stale10 if oldest else True
-        d["sync_date"]     = oldest[:10] if oldest else None
+        # Freshness: "imported at" (newest import) and "prices as of" (oldest
+        # price observation) are different questions — keep both.
+        newest_import = max((h["newest_sync"] or "") for h in holdings) if holdings else ""
+        oldest_price  = min((h["oldest_price"] or "") for h in holdings) if holdings else ""
+        d["imported_at"]   = newest_import[:16].replace("T", " ") if newest_import else None
+        d["price_as_of"]   = oldest_price[:10] if oldest_price else None
+        stale_basis        = oldest_price or newest_import
+        d["data_stale"]    = stale_basis < stale10 if stale_basis else True
+        d["sync_date"]     = newest_import[:10] if newest_import else None
 
         # ── Risk/Technical flags (latest available) ─────────────────────────
         try:
@@ -618,7 +636,10 @@ disc_sub   = f"{n_discovery} BUY/STRONG_BUY" if n_discovery > 0 else "none today
 st.markdown(
     '<div style="background:#111827;border-radius:12px;padding:14px 4px;'
     'margin-bottom:18px;display:flex;align-items:stretch">'
-    + _tile("Portfolio",        _fmt_val(tv))
+    + _tile("Imported securities value", _fmt_val(tv), sub=(
+            f"{d.get('n_positions', 0) - d.get('n_unvalued', 0)} of {d.get('n_positions', 0)} positions valued"
+            + " · cash excluded"
+            + (f" · prices as of {d['price_as_of']}" if d.get("price_as_of") else "")))
     + _tile("Unrealized P&L",   upr_str, upr_col,
             f"vs {fmt_money(tc)} cost" if tc else "")
     + _tile("Review Queue",     f"{n_review} items", rev_color, rev_sub or "nothing urgent")
@@ -657,17 +678,11 @@ if _fired:
             f'{_link}'
             f'</div>'
         )
-    st.markdown(
-        f'<div style="background:white;border:1px solid #E5E7EB;border-radius:12px;'
-        f'padding:12px 18px;margin-bottom:18px">'
-        f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:0.08em;color:#6B7280;margin-bottom:6px">'
-        f'{icon_html("bolt", 14, extra_style="margin-right:5px;vertical-align:-2px")} '
-        f'What Fired — {len(_fired)} item(s), ranked by urgency</div>'
-        f'{_fired_html}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    _tile_fired = section_tile("What Fired", badge_text=f"{len(_fired)} item(s), ranked by urgency", icon="bolt",
+                               expanded=True, key="home_fired")
+    if _tile_fired:
+        with _tile_fired:
+            st.markdown(f'<div style="padding:2px 4px 4px">{_fired_html}</div>', unsafe_allow_html=True)
 
 
 # ── Two-column layout ─────────────────────────────────────────────────────────
@@ -680,118 +695,114 @@ left, right = st.columns([3, 2], gap="large")
 # ══════════════════════════════════════════════════════════
 
 with left:
-    st.markdown(
-        '<div style="font-size:0.92rem;font-weight:700;color:#111827;margin-bottom:2px">'
-        "Today's Attention Queue</div>"
-        '<div style="font-size:0.75rem;color:#9CA3AF;margin-bottom:14px">'
-        "Click any item to see detail and suggested action.</div>",
-        unsafe_allow_html=True,
-    )
+    _t = section_tile("Today's Attention Queue", badge_text="ranked by urgency", icon="notifications", key="home_queue")
+    if _t:
+        with _t:
 
-    if not queue:
-        st.success("Nothing requires attention today.")
-    else:
-        n_action = sum(1 for i in queue if i["requires_action"])
-        n_fyi    = len(queue) - n_action
-        st.markdown(
-            f'<div style="font-size:0.8rem;font-weight:600;color:#111827;'
-            f'margin-bottom:14px">'
-            f'{n_action} item{"s" if n_action != 1 else ""} need a decision, '
-            f'{n_fyi} {"are" if n_fyi != 1 else "is"} FYI</div>',
-            unsafe_allow_html=True,
-        )
+            if not queue:
+                st.success("Nothing requires attention today.")
+            else:
+                n_action = sum(1 for i in queue if i["requires_action"])
+                n_fyi    = len(queue) - n_action
+                st.markdown(
+                    f'<div style="font-size:0.8rem;font-weight:600;color:#111827;'
+                    f'margin-bottom:14px">'
+                    f'{n_action} item{"s" if n_action != 1 else ""} need a decision, '
+                    f'{n_fyi} {"are" if n_fyi != 1 else "is"} FYI</div>',
+                    unsafe_allow_html=True,
+                )
 
-        # ── Portfolio section ─────────────────────────────────────────────────
-        st.markdown(
-            '<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            'letter-spacing:0.08em;color:#374151;background:#F9FAFB;border-radius:8px;'
-            'padding:6px 10px;margin-bottom:4px;border-left:3px solid #2563EB">'
-            f'{icon_html("work", 14, extra_style="margin-right:6px;vertical-align:-2px")} YOUR PORTFOLIO</div>',
-            unsafe_allow_html=True,
-        )
-        _portfolio_rendered = False
-        for group_key in ("critical", "watch", "opportunity"):
-            group = [i for i in queue if i["priority"] == group_key]
-            if not group:
-                continue
-            _portfolio_rendered = True
-            color, label = PRIORITY_STYLE[group_key]
-            st.markdown(
-                f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-                f'letter-spacing:0.08em;color:{color};margin:12px 0 6px;display:flex;'
-                f'align-items:center;gap:6px">'
-                f'{status_dot_html(color, 7)} {label} ({len(group)})</div>',
-                unsafe_allow_html=True,
-            )
-            for item in group:
-                t = item.get("ticker")
-                ticker_tag = f"[{ticker_label(t)}] " if t else ""
-                exp_label  = f"{ticker_tag}{item['title']}"
-                with st.expander(exp_label, expanded=(group_key == "critical")):
+                # ── Portfolio section ─────────────────────────────────────────────────
+                st.markdown(
+                    '<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+                    'letter-spacing:0.08em;color:#374151;background:#F9FAFB;border-radius:8px;'
+                    'padding:6px 10px;margin-bottom:4px;border-left:3px solid #2563EB">'
+                    f'{icon_html("work", 14, extra_style="margin-right:6px;vertical-align:-2px")} YOUR PORTFOLIO</div>',
+                    unsafe_allow_html=True,
+                )
+                _portfolio_rendered = False
+                for group_key in ("critical", "watch", "opportunity"):
+                    group = [i for i in queue if i["priority"] == group_key]
+                    if not group:
+                        continue
+                    _portfolio_rendered = True
+                    color, label = PRIORITY_STYLE[group_key]
                     st.markdown(
-                        f'<div style="font-size:0.82rem;color:#374151;line-height:1.6">'
-                        f'{item["why"]}</div>',
+                        f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+                        f'letter-spacing:0.08em;color:{color};margin:12px 0 6px;display:flex;'
+                        f'align-items:center;gap:6px">'
+                        f'{status_dot_html(color, 7)} {label} ({len(group)})</div>',
                         unsafe_allow_html=True,
                     )
-                    url = PAGE_URL.get(item["action_page"])
-                    if url:
-                        st.markdown(
-                            f'<div style="font-size:0.75rem;color:#9CA3AF;margin-top:6px">'
-                            f'→ See: <a href="/{url}" '
-                            f'target="_self">{item["action_page"].title()}</a></div>',
-                            unsafe_allow_html=True,
-                        )
-        if not _portfolio_rendered:
-            st.markdown(
-                '<div style="font-size:0.8rem;color:#6B7280;padding:8px 4px">'
-                'No portfolio alerts today.</div>',
-                unsafe_allow_html=True,
-            )
-
-        # ── New Opportunities section ─────────────────────────────────────────
-        st.markdown(
-            '<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            'letter-spacing:0.08em;color:#374151;background:#F5F3FF;border-radius:8px;'
-            'padding:6px 10px;margin:20px 0 4px;border-left:3px solid #7C3AED">'
-            f'{icon_html("auto_awesome", 14, color=PURPLE, extra_style="margin-right:6px;vertical-align:-2px")} '
-            'NEW INVESTMENT OPPORTUNITIES</div>',
-            unsafe_allow_html=True,
-        )
-        disc_group = [i for i in queue if i["priority"] == "discovery"]
-        if disc_group:
-            color, label = PRIORITY_STYLE["discovery"]
-            st.markdown(
-                f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-                f'letter-spacing:0.08em;color:{color};margin:12px 0 6px;display:flex;'
-                f'align-items:center;gap:6px">'
-                f'{status_dot_html(color, 7)} {label} ({len(disc_group)})</div>',
-                unsafe_allow_html=True,
-            )
-            for idx, item in enumerate(disc_group):
-                t = item.get("ticker")
-                ticker_tag = f"[{ticker_label(t)}] " if t else ""
-                exp_label  = f"{ticker_tag}{item['title']}"
-                with st.expander(exp_label, expanded=(idx == 0)):
+                    for item in group:
+                        t = item.get("ticker")
+                        ticker_tag = f"[{ticker_label(t)}] " if t else ""
+                        exp_label  = f"{ticker_tag}{item['title']}"
+                        with st.expander(exp_label, expanded=(group_key == "critical")):
+                            st.markdown(
+                                f'<div style="font-size:0.82rem;color:#374151;line-height:1.6">'
+                                f'{item["why"]}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            url = PAGE_URL.get(item["action_page"])
+                            if url:
+                                st.markdown(
+                                    f'<div style="font-size:0.75rem;color:#9CA3AF;margin-top:6px">'
+                                    f'→ See: <a href="/{url}" '
+                                    f'target="_self">{item["action_page"].title()}</a></div>',
+                                    unsafe_allow_html=True,
+                                )
+                if not _portfolio_rendered:
                     st.markdown(
-                        f'<div style="font-size:0.82rem;color:#374151;line-height:1.6">'
-                        f'{item["why"]}</div>',
+                        '<div style="font-size:0.8rem;color:#6B7280;padding:8px 4px">'
+                        'No portfolio alerts today.</div>',
                         unsafe_allow_html=True,
                     )
-                    url = PAGE_URL.get(item["action_page"])
-                    if url:
-                        st.markdown(
-                            f'<div style="font-size:0.75rem;color:#9CA3AF;margin-top:6px">'
-                            f'→ See: <a href="/{url}" '
-                            f'target="_self">{item["action_page"].title()}</a></div>',
-                            unsafe_allow_html=True,
-                        )
-        else:
-            st.markdown(
-                '<div style="font-size:0.8rem;color:#6B7280;padding:8px 4px">'
-                'No trending opportunity signals today. The pipeline discovers new tickers '
-                'during morning and intraday batch runs.</div>',
-                unsafe_allow_html=True,
-            )
+
+                # ── New Opportunities section ─────────────────────────────────────────
+                st.markdown(
+                    '<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+                    'letter-spacing:0.08em;color:#374151;background:#F5F3FF;border-radius:8px;'
+                    'padding:6px 10px;margin:20px 0 4px;border-left:3px solid #7C3AED">'
+                    f'{icon_html("auto_awesome", 14, color=PURPLE, extra_style="margin-right:6px;vertical-align:-2px")} '
+                    'NEW INVESTMENT OPPORTUNITIES</div>',
+                    unsafe_allow_html=True,
+                )
+                disc_group = [i for i in queue if i["priority"] == "discovery"]
+                if disc_group:
+                    color, label = PRIORITY_STYLE["discovery"]
+                    st.markdown(
+                        f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+                        f'letter-spacing:0.08em;color:{color};margin:12px 0 6px;display:flex;'
+                        f'align-items:center;gap:6px">'
+                        f'{status_dot_html(color, 7)} {label} ({len(disc_group)})</div>',
+                        unsafe_allow_html=True,
+                    )
+                    for idx, item in enumerate(disc_group):
+                        t = item.get("ticker")
+                        ticker_tag = f"[{ticker_label(t)}] " if t else ""
+                        exp_label  = f"{ticker_tag}{item['title']}"
+                        with st.expander(exp_label, expanded=(idx == 0)):
+                            st.markdown(
+                                f'<div style="font-size:0.82rem;color:#374151;line-height:1.6">'
+                                f'{item["why"]}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            url = PAGE_URL.get(item["action_page"])
+                            if url:
+                                st.markdown(
+                                    f'<div style="font-size:0.75rem;color:#9CA3AF;margin-top:6px">'
+                                    f'→ See: <a href="/{url}" '
+                                    f'target="_self">{item["action_page"].title()}</a></div>',
+                                    unsafe_allow_html=True,
+                                )
+                else:
+                    st.markdown(
+                        '<div style="font-size:0.8rem;color:#6B7280;padding:8px 4px">'
+                        'No trending opportunity signals today. The pipeline discovers new tickers '
+                        'during morning and intraday batch runs.</div>',
+                        unsafe_allow_html=True,
+                    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -799,173 +810,176 @@ with left:
 # ══════════════════════════════════════════════════════════
 
 with right:
-    # ── Compact health strip (replaces full portfolio + validation panels) ─────
-    v5   = d.get("validation", {}).get(5, {})
-    acc5 = v5.get("directional_accuracy")
-    br5  = v5.get("brier_score")
-    n5   = v5.get("num_predictions", 0)
+    _t = section_tile("Health, Opportunities & Macro", icon="monitor_heart", key="home_health")
+    if _t:
+        with _t:
+            # ── Compact health strip (replaces full portfolio + validation panels) ─────
+            v5   = d.get("validation", {}).get(5, {})
+            acc5 = v5.get("directional_accuracy")
+            br5  = v5.get("brier_score")
+            n5   = v5.get("num_predictions", 0)
 
-    if acc5 is not None:
-        _acc_col = accuracy_color(acc5 * 100)
-        _br_col  = brier_color(br5 or 1.0)
-        _health_strip = (
-            f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
-            f'padding:12px 16px;margin-bottom:12px">'
-            f'<div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:8px">System Health</div>'
-            f'<div style="display:flex;gap:20px">'
-            f'<div><div style="font-size:1.05rem;font-weight:800;color:{_acc_col}">'
-            f'{fmt_pct(acc5*100)}</div>'
-            f'<div style="font-size:0.63rem;color:#9CA3AF">5d accuracy</div></div>'
-            f'<div><div style="font-size:1.05rem;font-weight:800;color:{_br_col}">'
-            f'{br5:.2f}</div>'
-            f'<div style="font-size:0.63rem;color:#9CA3AF">Brier</div></div>'
-            f'<div><div style="font-size:1.05rem;font-weight:800;color:#374151">{n5}</div>'
-            f'<div style="font-size:0.63rem;color:#9CA3AF">Evaluated</div></div>'
-            f'</div>'
-            f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-            f'→ <a href="/Validation" target="_self">Full validation report</a></div>'
-            f'</div>'
-        )
-    else:
-        _health_strip = (
-            f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
-            f'padding:12px 16px;margin-bottom:12px">'
-            f'<div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:6px">System Health</div>'
-            f'<div style="font-size:0.8rem;color:#9CA3AF">No validation data yet.</div>'
-            f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-            f'→ <a href="/Validation" target="_self">Full validation report</a></div>'
-            f'</div>'
-        )
+            if acc5 is not None:
+                _acc_col = accuracy_color(acc5 * 100)
+                _br_col  = brier_color(br5 or 1.0)
+                _health_strip = (
+                    f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
+                    f'padding:12px 16px;margin-bottom:12px">'
+                    f'<div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:8px">System Health</div>'
+                    f'<div style="display:flex;gap:20px">'
+                    f'<div><div style="font-size:1.05rem;font-weight:800;color:{_acc_col}">'
+                    f'{fmt_pct(acc5*100)}</div>'
+                    f'<div style="font-size:0.63rem;color:#9CA3AF">5d accuracy</div></div>'
+                    f'<div><div style="font-size:1.05rem;font-weight:800;color:{_br_col}">'
+                    f'{br5:.2f}</div>'
+                    f'<div style="font-size:0.63rem;color:#9CA3AF">Brier</div></div>'
+                    f'<div><div style="font-size:1.05rem;font-weight:800;color:#374151">{n5}</div>'
+                    f'<div style="font-size:0.63rem;color:#9CA3AF">Evaluated</div></div>'
+                    f'</div>'
+                    f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
+                    f'→ <a href="/Validation" target="_self">Full validation report</a></div>'
+                    f'</div>'
+                )
+            else:
+                _health_strip = (
+                    f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
+                    f'padding:12px 16px;margin-bottom:12px">'
+                    f'<div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:6px">System Health</div>'
+                    f'<div style="font-size:0.8rem;color:#9CA3AF">No validation data yet.</div>'
+                    f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
+                    f'→ <a href="/Validation" target="_self">Full validation report</a></div>'
+                    f'</div>'
+                )
 
-    # ── Freshness rows ────────────────────────────────────────────────────────
-    fresh_rows = ""
-    for label, date_str, warn_days in [
-        ("News",         d.get("news_latest"),  1),
-        ("Research",     d.get("res_latest"),   3),
-        ("Fundamentals", d.get("fund_latest"),  7),
-        ("Holdings",     d.get("sync_date"),    7),
-    ]:
-        ftxt, fcol = freshness_color(date_str or "", warn_days)
-        _dot_icon = "check_circle" if fcol == SUCCESS else ("warning" if fcol == WARNING else "cancel")
-        dot = icon_html(_dot_icon, 13, color=fcol)
-        fresh_rows += (
-            f'<div style="display:flex;justify-content:space-between;padding:5px 0;'
-            f'border-bottom:1px solid #F3F4F6">'
-            f'<span style="font-size:0.78rem;color:#374151;display:inline-flex;align-items:center;gap:5px">{dot} {label}</span>'
-            f'<span style="font-size:0.78rem;font-weight:600;color:{fcol}">{ftxt}</span>'
-            f'</div>'
-        )
+            # ── Freshness rows ────────────────────────────────────────────────────────
+            fresh_rows = ""
+            for label, date_str, warn_days in [
+                ("News",         d.get("news_latest"),  1),
+                ("Research",     d.get("res_latest"),   3),
+                ("Fundamentals", d.get("fund_latest"),  7),
+                ("Holdings",     d.get("sync_date"),    7),
+            ]:
+                ftxt, fcol = freshness_color(date_str or "", warn_days)
+                _dot_icon = "check_circle" if fcol == SUCCESS else ("warning" if fcol == WARNING else "cancel")
+                dot = icon_html(_dot_icon, 13, color=fcol)
+                fresh_rows += (
+                    f'<div style="display:flex;justify-content:space-between;padding:5px 0;'
+                    f'border-bottom:1px solid #F3F4F6">'
+                    f'<span style="font-size:0.78rem;color:#374151;display:inline-flex;align-items:center;gap:5px">{dot} {label}</span>'
+                    f'<span style="font-size:0.78rem;font-weight:600;color:{fcol}">{ftxt}</span>'
+                    f'</div>'
+                )
 
-    # ── Macro strip ───────────────────────────────────────────────────────────
-    def _mv(val, fmt=".2f", suffix=""):
-        return f"{val:{fmt}}{suffix}" if val is not None else "—"
+            # ── Macro strip ───────────────────────────────────────────────────────────
+            def _mv(val, fmt=".2f", suffix=""):
+                return f"{val:{fmt}}{suffix}" if val is not None else "—"
 
-    spr = macro.get("spread")
-    spr_col = DANGER if (spr is not None and spr < 0) else SUCCESS
-    macro_rows = (
-        f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">'
-        f'<div style="font-size:0.76rem;color:#6B7280">10Y–2Y Spread</div>'
-        f'<div style="font-size:0.76rem;font-weight:700;color:{spr_col};text-align:right">'
-        f'{fmt_pct(spr, signed=True)}</div>'
-        f'<div style="font-size:0.76rem;color:#6B7280">Fed Funds</div>'
-        f'<div style="font-size:0.76rem;font-weight:700;color:#374151;text-align:right">'
-        f'{fmt_pct(macro.get("ff"))}</div>'
-        f'<div style="font-size:0.76rem;color:#6B7280">CPI YoY</div>'
-        f'<div style="font-size:0.76rem;font-weight:700;'
-        f'color:{DANGER if (macro.get("cpi") or 0)>3.5 else WARNING if (macro.get("cpi") or 0)>2.5 else SUCCESS};'
-        f'text-align:right">{fmt_pct(macro.get("cpi"))}</div>'
-        f'<div style="font-size:0.76rem;color:#6B7280">HY Spread</div>'
-        f'<div style="font-size:0.76rem;font-weight:700;'
-        f'color:{DANGER if (macro.get("hy") or 0)>450 else "#374151"};text-align:right">'
-        f'{_mv(macro.get("hy"), ".2f", "bps")}</div>'
-        f'</div>'
-    )
-
-    # ── New Opportunities panel ───────────────────────────────────────────────
-    # Sourced from opportunity_engine.get_daily_opportunities() — same
-    # portfolio-fit-aware ranking the Opportunity Engine page shows, not a
-    # raw composite_score re-sort.
-    _topp = d.get("trending_opps", [])
-    if _topp:
-        opp_rows = ""
-        for _op in _topp[:5]:
-            _call = _op.get("call", "")
-            _call_col = {"BUY": SUCCESS}.get(_call, WARNING)
-            _sc = _op.get("opportunity_score")
-            _sc_str = f"{_sc:.2f}" if _sc is not None else "?"
-            _impact = _op.get("portfolio_impact") or {}
-            _corr = _impact.get("correlation_with_portfolio")
-            _sub_parts = []
-            if _op.get("composite_score") is not None:
-                _sub_parts.append(f"APEX {_op['composite_score']:.2f}")
-            if _corr is not None:
-                _sub_parts.append(f"corr {_corr:.2f}")
-            _sub = " · ".join(_sub_parts)
-            opp_rows += (
-                f'<div style="display:flex;justify-content:space-between;align-items:center;'
-                f'padding:7px 0;border-bottom:1px solid #EDE9FE">'
-                f'<div>'
-                f'<span style="font-size:0.82rem;font-weight:700;color:#111827">{_op["ticker"]}</span>'
-                f'<span style="font-size:0.72rem;color:{_call_col};font-weight:600;margin-left:6px">'
-                f'{_call}</span>'
-                f'<div style="font-size:0.68rem;color:#9CA3AF;margin-top:1px">{_sub}</div>'
-                f'</div>'
-                f'<span style="font-size:0.88rem;font-weight:800;color:{_call_col}">'
-                f'{_sc_str}<span style="font-size:0.65rem;color:#9CA3AF">/100</span></span>'
+            spr = macro.get("spread")
+            spr_col = DANGER if (spr is not None and spr < 0) else SUCCESS
+            macro_rows = (
+                f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">'
+                f'<div style="font-size:0.76rem;color:#6B7280">10Y–2Y Spread</div>'
+                f'<div style="font-size:0.76rem;font-weight:700;color:{spr_col};text-align:right">'
+                f'{fmt_pct(spr, signed=True)}</div>'
+                f'<div style="font-size:0.76rem;color:#6B7280">Fed Funds</div>'
+                f'<div style="font-size:0.76rem;font-weight:700;color:#374151;text-align:right">'
+                f'{fmt_pct(macro.get("ff"))}</div>'
+                f'<div style="font-size:0.76rem;color:#6B7280">CPI YoY</div>'
+                f'<div style="font-size:0.76rem;font-weight:700;'
+                f'color:{DANGER if (macro.get("cpi") or 0)>3.5 else WARNING if (macro.get("cpi") or 0)>2.5 else SUCCESS};'
+                f'text-align:right">{fmt_pct(macro.get("cpi"))}</div>'
+                f'<div style="font-size:0.76rem;color:#6B7280">HY Spread</div>'
+                f'<div style="font-size:0.76rem;font-weight:700;'
+                f'color:{DANGER if (macro.get("hy") or 0)>450 else "#374151"};text-align:right">'
+                f'{_mv(macro.get("hy"), ".2f", "bps")}</div>'
                 f'</div>'
             )
-        opp_panel = (
-            f'<div style="background:#F5F3FF;border:1px solid #DDD6FE;border-radius:12px;'
-            f'padding:14px 16px;margin-bottom:12px">'
-            f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:0.08em;color:#7C3AED;margin-bottom:10px">'
-            f'{icon_html("auto_awesome", 13, color=PURPLE, extra_style="margin-right:5px;vertical-align:-2px")} '
-            f'New Opportunities · Trending</div>'
-            f'{opp_rows}'
-            f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
-            f'→ <a href="/Opportunity_Engine" target="_self">Full ranking on Opportunity Engine</a></div>'
-            f'</div>'
-        )
-    else:
-        opp_panel = (
-            f'<div style="background:#F5F3FF;border:1px dashed #C4B5FD;border-radius:12px;'
-            f'padding:12px 16px;margin-bottom:12px">'
-            f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:0.08em;color:#7C3AED;margin-bottom:6px">'
-            f'{icon_html("auto_awesome", 13, color=PURPLE, extra_style="margin-right:5px;vertical-align:-2px")} '
-            f'New Opportunities · Trending</div>'
-            f'<div style="font-size:0.8rem;color:#6B7280">'
-            f'No trending signals yet today. Discoveries are added during morning '
-            f'&amp; intraday pipeline runs.</div>'
-            f'</div>'
-        )
 
-    # ── Render all as sticky block ────────────────────────────────────────────
-    _fresh_panel = (
-        f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
-        f'padding:14px 16px;margin-bottom:12px">'
-        f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:8px">Data Freshness</div>'
-        f'{fresh_rows}'
-        f'</div>'
-    )
-    _macro_panel = (
-        f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
-        f'padding:14px 16px">'
-        f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:10px">'
-        f'Macro Context · Regime: <span style="color:{regime_col}">{regime}</span></div>'
-        f'{macro_rows}'
-        f'</div>'
-    )
-    st.markdown(
-        '<div style="position:sticky;top:62px">'
-        + _health_strip
-        + opp_panel
-        + _fresh_panel
-        + _macro_panel
-        + '</div>',
-        unsafe_allow_html=True,
-    )
+            # ── New Opportunities panel ───────────────────────────────────────────────
+            # Sourced from opportunity_engine.get_daily_opportunities() — same
+            # portfolio-fit-aware ranking the Opportunity Engine page shows, not a
+            # raw composite_score re-sort.
+            _topp = d.get("trending_opps", [])
+            if _topp:
+                opp_rows = ""
+                for _op in _topp[:5]:
+                    _call = _op.get("call", "")
+                    _call_col = {"BUY": SUCCESS}.get(_call, WARNING)
+                    _sc = _op.get("opportunity_score")
+                    _sc_str = f"{_sc:.2f}" if _sc is not None else "?"
+                    _impact = _op.get("portfolio_impact") or {}
+                    _corr = _impact.get("correlation_with_portfolio")
+                    _sub_parts = []
+                    if _op.get("composite_score") is not None:
+                        _sub_parts.append(f"APEX {_op['composite_score']:.2f}")
+                    if _corr is not None:
+                        _sub_parts.append(f"corr {_corr:.2f}")
+                    _sub = " · ".join(_sub_parts)
+                    opp_rows += (
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                        f'padding:7px 0;border-bottom:1px solid #EDE9FE">'
+                        f'<div>'
+                        f'<span style="font-size:0.82rem;font-weight:700;color:#111827">{_op["ticker"]}</span>'
+                        f'<span style="font-size:0.72rem;color:{_call_col};font-weight:600;margin-left:6px">'
+                        f'{_call}</span>'
+                        f'<div style="font-size:0.68rem;color:#9CA3AF;margin-top:1px">{_sub}</div>'
+                        f'</div>'
+                        f'<span style="font-size:0.88rem;font-weight:800;color:{_call_col}">'
+                        f'{_sc_str}<span style="font-size:0.65rem;color:#9CA3AF">/100</span></span>'
+                        f'</div>'
+                    )
+                opp_panel = (
+                    f'<div style="background:#F5F3FF;border:1px solid #DDD6FE;border-radius:12px;'
+                    f'padding:14px 16px;margin-bottom:12px">'
+                    f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:0.08em;color:#7C3AED;margin-bottom:10px">'
+                    f'{icon_html("auto_awesome", 13, color=PURPLE, extra_style="margin-right:5px;vertical-align:-2px")} '
+                    f'New Opportunities · Trending</div>'
+                    f'{opp_rows}'
+                    f'<div style="font-size:0.72rem;color:#9CA3AF;margin-top:8px">'
+                    f'→ <a href="/Opportunity_Engine" target="_self">Full ranking on Opportunity Engine</a></div>'
+                    f'</div>'
+                )
+            else:
+                opp_panel = (
+                    f'<div style="background:#F5F3FF;border:1px dashed #C4B5FD;border-radius:12px;'
+                    f'padding:12px 16px;margin-bottom:12px">'
+                    f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:0.08em;color:#7C3AED;margin-bottom:6px">'
+                    f'{icon_html("auto_awesome", 13, color=PURPLE, extra_style="margin-right:5px;vertical-align:-2px")} '
+                    f'New Opportunities · Trending</div>'
+                    f'<div style="font-size:0.8rem;color:#6B7280">'
+                    f'No trending signals yet today. Discoveries are added during morning '
+                    f'&amp; intraday pipeline runs.</div>'
+                    f'</div>'
+                )
+
+            # ── Render all as sticky block ────────────────────────────────────────────
+            _fresh_panel = (
+                f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
+                f'padding:14px 16px;margin-bottom:12px">'
+                f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+                f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:8px">Data Freshness</div>'
+                f'{fresh_rows}'
+                f'</div>'
+            )
+            _macro_panel = (
+                f'<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;'
+                f'padding:14px 16px">'
+                f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+                f'letter-spacing:0.08em;color:#9CA3AF;margin-bottom:10px">'
+                f'Macro Context · Regime: <span style="color:{regime_col}">{regime}</span></div>'
+                f'{macro_rows}'
+                f'</div>'
+            )
+            st.markdown(
+                '<div style="position:sticky;top:62px">'
+                + _health_strip
+                + opp_panel
+                + _fresh_panel
+                + _macro_panel
+                + '</div>',
+                unsafe_allow_html=True,
+            )

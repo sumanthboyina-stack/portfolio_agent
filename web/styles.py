@@ -6,6 +6,8 @@ clean, minimal, airy — professional finance edition.
 """
 
 from __future__ import annotations
+import re
+
 import streamlit as st
 
 # ── Color tokens ──────────────────────────────────────────────────────────────
@@ -172,8 +174,10 @@ def inject_global_css() -> None:
         font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20 !important;
     }
     .stApp { background: #FFFFFF !important; }
+    /* Streamlit's fixed header is 60px tall; keep the nav row below it and let the header show through. */
+    [data-testid="stHeader"] { background: transparent !important; }
     .block-container {
-        padding-top: 0.25rem !important;
+        padding-top: 4.4rem !important;
         padding-bottom: 2.5rem !important;
         max-width: 1360px !important;
     }
@@ -204,15 +208,26 @@ def inject_global_css() -> None:
     .nav-brand {
         font-weight: 800;
         color: #111827;
-        font-size: 1.05rem;
+        font-size: 1.02rem;
         display: flex;
         align-items: center;
         gap: 8px;
-        padding-right: 24px;
-        border-right: 1px solid #F3F4F6;
-        margin-right: 4px;
+        height: 58px;
+        padding-right: 16px;
+        border-right: 1px solid #E5E7EB;
         letter-spacing: -0.025em;
         white-space: nowrap;
+        overflow: visible;
+    }
+    .nav-underline { height: 1px; background: #F3F4F6; margin: -6px 0 18px; }
+    @media (max-width: 1450px) {
+        /* tight row: labels only, icons dropped so nothing overlaps */
+        [data-testid="stPageLink"] p, .nav-tab { font-size: 0.84rem !important; padding: 0 5px !important; }
+        [data-testid="stPageLink"] [data-testid="stIconMaterial"], .nav-tab .material-symbols-rounded { display: none !important; }
+        .nav-brand { font-size: 0.92rem; padding-right: 10px; }
+    }
+    @media (max-width: 1400px) {
+        .nav-brand .brand-text { display: none; }
     }
     .nav-tabs-row {
         display: flex;
@@ -223,9 +238,10 @@ def inject_global_css() -> None:
     .nav-tab {
         display: flex;
         align-items: center;
+        justify-content: center;
         gap: 5px;
-        padding: 0 13px;
-        font-size: 1rem;
+        padding: 0 9px;
+        font-size: 0.92rem;
         font-weight: 500;
         color: #6B7280;
         border-bottom: 2px solid transparent;
@@ -382,6 +398,8 @@ def inject_global_css() -> None:
     }
 
     /* Buttons in main area — blue/white consistent */
+    [data-testid="stMain"] [data-testid="stButton"] button p,
+    [data-testid="stMain"] [data-testid="stPopoverButton"] p { white-space: nowrap !important; }
     [data-testid="stMain"] [data-testid="stButton"] button {
         background: #2563EB !important;
         border: 1px solid #2563EB !important;
@@ -389,7 +407,7 @@ def inject_global_css() -> None:
         font-weight: 600 !important;
         font-size: 0.85rem !important;
         border-radius: 8px !important;
-        padding: 9px 18px !important;
+        padding: 9px 14px !important;
         transition: all 0.15s ease !important;
         box-shadow: 0 1px 3px rgba(37,99,235,0.3) !important;
     }
@@ -420,7 +438,6 @@ def inject_global_css() -> None:
        no shadow — the icon sits directly on the tile's own colour. */
     [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button,
     [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:hover,
-    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:focus,
     [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:active {
         background: transparent !important;
         border: none !important;
@@ -430,6 +447,11 @@ def inject_global_css() -> None:
         padding: 2px 4px !important;
         min-height: 0 !important;
         float: right;
+    }
+    /* Keyboard users must still see where focus is. */
+    [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:focus-visible {
+        outline: 2px solid #2563EB !important;
+        outline-offset: 2px !important;
     }
     [data-testid="stMain"] [class*="st-key-tile_del_"] [data-testid="stButton"] button:hover {
         color: #DC2626 !important;
@@ -640,12 +662,24 @@ def inject_global_css() -> None:
 
     /* ── Page links (nav) ────────────────────────────────────── */
     [data-testid="stPageLink"] a { text-decoration: none !important; }
+    /* icon and label are siblings inside the link container: centre them together, as one unit */
+    [data-testid="stPageLink"] {
+        display: flex !important; justify-content: center !important; align-items: center !important; gap: 0 !important;
+    }
+    [data-testid="stPageLink"] a {
+        display: flex !important; align-items: center !important; justify-content: center !important;
+        gap: 4px !important; width: max-content !important; max-width: none !important; overflow: visible !important;
+        margin: 0 !important;
+    }
+    [data-testid="stPageLink"] [data-testid="stMarkdownContainer"] { overflow: visible !important; max-width: none !important; }
     [data-testid="stPageLink"] p {
         background: transparent !important;
         border: none !important;
         border-radius: 0 !important;
-        padding: 0 13px !important;
-        font-size: 1rem !important;
+        padding: 0 8px 0 3px !important;
+        font-size: 0.92rem !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
         font-weight: 500 !important;
         color: #6B7280 !important;
         height: 58px !important;
@@ -663,6 +697,56 @@ def inject_global_css() -> None:
         border-bottom-color: #BFDBFE !important;
     }
 
+    /* ── Top-right settings menu (gear icon + dropdown) ─────── */
+    [class*="st-key-settings_menu"] { display:flex; justify-content:flex-end; }
+    [class*="st-key-settings_menu"] [data-testid="stPopover"] { display: flex; justify-content: flex-end; }
+    [class*="st-key-settings_menu"] button,
+    [class*="st-key-settings_menu"] button:hover,
+    [class*="st-key-settings_menu"] button:active,
+    [class*="st-key-settings_menu"] button:focus,
+    [class*="st-key-settings_menu"] button[aria-expanded="true"] {
+        background: transparent !important;
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        color: #6B7280 !important;
+        min-height: 0 !important;
+        height: 58px;                       /* same row height as the nav tabs */
+        width: auto !important;
+        padding: 0 6px !important;
+        transform: none !important;
+    }
+    [class*="st-key-settings_menu"] button:hover,
+    [class*="st-key-settings_menu_active"] button { color: #2563EB !important; }
+    [class*="st-key-settings_menu"] button:focus-visible {
+        outline: 2px solid #2563EB !important; outline-offset: 2px !important;
+    }
+    [class*="st-key-settings_menu"] button [data-testid="stIconMaterial"] {
+        font-size: 22px !important; color: inherit !important;
+    }
+    /* hide the popover's caret so it reads as a plain icon */
+    [class*="st-key-settings_menu"] button svg,
+    [class*="st-key-settings_menu"] button > div > div[aria-hidden="true"] { display:none !important; }
+    .settings-active-dot {
+        width: 6px; height: 6px; border-radius: 50%; background: #2563EB;
+        margin: -8px 14px 0 auto;
+    }
+    /* dropdown body: vertical rows */
+    [data-testid="stPopoverBody"] .side-nav-title { padding: 0 4px 6px; }
+    [data-testid="stPopoverBody"] [data-testid="stPageLink"] p {
+        height: auto !important; padding: 8px 10px !important; margin: 2px 0 !important;
+        border-bottom: none !important; border-left: 3px solid transparent !important;
+        border-radius: 8px !important; font-size: 0.9rem !important; gap: 8px !important;
+        color: #374151 !important; min-width: 220px;
+    }
+    [data-testid="stPopoverBody"] [data-testid="stPageLink"] p:hover {
+        background: #EFF6FF !important; color: #2563EB !important; border-left-color: #93C5FD !important;
+    }
+    .nav-menu-item {
+        display:flex; align-items:center; gap:8px; padding:8px 10px; margin:2px 0; min-width:220px;
+        border-radius:8px; font-size:0.9rem; font-weight:600; color:#1D4ED8;
+        background:#EFF6FF; border-left:3px solid #2563EB;
+    }
     /* ── Sidebar settings nav (vertical) ────────────────────── */
     .side-nav-title {
         display: flex; align-items: center; gap: 6px;
@@ -747,6 +831,67 @@ def inject_global_css() -> None:
         font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
         letter-spacing: 0.08em; color: #6B7280; padding: 10px 4px 4px;
     }
+
+    /* ── Section tiles (section_tile): a disclosure row, not a button ──
+       Declared after the blue main-area button rules and more specific than
+       them, so the header keeps the tile's own white background. */
+    [data-testid="stMain"] [class*="st-key-tilebox_"] {
+        background: #FFFFFF; border: 1px solid #E2E8F0 !important; border-radius: 12px !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); padding: 0 18px 4px !important;
+    }
+    /* Streamlit puts its 1rem container padding one level down; the tile sets its own */
+    [data-testid="stMain"] [class*="st-key-tilebox_"] > div,
+    [data-testid="stMain"] [class*="st-key-tilebox_"] > div > div { padding: 0 !important; border: none !important; }
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] { margin: 0 -18px; }
+    [data-testid="stMain"] [class*="st-key-tilebox_"] > div > [data-testid="stVerticalBlock"] { gap: 0.5rem; }
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button,
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button[kind="tertiary"],
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button:hover,
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button:focus,
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button:focus-visible,
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button:active {
+        display: flex !important; flex-direction: row !important; justify-content: flex-start !important;
+        align-items: center !important; width: 100% !important; min-height: 0 !important; text-align: left !important;
+        padding: 11px 18px !important; border-radius: 12px !important; cursor: pointer;
+        background: #FFFFFF !important; border: none !important; box-shadow: none !important; outline: none !important;
+        color: #0F172A !important; font-weight: 700 !important; font-size: 0.95rem !important;
+        transform: none !important; transition: none !important;
+    }
+    /* Streamlit nests the label as  button > div > span > (icon-wrapper span, markdown div).
+       Make every wrapper a full-width row, put the title first and the chevron last. */
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button > div,
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button > div > span {
+        display: flex !important; align-items: center !important; width: 100% !important;
+        justify-content: flex-start !important; text-align: left !important; margin: 0 !important; gap: 0 !important;
+    }
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button [data-testid="stMarkdownContainer"] {
+        order: 1 !important; flex: 1 1 auto !important; width: auto !important; text-align: left !important; margin: 0 !important;
+    }
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button p,
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button:hover p {
+        font-size: 0.95rem !important; color: #0F172A !important; text-align: left !important; margin: 0 !important;
+        letter-spacing: -0.01em; width: 100%;
+    }
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button > div > span > span {
+        order: 2 !important; margin: 0 0 0 auto !important;
+    }
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button span[data-testid="stIconMaterial"],
+    [data-testid="stMain"] [class*="st-key-tilehdr_"] button:hover span[data-testid="stIconMaterial"] {
+        color: #94A3B8 !important; font-size: 1.35rem !important;
+    }
+    /* Metrics: values sized to fit four across; labels may wrap instead of truncating */
+    [data-testid="stMetricValue"], [data-testid="stMetricValue"] > div {
+        font-size: clamp(0.95rem, 1.3vw, 1.35rem) !important; overflow: visible !important; text-overflow: clip !important;
+    }
+    [data-testid="stMetricLabel"] p { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; line-height: 1.25; }
+    /* Native expanders (used inside forms) share the same tile look */
+    div[data-testid="stExpander"] details {
+        border: 1px solid #E2E8F0; border-radius: 12px; background: #FFFFFF;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    div[data-testid="stExpander"] summary { padding: 13px 16px; }
+    div[data-testid="stExpander"] summary:hover { background: #F8FAFC; border-radius: 12px; }
+    div[data-testid="stExpander"] summary p { font-size: 0.95rem; color: #0F172A; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -769,42 +914,47 @@ _NAV_ADMIN = [
     ("database",    "database",       "Database",      "pages/1_📊_Database.py"),
     ("restricted",  "block",          "Restricted List", "pages/8_🚫_Restricted_List.py"),
     ("validation_qa", "science",      "Validation QA", "pages/11_🔬_Validation_QA.py"),
+    ("accounts",    "account_balance", "Accounts & Imports", "pages/13_🗂️_Accounts.py"),
     ("profile",     "person",         "Profile",       "pages/12_👤_Profile.py"),
 ]
 
 def top_nav(active: str = "dashboard") -> None:
-    """Render a sticky top nav (primary + secondary tabs) and the vertical
-    Settings nav at the top of the left sidebar (see _sidebar_settings_nav)."""
-    st.markdown(
-        '<div class="top-nav-wrap">'
-        f'<div class="nav-brand">{icon_html("trending_up", 19)} Portfolio Intelligence</div>'
-        '<div class="nav-tabs-row">',
-        unsafe_allow_html=True,
-    )
-
+    """Render a sticky top nav: primary + secondary tabs on the left, and a
+    settings (gear) icon in the top-right corner that opens the Settings pages
+    (Schedule, Database, Restricted List, Validation QA, Accounts & Imports,
+    Profile) in a dropdown — those links are visible only while it is open."""
     # column width scales with label length so longer labels (e.g. "Opportunity
     # Engine") don't get clipped next to short ones (e.g. "Chat") in a uniform grid
     def _w(label: str) -> float:
-        return 0.75 + 0.11 * len(label)
+        return 0.9 + 0.12 * len(label)
 
     n_primary = len(_NAV_PRIMARY)
     widths = (
-        [_w(label) for _, _, label, _ in _NAV_PRIMARY] + [0.3]
+        [4.0]                  # brand
+        + [_w(label) for _, _, label, _ in _NAV_PRIMARY] + [0.3]
         + [_w(label) for _, _, label, _ in _NAV_SECONDARY]
+        + [0.8, 0.7]           # flexible spacer, then the settings icon pinned right
     )
-    cols = st.columns(widths, gap="small")
-    divider_1 = n_primary
-    secondary_start = n_primary + 1
+    cols = st.columns(widths, gap="small", vertical_alignment="center")
+    divider_1 = 1 + n_primary
+    secondary_start = 2 + n_primary
+    settings_col = cols[-1]
+
+    with cols[0]:
+        st.markdown(
+            f'<div class="nav-brand">{icon_html("trending_up", 19)} <span class="brand-text">Portfolio Intelligence</span></div>',
+            unsafe_allow_html=True,
+        )
 
     for i, (key, icon, label, path) in enumerate(_NAV_PRIMARY):
-        with cols[i]:
+        with cols[1 + i]:
             if key == active:
                 st.markdown(
                     f'<div class="nav-tab active">{icon_html(icon, 17)} <span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
             else:
-                st.page_link(path, label=label, icon=material(icon), use_container_width=True)
+                st.page_link(path, label=label, icon=material(icon), width="stretch")
 
     with cols[divider_1]:
         st.markdown(
@@ -821,33 +971,32 @@ def top_nav(active: str = "dashboard") -> None:
                     unsafe_allow_html=True,
                 )
             else:
-                st.page_link(path, label=label, icon=material(icon), use_container_width=True)
+                st.page_link(path, label=label, icon=material(icon), width="stretch")
 
-    st.markdown('</div></div>', unsafe_allow_html=True)
+    on_settings_page = any(key == active for key, _, _, _ in _NAV_ADMIN)
+    with settings_col, st.container(key="settings_menu_active" if on_settings_page else "settings_menu"):
+        _settings_menu(active)
 
-    _sidebar_settings_nav(active)
+    st.markdown('<div class="nav-underline"></div>', unsafe_allow_html=True)
 
 
-def _sidebar_settings_nav(active: str) -> None:
-    """Vertical Settings nav (Schedule, Database, Restricted List, Validation QA,
-    Profile) pinned to the top of the left sidebar. Pages add their own sidebar
-    content below it, since top_nav() runs first on every page."""
-    with st.sidebar:
+def _settings_menu(active: str) -> None:
+    """Gear icon in the top-right corner; the Settings page links live inside
+    its dropdown and are only visible while it is open."""
+    on_settings_page = any(key == active for key, _, _, _ in _NAV_ADMIN)
+    with st.popover("", icon=material("settings"), help="Settings"):
         st.markdown(
-            '<div class="side-nav">'
-            f'<div class="side-nav-title">{icon_html("settings", 15)} <span>Settings</span></div>'
-            '</div>',
+            f'<div class="side-nav-title">{icon_html("settings", 15)} <span>Settings</span></div>',
             unsafe_allow_html=True,
         )
         for key, icon, label, path in _NAV_ADMIN:
             if key == active:
                 st.markdown(
-                    f'<div class="side-nav-item active">{icon_html(icon, 17)} <span>{label}</span></div>',
+                    f'<div class="nav-menu-item active">{icon_html(icon, 17)} <span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
             else:
-                st.page_link(path, label=label, icon=material(icon), use_container_width=True)
-        st.markdown('<div class="side-nav-end"></div>', unsafe_allow_html=True)
+                st.page_link(path, label=label, icon=material(icon), width="stretch")
 
 
 # ── Icon system (Material Symbols Rounded — same font Streamlit's own
@@ -904,6 +1053,67 @@ def page_header(title: str, subtitle: str = "", icon: str = "") -> None:
         f'{sub_html}</div>',
         unsafe_allow_html=True,
     )
+
+
+class _Tile:
+    """Handle returned by section_tile(): truthy when open; `with tile:` renders into its body."""
+
+    def __init__(self, is_open: bool, body):
+        self.open = is_open
+        self._body = body
+
+    def __bool__(self) -> bool:
+        return self.open
+
+    def __enter__(self):
+        if self._body is None:
+            raise RuntimeError("section_tile is collapsed — guard the body with `if tile:`")
+        self._body.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._body.__exit__(*exc)
+
+
+def _tile_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:48]
+
+
+def section_tile(text: str, badge_text: str = "", badge_color: str = PRIMARY, expanded: bool = False,
+                 icon: str | None = None, key: str | None = None, native: bool = False):
+    """
+    Collapsible section tile. Same vocabulary as section_title() (title + badge),
+    but the section body only renders while the tile is open, so collapsed
+    sections cost nothing. Use as
+
+        tile = section_tile("Holdings", badge_text=scope, expanded=True, key="portfolio_holdings")
+        if tile:
+            with tile:
+                ...
+
+    Open/closed state lives in st.session_state under the key, so it survives
+    reruns. native=True returns a styled st.expander instead — for bodies inside
+    an st.form, where the header button is not allowed (expanders cannot nest).
+    """
+    plain = re.sub(r"<[^>]+>", "", str(text)).strip()
+    badge = re.sub(r"<[^>]+>", "", str(badge_text)).strip()
+    if native:
+        return st.expander(f"**{plain}**" + (f"  ·  {badge}" if badge else ""), expanded=expanded,
+                           icon=material(icon) if icon else None)
+    slug = key or _tile_slug(plain)
+    state_key = f"tile_open_{slug}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = bool(expanded)
+    is_open = bool(st.session_state[state_key])
+    outer = st.container(border=True, key=f"tilebox_{slug}")   # class st-key-tilebox_* is what the CSS targets
+    with outer:
+        label = f"**{plain}**" + (f"  ·  {badge}" if badge else "")
+        if st.button(label, key=f"tilehdr_{slug}", type="tertiary", width="stretch",
+                     icon=material("keyboard_arrow_down" if is_open else "keyboard_arrow_right")):
+            st.session_state[state_key] = not is_open
+            st.rerun()
+        body = st.container() if is_open else None
+    return _Tile(is_open, body)
 
 
 def section_title(text: str, badge_text: str = "", badge_color: str = PRIMARY) -> None:

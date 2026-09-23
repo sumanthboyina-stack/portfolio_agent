@@ -97,7 +97,7 @@ async def run_batch_evening(
     if tracker:
         tracker.start_phase("l3_snapshot", total=1)
     try:
-        from portfolio_agent.tools.holdings_db import snapshot_portfolio_prices
+        from portfolio_agent.tools.holdings_prices import snapshot_portfolio_prices
         r3 = snapshot_portfolio_prices(today_date.isoformat())
         _l3_note = f"{r3.get('snapped', 0)} holdings snapped for {r3.get('date')}"
         log.info(f"  L3: {_l3_note}", event_type="summary")

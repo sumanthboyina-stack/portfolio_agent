@@ -19,6 +19,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
+    section_tile,
     inject_global_css, top_nav, page_header, section_title,
     badge_html, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL,
     icon_html, material, status_dot_html,
@@ -1091,12 +1092,10 @@ if active_log_path and active_log_path.exists():
     log_lines = log_text.count("\n") + 1 if log_text else 0
 
     if job_is_alive:
-        section_title(
-            f"{icon_html('sensors', 16)} Live Output",
-            badge_text=f"{_phase_badge(log_text)}  ·  {log_lines} lines",
-            badge_color="#3B82F6",
-        )
-        st.caption(f"Auto-refreshing every 3 s  ·  {active_log_path.name}")
+        _tile_1 = section_tile(f"{icon_html('sensors', 16)} Live Output", badge_text=f"{_phase_badge(log_text)}  ·  {log_lines} lines", badge_color="#3B82F6", expanded=True, key="schedule_1")
+        if _tile_1:
+            with _tile_1:
+                st.caption(f"Auto-refreshing every 3 s  ·  {active_log_path.name}")
     else:
         _fin_job = st.session_state.active_job or "daily"
         _lt_lower = log_text.lower()
@@ -1113,12 +1112,10 @@ if active_log_path and active_log_path.exists():
             if _finished else
             f"{status_dot_html(PRIMARY)} Ended"
         )
-        section_title(
-            f"{icon_html('list_alt', 16)} Last Run Output",
-            badge_text=f"{_fin_badge}  ·  {log_lines} lines",
-        )
-        st.caption(active_log_path.name)
-
+        _tile_2 = section_tile(f"{icon_html('list_alt', 16)} Last Run Output", badge_text=f"{_fin_badge}  ·  {log_lines} lines", expanded=False, key="schedule_2")
+        if _tile_2:
+            with _tile_2:
+                st.caption(active_log_path.name)
     # ── Progress tracker — prefer DB (real-time) over log parsing ────────────
     _active_run_id = st.session_state.get("active_run_id")
     _db_run = _load_run_from_db(_active_run_id) if _active_run_id else None
@@ -1151,22 +1148,23 @@ if _CP.exists():
         ]
         _cp_any = any(pending for _, pending in _cp_phases)
         if _cp_any:
-            section_title(f"{icon_html('bookmark', 16)} Saved Checkpoint", badge_text="Pending tickers", badge_color=WARNING)
-            st.caption(f"Saved at: {cp.get('saved_at','')} · Run date: {cp.get('run_date','')}")
-            for phase, pending in _cp_phases:
-                if pending:
-                    pd_data = cp.get(phase, {})
-                    st.markdown(
-                        f'<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;'
-                        f'padding:10px 14px;margin-bottom:8px">'
-                        f'<strong style="color:#92400E">{phase.title()}</strong>: '
-                        f'{len(pending)} tickers pending — '
-                        f'{", ".join(pending[:10])}{"…" if len(pending) > 10 else ""}'
-                        f'<br><span style="font-size:0.8rem;color:#B45309">'
-                        f'Error: {pd_data.get("error","")[:120]}</span></div>',
-                        unsafe_allow_html=True,
-                    )
-            st.divider()
+            _tile_3 = section_tile(f"{icon_html('bookmark', 16)} Saved Checkpoint", badge_text="Pending tickers", badge_color=WARNING, expanded=False, key="schedule_3")
+            if _tile_3:
+                with _tile_3:
+                    st.caption(f"Saved at: {cp.get('saved_at','')} · Run date: {cp.get('run_date','')}")
+                    for phase, pending in _cp_phases:
+                        if pending:
+                            pd_data = cp.get(phase, {})
+                            st.markdown(
+                                f'<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;'
+                                f'padding:10px 14px;margin-bottom:8px">'
+                                f'<strong style="color:#92400E">{phase.title()}</strong>: '
+                                f'{len(pending)} tickers pending — '
+                                f'{", ".join(pending[:10])}{"…" if len(pending) > 10 else ""}'
+                                f'<br><span style="font-size:0.8rem;color:#B45309">'
+                                f'Error: {pd_data.get("error","")[:120]}</span></div>',
+                                unsafe_allow_html=True,
+                            )
     except Exception:
         pass
 
@@ -1330,64 +1328,66 @@ for r in _legacy:
     })
 
 total_runs = len(_all_display)
-section_title(f"{icon_html('list_alt', 16)} Historical Runs", badge_text=f"{total_runs} runs")
+_tile_4 = section_tile(f"{icon_html('list_alt', 16)} Historical Runs", badge_text=f"{total_runs} runs", expanded=False, key="schedule_4")
+if _tile_4:
+    with _tile_4:
 
-if _all_display:
-    import pandas as pd
-    _table_cols = ["Batch", "Started", "Duration", "Summary", "Status"]
-    _df = pd.DataFrame([{c: row[c] for c in _table_cols} for row in _all_display])
+        if _all_display:
+            import pandas as pd
+            _table_cols = ["Batch", "Started", "Duration", "Summary", "Status"]
+            _df = pd.DataFrame([{c: row[c] for c in _table_cols} for row in _all_display])
 
-    def _style_runs(row):
-        if row.name == 0:
-            return ["background-color:#D1FAE5;color:#065F46;font-weight:700"] * len(row)
-        return [""] * len(row)
+            def _style_runs(row):
+                if row.name == 0:
+                    return ["background-color:#D1FAE5;color:#065F46;font-weight:700"] * len(row)
+                return [""] * len(row)
 
-    st.dataframe(
-        _df.style.apply(_style_runs, axis=1),
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Batch":    st.column_config.TextColumn("Batch",    width="small"),
-            "Started":  st.column_config.TextColumn("Started",  width="medium"),
-            "Duration": st.column_config.TextColumn("Duration", width="small"),
-            "Summary":  st.column_config.TextColumn("Summary",  width="large"),
-            "Status":   st.column_config.TextColumn("Status",   width="small"),
-        },
-    )
+            st.dataframe(
+                _df.style.apply(_style_runs, axis=1),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Batch":    st.column_config.TextColumn("Batch",    width="small"),
+                    "Started":  st.column_config.TextColumn("Started",  width="medium"),
+                    "Duration": st.column_config.TextColumn("Duration", width="small"),
+                    "Summary":  st.column_config.TextColumn("Summary",  width="large"),
+                    "Status":   st.column_config.TextColumn("Status",   width="small"),
+                },
+            )
 
-    st.markdown("**View a past run:**")
-    sel = st.selectbox(
-        "Select run",
-        options=range(len(_all_display)),
-        format_func=lambda i: f"{_all_display[i]['Started']}  [{_all_display[i]['Batch']}]  {_all_display[i]['Status']}",
-        key="hist_sel",
-        label_visibility="collapsed",
-    )
-    if sel is not None:
-        _sel = _all_display[sel]
-        _db_r = _sel["_db_run"]
-        if _db_r and _db_r.get("phases"):
-            _render_progress_parsed(_db_to_parsed(_db_r), _sel["_job_type"])
-        log_f = _sel["_log_file"]
-        if log_f and Path(log_f).exists():
-            hist_text = _read_log_tail(Path(log_f))
-            with st.expander("Raw log output", icon=material("list_alt"), expanded=False):
-                st.markdown(
-                    f'<div style="background:#0F172A;border:1px solid #334155;border-radius:10px;'
-                    f'padding:16px;font-family:monospace;font-size:0.78rem;line-height:1.5;'
-                    f'max-height:520px;overflow-y:auto;white-space:pre-wrap;color:#E2E8F0">'
-                    + hist_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
-                    + '</div>',
-                    unsafe_allow_html=True,
-                )
-        elif not log_f or not Path(log_f).exists():
-            st.caption("Log file not available for this run.")
-else:
-    st.info("No pipeline runs found yet. Run a job to get started.", icon=material("description"))
+            st.markdown("**View a past run:**")
+            sel = st.selectbox(
+                "Select run",
+                options=range(len(_all_display)),
+                format_func=lambda i: f"{_all_display[i]['Started']}  [{_all_display[i]['Batch']}]  {_all_display[i]['Status']}",
+                key="hist_sel",
+                label_visibility="collapsed",
+            )
+            if sel is not None:
+                _sel = _all_display[sel]
+                _db_r = _sel["_db_run"]
+                if _db_r and _db_r.get("phases"):
+                    _render_progress_parsed(_db_to_parsed(_db_r), _sel["_job_type"])
+                log_f = _sel["_log_file"]
+                if log_f and Path(log_f).exists():
+                    hist_text = _read_log_tail(Path(log_f))
+                    with st.expander("Raw log output", icon=material("list_alt"), expanded=False):
+                        st.markdown(
+                            f'<div style="background:#0F172A;border:1px solid #334155;border-radius:10px;'
+                            f'padding:16px;font-family:monospace;font-size:0.78rem;line-height:1.5;'
+                            f'max-height:520px;overflow-y:auto;white-space:pre-wrap;color:#E2E8F0">'
+                            + hist_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+                            + '</div>',
+                            unsafe_allow_html=True,
+                        )
+                elif not log_f or not Path(log_f).exists():
+                    st.caption("Log file not available for this run.")
+        else:
+            st.info("No pipeline runs found yet. Run a job to get started.", icon=material("description"))
 
-# ── Auto-refresh while job is alive ──────────────────────────────────────────
-# Sleep then rerun — keeps the live log updated without any extra component.
+        # ── Auto-refresh while job is alive ──────────────────────────────────────────
+        # Sleep then rerun — keeps the live log updated without any extra component.
 
-if job_is_alive:
-    time.sleep(3)
-    st.rerun()
+        if job_is_alive:
+            time.sleep(3)
+            st.rerun()

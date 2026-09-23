@@ -12,6 +12,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from web.styles import (
+    section_tile,
     inject_global_css, page_header, section_title, top_nav, card, material, icon_html,
     badge_html, ticker_label, stat_card_html, status_dot_html, fmt_money, fmt_pct,
     SUCCESS, SUCCESS_LIGHT, WARNING, WARNING_LIGHT, DANGER, DANGER_LIGHT, NEUTRAL, PRIMARY, PRIMARY_LIGHT,
@@ -343,22 +344,19 @@ else:
 
     valued_tickers.sort(key=lambda t: valuations[t].get("margin_of_safety_pct") if valuations[t].get("margin_of_safety_pct") is not None else -1e9, reverse=True)
 
-    section_title(
-        f"{group_choice} — Valuation Summary",
-        badge_text=f"{len(valued_tickers)} valued",
-        badge_color=PRIMARY,
-    )
+    _tile_1 = section_tile(f"{group_choice} — Valuation Summary", badge_text=f"{len(valued_tickers)} valued", badge_color=PRIMARY, expanded=True, key="valuation_1")
+    if _tile_1:
+        with _tile_1:
 
-    for ticker in valued_tickers:
-        valuation = valuations[ticker]
-        with st.expander(_highlight_line(ticker, valuation)):
-            _render_detail(valuation, ticker)
+            for ticker in valued_tickers:
+                valuation = valuations[ticker]
+                with st.expander(_highlight_line(ticker, valuation)):
+                    _render_detail(valuation, ticker)
 
-    if unvalued_tickers:
-        st.caption(
-            f"No valuation yet for: {', '.join(unvalued_tickers)} — use \"Look up any ticker\" below to compute one."
-        )
-
+            if unvalued_tickers:
+                st.caption(
+                    f"No valuation yet for: {', '.join(unvalued_tickers)} — use \"Look up any ticker\" below to compute one."
+                )
 st.divider()
 
 # ── Manual lookup — any ticker, on-demand compute if not yet covered ─────────
