@@ -110,6 +110,16 @@ The pipeline is designed to run on a daily cadence. Suggested cron schedule (CST
 
 The web UI Schedule page can also trigger manual runs directly from the browser.
 
+### Deploying to Azure App Service
+
+Notes only — no infra is set up by this repo.
+
+- Streamlit's `[auth]` block only ever reads `.streamlit/secrets.toml`, never environment variables. Store the real values as App Service **App Settings** (or Key Vault references), then run `python scripts/write_secrets.py` from the startup command, before Streamlit, to render `secrets.toml` from `AUTH_REDIRECT_URI`, `AUTH_COOKIE_SECRET`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_METADATA_URL`.
+- Add the production redirect URI to the app registration: `https://<app-name>.azurewebsites.net/oauth2callback`.
+- Enable **WebSockets** on the App Service (Streamlit needs them) and enforce **HTTPS only**.
+- Don't also turn on App Service **Easy Auth** — one auth layer only (`st.login`); stacking both breaks the OIDC callback.
+- SQLite needs a persistent mount on App Service (the default filesystem is ephemeral across restarts/scale events) — flag this as a follow-up; it isn't auth work.
+
 ---
 
 ## Data sources
