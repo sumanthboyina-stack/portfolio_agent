@@ -231,6 +231,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("weights_used",                "TEXT"),
         ("valuation_score",             "INTEGER"),
         ("guardrail_flags",             "TEXT"),
+        ("raw_conviction_score",        "REAL"),
         # Scope & provenance (see SCOPE_* above)
         ("scope",                       "TEXT"),
         ("origin",                      "TEXT"),
@@ -439,6 +440,13 @@ def insert_prediction(
     weights_used: Optional[dict] = None,
     # Deterministic post-hoc guardrails applied before this row was stored
     guardrail_flags: Optional[list] = None,
+    # The conviction the model actually produced, BEFORE any guardrail cap —
+    # conviction_score above is the (possibly capped) value everything else
+    # uses; raw_conviction_score is preserved so failure-pattern mining can
+    # still see a call that WOULD have been high-conviction, instead of it
+    # silently landing in the "low conviction" bucket once capped. None when
+    # no cap applied (raw == conviction_score) or for rows that predate this.
+    raw_conviction_score: Optional[float] = None,
     # Scope & provenance. The default scope is PRIVATE: only forecast_writer.write_shared_forecast,
     # holding a market-only MarketContext, stores a row as shared_market.
     scope: str = SCOPE_PRIVATE,
@@ -511,13 +519,13 @@ def insert_prediction(
                         p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                         used_fallback, parent_merged_id,
                         trigger_type, trigger_event_id,
-                        weight_regime, weights_used, valuation_score, guardrail_flags,
+                        weight_regime, weights_used, valuation_score, guardrail_flags, raw_conviction_score,
                         scope, origin, origin_run_id, origin_time_utc, owner_scope, evidence_refs,
                         policy_version, model_used, guardrail_version, history_lineage, context_digest)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
@@ -542,6 +550,7 @@ def insert_prediction(
                     weight_regime, json.dumps(weights_used) if weights_used else None,
                     valuation_score,
                     json.dumps(guardrail_flags) if guardrail_flags else None,
+                    raw_conviction_score,
                     scope, origin, origin_run_id, origin_time_utc, owner_scope,
                     json.dumps(evidence_refs, default=str) if evidence_refs else None,
                     policy_version, model_used, guardrail_version,

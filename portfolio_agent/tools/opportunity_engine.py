@@ -21,6 +21,7 @@ import json
 from typing import Optional
 
 from portfolio_agent.tools.db import db_conn
+from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
 
 _WATCH_COMPOSITE_FLOOR = 5.5
 _CONVICTION_BONUS_SCALE = 3.0
@@ -31,23 +32,34 @@ _CONCENTRATION_BONUS_SCALE = 8.0
 
 def _latest_trending_opportunity_predictions() -> list[dict]:
     """One row per ticker (preferring the 21d horizon when present) for the
-    most recent as_of_date that has trending_opportunity predictions."""
+    most recent as_of_date that has trending_opportunity predictions.
+
+    Explicitly scope-filtered to SHARED_SCOPES: trigger_type='trending_opportunity'
+    happens to be enough on its own today only because the one other writer
+    (web/pages/4_🤖_Chat.py's private chat forecasts) never sets trigger_type —
+    an accident of the current call sites, not a guarantee. This engine ranks
+    candidates for display to the local owner from what the SHARED, market-only
+    pipeline discovered; it must never surface a private row just because a
+    future caller starts stamping trigger_type on one.
+    """
+    _sc, _sp = scope_clause(SHARED_SCOPES)
     with db_conn() as conn:
         latest_date_row = conn.execute(
-            "SELECT MAX(as_of_date) AS d FROM predictions WHERE trigger_type = 'trending_opportunity'"
+            f"SELECT MAX(as_of_date) AS d FROM predictions WHERE trigger_type = 'trending_opportunity' AND {_sc}",
+            _sp,
         ).fetchone()
         latest_date = latest_date_row["d"] if latest_date_row else None
         if not latest_date:
             return []
 
         rows = conn.execute(
-            """SELECT ticker, horizon_days, recommendation, composite_score,
+            f"""SELECT ticker, horizon_days, recommendation, composite_score,
                       fundamental_score, research_score, macro_score, news_score,
                       reasoning, reasoning_text, panel_summary, created_at
                FROM predictions
-               WHERE trigger_type = 'trending_opportunity' AND as_of_date = ?
+               WHERE trigger_type = 'trending_opportunity' AND as_of_date = ? AND {_sc}
                ORDER BY created_at DESC""",
-            (latest_date,),
+            (latest_date, *_sp),
         ).fetchall()
 
     best_by_ticker: dict[str, dict] = {}
@@ -198,14 +210,15 @@ def get_opportunity_history(ticker: str, window_days: int = 30) -> dict:
     from datetime import date, timedelta
 
     cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+    _sc, _sp = scope_clause(SHARED_SCOPES)
     with db_conn() as conn:
         rows = conn.execute(
-            """SELECT as_of_date, composite_score, recommendation
+            f"""SELECT as_of_date, composite_score, recommendation
                FROM predictions
                WHERE trigger_type = 'trending_opportunity' AND ticker = ?
-                 AND as_of_date >= ?
+                 AND as_of_date >= ? AND {_sc}
                ORDER BY as_of_date ASC""",
-            (ticker, cutoff),
+            (ticker, cutoff, *_sp),
         ).fetchall()
 
     all_rows = [dict(r) for r in rows]

@@ -118,16 +118,22 @@ def _current_evidence_refs(ticker: str) -> dict:
     from portfolio_agent.tools.market_context import MARKET_CONTEXT_VERSION, _get
     from portfolio_agent.tools.fundamentals_db import get_stored_fundamentals
     from portfolio_agent.tools.research_db import get_stored_research
+    from portfolio_agent.tools.technical_features import get_latest_technical_features
     from portfolio_agent.tools.valuation_db import get_stored_valuation
 
     fundamentals = get_stored_fundamentals(ticker)
     research = get_stored_research(ticker)
     valuation = get_stored_valuation(ticker)
+    try:
+        technical = get_latest_technical_features(ticker)
+    except Exception:
+        technical = None
     return {
         "context_version": MARKET_CONTEXT_VERSION,
         "fundamentals_as_of": _get(fundamentals, "as_of_date", "filing_date"),
         "research_as_of": _get(research, "as_of_date", "fetched_at", "updated_at"),
         "valuation_as_of": _get(valuation, "as_of_date", "computed_at"),
+        "technical_as_of": _get(technical, "data_snapshot"),
     }
 
 

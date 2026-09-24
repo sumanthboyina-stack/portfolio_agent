@@ -550,14 +550,25 @@ def _segment_stats(
     return out
 
 
+def _conv_bucket(r: dict):
+    # Bucket by raw_conviction_score (the model's pre-guardrail-cap call)
+    # when it was recorded, falling back to conviction_score (the
+    # displayed/capped value) for rows a cap never touched or that
+    # predate this column. A capped bounce/no-news call still belongs
+    # in the "high" bucket for failure-pattern mining -- otherwise the
+    # very calls the guardrail exists to catch land in "low" and the
+    # pattern that justified the guardrail becomes invisible to it.
+    h = r.get("horizon_days")
+    c = r.get("raw_conviction_score")
+    if c is None:
+        c = r.get("conviction_score")
+    if h is None or c is None:
+        return None
+    return ("conviction", h, "high" if c >= 7 else "low")
+
+
 def _mine_segment_patterns(rows: list[dict]) -> list[dict]:
     """Run _segment_stats across the dimensions with reliable columns on every row."""
-    def _conv_bucket(r):
-        h, c = r.get("horizon_days"), r.get("conviction_score")
-        if h is None or c is None:
-            return None
-        return ("conviction", h, "high" if c >= 7 else "low")
-
     def _regime(r):
         h, reg = r.get("horizon_days"), r.get("weight_regime")
         if h is None or not reg:
@@ -668,8 +679,8 @@ def weekly_pattern_analysis() -> dict:
         rows = c.execute(
             f"""SELECT ticker, horizon_days, predicted_direction, actual_direction,
                       predicted_return_low, predicted_return_high,
-                      actual_return, outcome, conviction_score, weight_regime,
-                      model_name, trigger_type, evaluated_at, error_magnitude
+                      actual_return, outcome, conviction_score, raw_conviction_score,
+                      weight_regime, model_name, trigger_type, evaluated_at, error_magnitude
                FROM predictions
                WHERE evaluation_status = 'evaluated'
                  AND evaluated_at >= ?

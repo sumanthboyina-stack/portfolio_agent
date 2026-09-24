@@ -25,7 +25,7 @@ from typing import Callable, Mapping
 from portfolio_agent.privacy import assert_market_only
 from portfolio_agent.tools.weight_engine import SUPPORTED_HORIZONS, compute_dynamic_weights
 
-MARKET_CONTEXT_VERSION = "market-context/1.0"
+MARKET_CONTEXT_VERSION = "market-context/1.1"   # bumped: payload gained "technical" (see default_loaders)
 DEFAULT_CONTEXT_HORIZONS: tuple[int, ...] = (5, 21, 63)   # interactive / unscheduled callers
 
 
@@ -64,6 +64,7 @@ def default_loaders() -> dict[str, Callable]:
     from portfolio_agent.tools.prediction_db import SHARED_SCOPES, get_prediction_history
     from portfolio_agent.tools.reasoning_tools import _get_recent_news, get_macro_snapshot
     from portfolio_agent.tools.research_db import get_stored_research
+    from portfolio_agent.tools.technical_features import get_latest_technical_features
     from portfolio_agent.tools.validation_engine import get_active_failure_patterns
     from portfolio_agent.tools.valuation_db import get_stored_valuation
 
@@ -73,12 +74,19 @@ def default_loaders() -> dict[str, Callable]:
         except Exception:
             return {}
 
+    def _technical(t: str):
+        try:
+            return get_latest_technical_features(t)
+        except Exception:
+            return None
+
     return {
         "fundamentals": get_stored_fundamentals,
         "research": get_stored_research,
         "news": lambda t: _get_recent_news(t, days=7),
         "valuation": get_stored_valuation,
         "macro": _macro,
+        "technical": _technical,
         "history": lambda t: get_prediction_history(t, limit=5, scopes=SHARED_SCOPES),
         "failure_patterns": get_active_failure_patterns,
     }
@@ -116,6 +124,10 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
     news = L["news"](ticker) or []
     valuation = L["valuation"](ticker)
     macro_snapshot = (L["macro"]() or {}) if macro_snapshot is None else macro_snapshot
+    # .get(), not [] -- optional: a caller-supplied `loaders` override (tests,
+    # mainly) that predates this loader is still valid; "technical" simply
+    # comes back None, same as if risk_technical.py had never run for this ticker.
+    technical = L.get("technical", lambda t: None)(ticker)
     history = list(L["history"](ticker) or [])
     try:
         failure_patterns = list(L["failure_patterns"]() or [])
@@ -163,6 +175,17 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
     else:
         failure_pattern_instruction = "No recurring system-wide failure patterns currently flagged."
 
+    if technical:
+        _tf = _to_dict(technical) or {}
+        technical_instruction = (
+            f"Deterministic technical indicators (computed {_tf.get('data_snapshot', '?')}, "
+            f"{_tf.get('bars_available', '?')} bars) are available in `technical.features` — "
+            "use them as corroborating evidence for momentum/trend framing; they are not part "
+            "of the weighted composite score above and never override it."
+        )
+    else:
+        technical_instruction = "No stored technical indicators for this ticker — not a portfolio holding, or not yet computed."
+
     payload = {
         "ticker": ticker,
         "fundamentals": _to_dict(fundamentals),
@@ -170,11 +193,13 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
         "news": news,
         "valuation": valuation,
         "macro_snapshot": macro_snapshot,
+        "technical": _to_dict(technical),
         "prediction_history": [_to_dict(p) for p in history],
         "data_gaps": data_gaps,
         "dynamic_weights": weight_data,
         "known_failure_patterns": failure_patterns,
         "failure_pattern_instruction": failure_pattern_instruction,
+        "technical_instruction": technical_instruction,
         "weight_instruction": (
             f"CRITICAL: Use the exact per-horizon weights from dynamic_weights.weights_by_horizon "
             f"for each horizon's composite score. Regime: {weight_data['regime']}.\n"
@@ -197,6 +222,7 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
         "fundamentals_as_of": _get(fundamentals, "as_of_date", "filing_date"),
         "research_as_of": _get(research, "as_of_date", "fetched_at", "updated_at"),
         "valuation_as_of": _get(valuation, "as_of_date", "computed_at"),
+        "technical_as_of": _get(technical, "data_snapshot"),
         "news_count": len(news),
         "news_latest": (news_dates[-1] or None) if news_dates else None,
         "macro_snapshot_at": _get(macro_snapshot, "as_of", "timestamp") or built_at,

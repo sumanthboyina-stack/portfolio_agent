@@ -62,7 +62,7 @@ def work_key(ticker: str, horizon_days: int, as_of_date: str, *, origin: str = "
     return f"{origin}|{ticker.upper()}|{horizon_days}|{as_of_date}"
 
 
-_VERSION_FIELDS = ("context_version", "fundamentals_as_of", "research_as_of", "valuation_as_of")
+_VERSION_FIELDS = ("context_version", "fundamentals_as_of", "research_as_of", "valuation_as_of", "technical_as_of")
 
 
 def plan_reuse(*, latest_shared_row: dict | None, current_evidence_refs: dict,
@@ -102,7 +102,7 @@ def plan_reuse(*, latest_shared_row: dict | None, current_evidence_refs: dict,
         if current[key] != stored[key]:
             return False, f"{label} changed ({stored[key]!r} -> {current[key]!r})", manifest
 
-    for src in ("fundamentals_as_of", "research_as_of", "valuation_as_of"):
+    for src in ("fundamentals_as_of", "research_as_of", "valuation_as_of", "technical_as_of"):
         if current[src] != stored[src]:
             return False, f"{src} source data changed ({stored[src]!r} -> {current[src]!r})", manifest
 

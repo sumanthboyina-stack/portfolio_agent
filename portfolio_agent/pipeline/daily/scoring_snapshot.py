@@ -23,17 +23,27 @@ _FINAL_WEIGHTS = {"apex": 0.30, "valuation": 0.20, "opportunity": 0.30, "portfol
 def _todays_prediction_rows(today: str) -> list[dict]:
     """One row per ticker (most recently created) with an as_of_date == today,
     regardless of trigger_type — covers portfolio holdings and Opportunity
-    Engine candidates alike."""
-    from portfolio_agent.tools.db import db_conn
+    Engine candidates alike.
 
+    Explicitly scoped to SHARED_SCOPES: this had NO scope filter at all
+    (not even a trigger_type restriction) — any private row (a chat
+    forecast) with today's as_of_date would have been picked up. The
+    calibration snapshot this feeds is a SHARED, pipeline-wide record;
+    it must never fold in a private forecast just because a caller writes
+    one with today's date.
+    """
+    from portfolio_agent.tools.db import db_conn
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
+
+    _sc, _sp = scope_clause(SHARED_SCOPES)
     with db_conn() as conn:
         rows = conn.execute(
-            """SELECT ticker, composite_score, valuation_score, recommendation,
+            f"""SELECT ticker, composite_score, valuation_score, recommendation,
                       reasoning, reasoning_text, panel_summary, created_at
                FROM predictions
-               WHERE as_of_date = ?
+               WHERE as_of_date = ? AND {_sc}
                ORDER BY created_at DESC""",
-            (today,),
+            (today, *_sp),
         ).fetchall()
 
     best_by_ticker: dict[str, dict] = {}

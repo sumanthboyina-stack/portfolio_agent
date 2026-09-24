@@ -687,6 +687,8 @@ class Prediction(_DictCompat):
     context_digest: str | None = None
     trigger_type: str | None = None
     trigger_event_id: int | None = None
+    guardrail_flags: list = field(default_factory=list)
+    raw_conviction_score: float | None = None
 
     def __post_init__(self) -> None:
         self.ticker = self.ticker.upper().strip()
@@ -776,6 +778,8 @@ class Prediction(_DictCompat):
             context_digest=row.get("context_digest"),
             trigger_type=row.get("trigger_type"),
             trigger_event_id=_safe_int(row.get("trigger_event_id")),
+            guardrail_flags=_parse_json_list(row.get("guardrail_flags")),
+            raw_conviction_score=_safe_float(row.get("raw_conviction_score")),
         )
 
     @property
@@ -851,6 +855,8 @@ class Prediction(_DictCompat):
             "context_digest": self.context_digest,
             "trigger_type": self.trigger_type,
             "trigger_event_id": self.trigger_event_id,
+            "guardrail_flags": self.guardrail_flags,
+            "raw_conviction_score": self.raw_conviction_score,
         }
 
 

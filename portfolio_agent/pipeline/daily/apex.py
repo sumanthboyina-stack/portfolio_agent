@@ -344,13 +344,23 @@ async def _run_daily_apex(
                 dist   = h_data.get("distribution") or {}
 
                 _pred_dir = h_data.get("predicted_direction")
+                _raw_conviction = h_data.get("conviction_score")
                 _conviction, _flags = _apply_conviction_guardrails(
-                    _pred_dir, h_data.get("conviction_score"), _has_news, _trailing_10d,
+                    _pred_dir, _raw_conviction, _has_news, _trailing_10d,
                 )
+
+                # A row's own dict, not the shared _common (which is reused across
+                # every horizon of this ticker) -- composite_score is capped ONLY
+                # for the horizon(s) the guardrail actually fired on.
+                _row = dict(_common)
                 if _flags:
+                    _orig_composite = _row.get("composite_score")
+                    if _orig_composite is not None:
+                        _row["composite_score"] = min(float(_orig_composite), _conviction)
                     log.warning(
                         f"  [guardrail] {ticker} {h_days}d — conviction capped "
-                        f"({h_data.get('conviction_score')} → {_conviction}): {', '.join(_flags)}",
+                        f"({_raw_conviction} → {_conviction}), composite_score capped "
+                        f"({_orig_composite} → {_row.get('composite_score')}): {', '.join(_flags)}",
                         event_type="warning", ticker=ticker,
                     )
 
@@ -360,12 +370,20 @@ async def _run_daily_apex(
                 )
                 save   = write_shared_forecast(
                     mctx_map[ticker], _prov,
-                    **_common,
+                    **_row,
                     horizon_days=h_days,
                     predicted_direction=_pred_dir,
                     predicted_return_low=h_data.get("predicted_return_low"),
                     predicted_return_high=h_data.get("predicted_return_high"),
                     conviction_score=_conviction,
+                    # Preserved even though the DISPLAYED/stored conviction_score
+                    # above is capped -- so failure-pattern mining can still find
+                    # this call in the high-conviction bucket it actually belongs
+                    # in (see validation_engine._split_by_conviction_for_mining).
+                    # None (not just equal to conviction_score) when no cap fired,
+                    # so a reader can tell "never capped" apart from "capped to
+                    # exactly its own raw value" by coincidence.
+                    raw_conviction_score=_raw_conviction if _flags else None,
                     reasoning_text=h_data.get("reasoning_text") or data.get("reasoning", ""),
                     start_price=price_map.get(ticker),
                     p_strong_down=dist.get("strong_down"),

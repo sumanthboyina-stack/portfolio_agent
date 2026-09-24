@@ -231,6 +231,33 @@ def get_stored_technical_features(ticker: str, data_snapshot: str, *, interval: 
     return d
 
 
+def get_latest_technical_features(ticker: str, *, interval: str = "1d", lookback: str = "1y",
+                                  adjustment_method: str = "auto_adjust",
+                                  calculation_version: str = CALCULATION_VERSION) -> dict | None:
+    """
+    Read-only reuse for a caller that doesn't know the exact data_snapshot in
+    advance (e.g. market_context building a prompt) — the most recent stored
+    row for (ticker, interval, lookback, adjustment_method, calculation_version),
+    regardless of which trading day produced it. Never fetches or computes;
+    None means nothing has been stored yet for this key (risk_technical.py's
+    phase hasn't run for this ticker, or it's not a portfolio holding).
+    """
+    with _db() as conn:
+        row = conn.execute(
+            """SELECT * FROM technical_features
+               WHERE ticker = ? AND interval = ? AND lookback = ?
+                     AND adjustment_method = ? AND calculation_version = ?
+               ORDER BY data_snapshot DESC LIMIT 1""",
+            (ticker.upper(), interval, lookback, adjustment_method, calculation_version),
+        ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["coverage"] = json.loads(d["coverage"])
+    d["features"] = json.loads(d["features"])
+    return d
+
+
 def fetch_and_store_technical_features(ticker: str, *, interval: str = "1d", lookback: str = "1y",
                                        adjustment_method: str = "auto_adjust",
                                        calculation_version: str = CALCULATION_VERSION,
