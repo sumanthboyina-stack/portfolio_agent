@@ -10,6 +10,13 @@ Single-user deployments resolve everything to LOCAL_OWNER via local_context();
 the interface is the same one a multi-user host would construct after
 authenticating a session, so adding users does not change any service method.
 
+Batch and CLI callers keep using local_context() / system_context() — nothing
+about those changes. Web requests instead go through web_context(), built
+from an Identity that identity_from_verified_login() mints once web/auth.py
+has confirmed both a real OIDC login (Streamlit's st.login) and an enabled
+row in the auth allow-list (auth_users_db.resolve_login). See web/auth.py —
+identity_from_verified_login() must not be called from anywhere else.
+
 Identity / verify_identity()
 -----------------------------
 Identity is the immutable, internal representation of "who is calling,"
@@ -136,3 +143,23 @@ def local_context(source: str) -> RequestContext:
 def system_context(source: str) -> RequestContext:
     """Context for unattended jobs (price refresh, batches). Acts within the local owner's portfolio."""
     return RequestContext(identity=verify_identity(), source=f"{SYSTEM_ACTOR}:{source}")
+
+
+def identity_from_verified_login(owner: str) -> Identity:
+    """
+    Mint an Identity for a verified web login. Called ONLY by web/auth.py,
+    and only after Streamlit's OIDC login has succeeded (st.user.is_logged_in)
+    AND auth_users_db.resolve_login() matched an enabled allow-list row for it.
+
+    owner comes from that matched row (AuthUser.owner) — never from the
+    request, the id token, or anything else the browser supplies. The row
+    lookup by (issuer, subject) is what verifies the caller; owner is just
+    which existing internal account that verified caller maps to.
+    """
+    return Identity(subject=owner, _proof=_VERIFIED)
+
+
+def web_context(identity: Identity, source: str) -> RequestContext:
+    """Context for an authenticated web request. identity must come from
+    identity_from_verified_login() — see web/auth.py."""
+    return RequestContext(identity=identity, source=source)
