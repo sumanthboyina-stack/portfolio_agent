@@ -3,11 +3,29 @@ Portfolio-level risk math: correlation between holdings, aggregate sector
 exposure, beta vs a market benchmark, and issuer concentration (multiple
 tickers mapping to the same SEC-registered issuer, e.g. GOOG/GOOGL).
 
-Pure computation (pandas, one yfinance pull) — no LLM. The per-ticker Risk
-specialist's tools can only see one ticker at a time and can't derive any of
-this; this module computes it once for the whole portfolio and the daily
-pipeline folds the result into the Risk specialist's prompt as pre-computed
-context.
+Pure computation (pandas) — no LLM. The per-ticker Risk specialist's tools
+can only see one ticker at a time and can't derive any of this; this module
+computes it once for the whole portfolio and the daily pipeline folds the
+result into the Risk specialist's prompt as pre-computed context.
+
+Acquisition vs. numerical core
+-------------------------------
+Each public compute_* function is a thin wrapper: it resolves which tickers
+it needs, fetches their raw close series via tools.price_acquisition (shared,
+deduplicated across overlapping instrument requests — including between
+these three functions themselves, when called back-to-back for the same
+portfolio, as scenarios/prepare.py does), and hands them to a private _core
+function that does 100% of the actual math. The _core functions take
+supplied prices only — no network call, no yfinance import — and are what
+should be called directly by anything that already has price data (tests,
+or a future caller with its own acquisition).
+
+_BENCHMARK-aligned RETURNS (the price_df.dropna(how="any") result each _core
+builds) are NOT shared or cached anywhere: which rows survive that alignment
+depends on exactly which tickers are in THIS caller's holdings, so a
+portfolio-A-aligned frame is not valid for portfolio B even if both hold
+several of the same tickers. Only the raw, per-ticker, pre-alignment series
+from price_acquisition are shared.
 """
 
 from __future__ import annotations
@@ -16,6 +34,19 @@ from typing import Optional
 
 _BENCHMARK = "SPY"
 _LOOKBACK  = "6mo"
+_MIN_ROWS  = 20
+
+
+def _fetch_closes(fetch_list: list[str]) -> dict:
+    """Shared, deduplicated acquisition. Empty dict on total failure — every
+    _core function already treats "not enough valid tickers" as its normal
+    best-effort empty/None result, so no extra handling is needed here."""
+    from portfolio_agent.tools import price_acquisition
+    try:
+        return price_acquisition.fetch_price_series(
+            fetch_list, period=_LOOKBACK, interval="1d", auto_adjust=True, min_rows=_MIN_ROWS)
+    except Exception:
+        return {}
 
 
 def _sectors_of_and_totals(
@@ -69,32 +100,18 @@ def compute_portfolio_risk_context(holdings: list[dict]) -> dict[str, dict]:
     Best-effort: needs at least 2 holdings with fetchable price history.
     Returns {} on any failure — caller falls back to per-ticker-only analysis.
     """
-    import pandas as pd
-    import yfinance as yf
-
-    from portfolio_agent.tools.edgar_check import _load_cik_map
-
     tickers = sorted({str(h["ticker"]).upper() for h in holdings if h.get("ticker")})
     if len(tickers) < 2:
         return {}
+    closes = _fetch_closes(tickers + [_BENCHMARK])
+    return _portfolio_risk_context_core(holdings, tickers, closes)
 
-    fetch_list = tickers + [_BENCHMARK]
-    try:
-        raw = yf.download(
-            fetch_list, period=_LOOKBACK, interval="1d",
-            auto_adjust=True, progress=False, group_by="ticker",
-        )
-    except Exception:
-        return {}
 
-    closes: dict[str, "pd.Series"] = {}
-    for t in fetch_list:
-        try:
-            s = raw[t]["Close"].dropna()
-            if len(s) >= 20:
-                closes[t] = s
-        except Exception:
-            continue
+def _portfolio_risk_context_core(holdings: list[dict], tickers: list[str], closes: dict) -> dict[str, dict]:
+    """Pure: no network call. closes is {ticker: pandas.Series of adjusted closes}."""
+    import pandas as pd
+
+    from portfolio_agent.tools.edgar_check import _load_cik_map
 
     valid = [t for t in tickers if t in closes]
     if len(valid) < 2:
@@ -237,33 +254,19 @@ def compute_portfolio_aggregate_metrics(holdings: list[dict]) -> Optional[dict]:
     (3.8 means +3.8%); portfolio_volatility_annualized and
     avg_pairwise_correlation are decimal fractions (0.15 means 15%).
     """
-    import numpy as np
-    import pandas as pd
-    import yfinance as yf
-
-    from portfolio_agent.tools.prediction_db import get_all_latest_predictions
-
     tickers = sorted({str(h["ticker"]).upper() for h in holdings if h.get("ticker")})
     if len(tickers) < 2:
         return None
+    closes = _fetch_closes(tickers + [_BENCHMARK])
+    return _portfolio_aggregate_metrics_core(holdings, tickers, closes)
 
-    fetch_list = tickers + [_BENCHMARK]
-    try:
-        raw = yf.download(
-            fetch_list, period=_LOOKBACK, interval="1d",
-            auto_adjust=True, progress=False, group_by="ticker",
-        )
-    except Exception:
-        return None
 
-    closes: dict[str, "pd.Series"] = {}
-    for t in fetch_list:
-        try:
-            s = raw[t]["Close"].dropna()
-            if len(s) >= 20:
-                closes[t] = s
-        except Exception:
-            continue
+def _portfolio_aggregate_metrics_core(holdings: list[dict], tickers: list[str], closes: dict) -> Optional[dict]:
+    """Pure: no network call. closes is {ticker: pandas.Series of adjusted closes}."""
+    import numpy as np
+    import pandas as pd
+
+    from portfolio_agent.tools.prediction_db import get_all_latest_predictions
 
     valid = [t for t in tickers if t in closes]
     if len(valid) < 2:
@@ -372,12 +375,6 @@ def compute_hypothetical_addition_impact(
     anything meaningful (mirrors compute_portfolio_risk_context's contract).
     Individual fields inside the dict may still be None on partial data.
     """
-    import pandas as pd
-    import yfinance as yf
-
-    from portfolio_agent.tools.universe_db import get_sectors
-    from portfolio_agent.tools.prediction_db import get_all_latest_predictions
-
     ticker = ticker.upper()
     # Excluding the ticker from its own comparison set matters when it's already a
     # holding (e.g. scoring an existing position's fit) — otherwise it's compared
@@ -389,22 +386,17 @@ def compute_hypothetical_addition_impact(
         return None
 
     fetch_list = list(dict.fromkeys(holding_tickers + [ticker, _BENCHMARK]))
-    try:
-        raw = yf.download(
-            fetch_list, period=_LOOKBACK, interval="1d",
-            auto_adjust=True, progress=False, group_by="ticker",
-        )
-    except Exception:
-        return None
+    closes = _fetch_closes(fetch_list)
+    return _hypothetical_addition_impact_core(ticker, holdings, holding_tickers, position_pct, closes)
 
-    closes: dict[str, "pd.Series"] = {}
-    for t in fetch_list:
-        try:
-            s = raw[t]["Close"].dropna()
-            if len(s) >= 20:
-                closes[t] = s
-        except Exception:
-            continue
+
+def _hypothetical_addition_impact_core(ticker: str, holdings: list[dict], holding_tickers: list[str],
+                                       position_pct: float, closes: dict) -> Optional[dict]:
+    """Pure: no network call. closes is {ticker: pandas.Series of adjusted closes}."""
+    import pandas as pd
+
+    from portfolio_agent.tools.universe_db import get_sectors
+    from portfolio_agent.tools.prediction_db import get_all_latest_predictions
 
     if ticker not in closes:
         return None

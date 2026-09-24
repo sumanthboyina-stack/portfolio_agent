@@ -37,10 +37,40 @@ async def ensure_morning_ran_today(extra_tickers: list[str] | None = None) -> bo
     so a missed/failed Morning run (cron hiccup, laptop asleep) self-heals
     instead of silently operating on stale or absent data.
 
-    Returns True if Morning was run here.
+    Deduplicated: Intraday and Evening can both reach here for the same
+    missed morning (a genuine race, not just a hypothetical one — both call
+    this at startup). Uses tools.generation_jobs_db's lease so only the
+    caller that wins the claim actually runs Morning; a caller that loses
+    the race returns False immediately rather than running it a second time
+    concurrently. Explicit service identity throughout (system_context), not
+    an implicit default.
+
+    Returns True if Morning was run HERE (by this call).
     """
     from portfolio_agent.tools.progress_tracker import has_completed_today
     if has_completed_today("morning"):
+        return False
+
+    from portfolio_agent.services.context import system_context
+    from portfolio_agent.tools import generation_jobs_db as jobs
+    from datetime import date as _date
+
+    worker_id = system_context("batch.morning.ensure_ran_today").actor
+    work_key = f"morning-recovery|{_date.today().isoformat()}"
+    # Deliberately NOT completed/released after the run: the lease's job is to
+    # cover the (short) window where two callers could both see "hasn't
+    # completed yet" and both start Morning — has_completed_today() is the
+    # authoritative, longer-lived guard once Morning actually finishes and
+    # flips it. A long lease here means a later same-day caller that somehow
+    # still sees has_completed_today()==False (a genuinely stuck/still-running
+    # Morning) also stays blocked from starting a SECOND concurrent run,
+    # rather than the lease expiring and inviting a duplicate.
+    lease_id = jobs.claim_job(work_key, worker_id, lease_seconds=3600.0)
+    if lease_id is None:
+        _get_logger("batch.morning").info(
+            "  Morning recovery already claimed by another caller today — skipping.",
+            event_type="info",
+        )
         return False
 
     log = _get_logger("batch.morning")
@@ -57,6 +87,15 @@ async def ensure_morning_ran_today(extra_tickers: list[str] | None = None) -> bo
     os.environ["PIPELINE_RUN_ID"] = f"{_dt.now():%Y%m%d_%H%M%S}_morning"
     try:
         await run_batch_morning(extra_tickers=extra_tickers)
+        # Deliberately left 'claimed' (not completed) on success — see the
+        # comment above claim_job(): staying claimed for the rest of the
+        # lease is what keeps a second same-day caller blocked.
+    except Exception:
+        # On failure, release immediately so a retry isn't blocked for the
+        # rest of the lease window — has_completed_today() will still be
+        # False, so the next caller should be allowed to try again.
+        jobs.complete_job(work_key, worker_id, lease_id, status=jobs.STATUS_FAILED)
+        raise
     finally:
         if _orig_run_id:
             os.environ["PIPELINE_RUN_ID"] = _orig_run_id

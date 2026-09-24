@@ -271,7 +271,9 @@ with st.form("profile_form"):
                 help="Only these horizons get per-horizon weights and predictions. Weighting math is unchanged.",
             )
 
-            submitted = st.form_submit_button("Save profile", type="primary", icon=material("save"))
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+    submitted = st.form_submit_button("Save profile", type="primary", icon=material("save"))
+
 if submitted:
     values = {
         "display_name": display_name.strip() or None,

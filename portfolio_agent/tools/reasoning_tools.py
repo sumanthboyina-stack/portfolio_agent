@@ -3,13 +3,15 @@ Context loader and live-fallback helpers for the APEX reasoning agent.
 
 fill_data_gaps(ticker, ctx)        — runs live specialist agents for any missing data
 get_macro_snapshot()               — lightweight yfinance pull of key macro indicators (no LLM)
-get_full_analysis_context(ticker)  — combined single-call: all DB data + macro + dynamic weights
+get_full_analysis_context(ticker)  — market-only context JSON (wrapper over tools.market_context)
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 
@@ -336,6 +338,44 @@ def get_macro_snapshot() -> str:
     return json.dumps(snapshot, default=str)
 
 
+# ── Versioned, shareable macro snapshot ───────────────────────────────────────
+#
+# get_macro_snapshot() above is ticker-independent, yet market_context.py was
+# calling it once per ticker (once per build_market_context call) — for a
+# batch of N tickers, N redundant fetches of the exact same macro/FRED data.
+# MacroSnapshot + fetch_macro_snapshot() let a caller fetch ONCE and inject
+# the same snapshot into every ticker's context (see
+# market_context.build_market_context(..., macro_snapshot=...) and
+# pipeline.daily.apex, which now does exactly this for a batch run).
+
+MACRO_SNAPSHOT_VERSION = "macro-snapshot/1.0"   # the SHAPE/algorithm of the payload, not when it was fetched
+
+
+@dataclass(frozen=True)
+class MacroSnapshot:
+    payload: dict
+    fetched_at: str                             # UTC ISO — separate from `version` on purpose
+    version: str = MACRO_SNAPSHOT_VERSION
+    digest: str = ""
+
+
+def fetch_macro_snapshot() -> MacroSnapshot:
+    """
+    One live macro pull (yfinance + FRED), wrapped with a fetched_at timestamp
+    and a content digest. This function still does the full fetch every time
+    it's called — sharing ONE result across many tickers is the caller's job
+    (call this once, pass the resulting dict into every build_market_context
+    call), not something this function does on its own.
+    """
+    payload = json.loads(get_macro_snapshot())
+    text = json.dumps(payload, default=str, sort_keys=True)
+    return MacroSnapshot(
+        payload=payload,
+        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        digest=hashlib.sha256(text.encode()).hexdigest()[:16],
+    )
+
+
 # ── DB readers ────────────────────────────────────────────────────────────────
 
 def _get_recent_news(ticker: str, days: int = 7) -> list[dict]:
@@ -582,137 +622,14 @@ def get_full_analysis_context(
     horizons: list[int] | None = None,
 ) -> str:
     """
-    Load ALL data needed by the APEX reasoning agent in a single call:
-      1. Stored fundamentals, research, news (7d), prediction history
-      2. Live macro snapshot (yfinance, no LLM)
-      3. Pre-computed dynamic weights — one set per scheduled horizon
+    Market-only context for the APEX reasoning agent as a JSON string — a thin
+    wrapper over portfolio_agent.tools.market_context.build_market_context.
 
-    horizons: the horizon_days list for today's run (e.g. [5], [21], [5, 21, 63]).
-    Defaults to [5, 21, 63] when called from the interactive chat path.
-
-    The weights are deterministically computed by Python — the LLM must use
-    the returned weights verbatim in the synthesis step.
-
-    Returns a single JSON string.
+    horizons: explicit horizon_days for this run (e.g. [5], [21], [5, 21, 63]).
+    Defaults to DEFAULT_CONTEXT_HORIZONS for interactive callers. No user
+    profile, holdings or chat state is consulted here; callers that need the
+    provenance (evidence references, history lineage, digest) should call
+    build_market_context directly and keep the MarketContext.
     """
-    from portfolio_agent.tools.fundamentals_db import get_stored_fundamentals
-    from portfolio_agent.tools.research_db import get_stored_research
-    from portfolio_agent.tools.prediction_db import get_prediction_history
-    from portfolio_agent.tools.valuation_db import get_stored_valuation
-    from portfolio_agent.tools.weight_engine import compute_dynamic_weights
-    from portfolio_agent.tools.validation_engine import get_active_failure_patterns
-
-    if horizons is None:
-        horizons = [5, 21, 63]
-
-    ticker = ticker.upper()
-
-    # ── 1. Load DB data ───────────────────────────────────────────────────────
-    fundamentals        = get_stored_fundamentals(ticker)
-    research            = get_stored_research(ticker)
-    news                = _get_recent_news(ticker, days=7)
-    prediction_history  = get_prediction_history(ticker, limit=5)
-    valuation           = get_stored_valuation(ticker)
-
-    data_gaps = []
-    if not fundamentals:
-        data_gaps.append("fundamentals")
-    if not research:
-        data_gaps.append("research")
-    if not news:
-        data_gaps.append("news")
-    if not valuation:
-        data_gaps.append("valuation")
-
-    # ── 2. Macro snapshot (live, no LLM) ─────────────────────────────────────
-    macro_snapshot: dict = {}
-    try:
-        macro_snapshot = json.loads(get_macro_snapshot())
-    except Exception:
-        pass
-
-    # ── 3. Dynamic weights — per horizon + shared signal context ─────────────
-    weight_data = compute_dynamic_weights(
-        ticker=ticker,
-        news_data=news,
-        research_data=research,
-        macro_snapshot=macro_snapshot,
-        fundamentals_data=fundamentals,
-        horizons=horizons,
-        valuation_data=valuation,
-    )
-
-    # Build score-cap instruction for the LLM
-    caps = weight_data.get("data_caps", {})
-    cap_lines = [
-        f"{domain} ≤ {cap} (no data in DB — analyst must state 'No {domain} data')"
-        for domain, cap in caps.items()
-        if cap < 10
-    ]
-    cap_instruction = (
-        "SCORE CAPS (mandatory — scores must not exceed these values): "
-        + "; ".join(cap_lines)
-        if cap_lines else "All data sources populated — no score caps."
-    )
-
-    # Per-horizon weight summaries for the weight instruction
-    wbh = weight_data.get("weights_by_horizon") or {}
-
-    def _pct(v: float) -> str:
-        return f"{round(v * 100)}%"
-
-    horizon_weight_lines = [
-        f"  {h}d: News {_pct(w['news'])} · Research {_pct(w['research'])} · "
-        f"Macro {_pct(w['macro'])} · Fundamentals {_pct(w['fundamentals'])} · "
-        f"Valuation {_pct(w['valuation'])}"
-        for h, w in sorted(wbh.items())
-    ]
-    horizon_weight_str = "\n".join(horizon_weight_lines) if horizon_weight_lines else "(none)"
-
-    # ── 4. Known system-wide failure patterns (Layer 3 validation output) ────
-    # Segments that recurred across >=2 weekly validation reports (see
-    # validation_engine.get_active_failure_patterns) — statistically confirmed
-    # biases from past predictions across ALL tickers, not just this one.
-    try:
-        known_failure_patterns = get_active_failure_patterns()
-    except Exception:
-        known_failure_patterns = []
-
-    if known_failure_patterns:
-        failure_pattern_instruction = (
-            "MANDATORY — KNOWN RECURRING FAILURE PATTERNS (statistically confirmed "
-            "across multiple weekly validation reports): check whether this ticker's "
-            "current weight_regime, horizon, or conviction band matches any pattern below. "
-            "If it matches, say so explicitly and do not exceed conviction 5 for that "
-            "horizon unless you can articulate a concrete, ticker-specific reason this "
-            "case differs from the historical pattern.\n"
-            + "\n".join(
-                f"  - {p['description']} (seen in {p['weeks_seen']} weekly reports; "
-                f"accuracy {p.get('latest_accuracy', '?')} vs baseline "
-                f"{p.get('latest_baseline_accuracy', '?')})"
-                for p in known_failure_patterns
-            )
-        )
-    else:
-        failure_pattern_instruction = "No recurring system-wide failure patterns currently flagged."
-
-    return json.dumps({
-        "ticker":             ticker,
-        "fundamentals":       _safe_to_dict(fundamentals),
-        "research":           _safe_to_dict(research),
-        "news":               news,
-        "valuation":          valuation,
-        "macro_snapshot":     macro_snapshot,
-        "prediction_history": [_safe_to_dict(p) for p in prediction_history],
-        "data_gaps":          data_gaps,
-        "dynamic_weights":    weight_data,
-        "known_failure_patterns":     known_failure_patterns,
-        "failure_pattern_instruction": failure_pattern_instruction,
-        "weight_instruction": (
-            f"CRITICAL: Use the exact per-horizon weights from "
-            f"dynamic_weights.weights_by_horizon for each horizon's composite score. "
-            f"Regime: {weight_data['regime']}.\n"
-            f"Per-horizon weights:\n{horizon_weight_str}\n"
-            f"{cap_instruction}"
-        ),
-    }, default=str)
+    from portfolio_agent.tools.market_context import DEFAULT_CONTEXT_HORIZONS, build_market_context
+    return build_market_context(ticker, horizons or list(DEFAULT_CONTEXT_HORIZONS)).to_json()

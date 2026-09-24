@@ -38,18 +38,23 @@ def _apply_conviction_guardrails(
         (trailing 10d return -2.34% for wrong UP calls vs -0.32% for correct)
     Mirrors the data_caps pattern in weight_engine.py (capping fundamentals/
     research scores to 5 when data is missing), extended to conviction.
+    Thresholds/caps are administrator-configurable (Settings → Engine Weights,
+    portfolio_agent.tools.engine_settings_db); these numbers are the seed defaults.
     """
+    from portfolio_agent.tools.weight_engine import effective_settings
+
     flags: list[str] = []
     if conviction_score is None or predicted_direction != "UP":
         return conviction_score, flags
 
+    s = effective_settings()
     capped = conviction_score
-    if not has_news and capped >= 7:
-        capped = min(capped, 5)
+    if not has_news and capped >= s["no_news_conviction_threshold"]:
+        capped = min(capped, s["no_news_cap"])
         flags.append("no_news_bullish_capped")
 
-    if trailing_10d_return is not None and trailing_10d_return < -0.05:
-        capped = min(capped, 5)
+    if trailing_10d_return is not None and trailing_10d_return < s["bounce_return_threshold"]:
+        capped = min(capped, s["bounce_cap"])
         flags.append("bounce_thesis_capped")
 
     return capped, flags
@@ -69,10 +74,13 @@ async def _run_daily_apex(
         when None, falls back to get_scheduled_horizons() (legacy / --force-all path).
     """
     log = _get_logger("apex")
-    from portfolio_agent.tools.reasoning_tools import get_full_analysis_context
+    from portfolio_agent.tools.market_context import build_market_context
+    from portfolio_agent.tools.forecast_writer import (
+        GUARDRAIL_VERSION, ForecastProvenance, prompt_policy_version, write_shared_forecast,
+    )
     from portfolio_agent.tools.prediction_db import (
-        insert_prediction, get_latest_prediction,
-        is_trading_day, get_scheduled_horizons, get_today_horizons,
+        SHARED_SCOPES, get_latest_prediction,
+        is_trading_day, get_scheduled_horizons, get_today_horizons, event_already_processed,
     )
     from portfolio_agent.tools.yfinance_tools import (
         get_close as _get_close,
@@ -113,10 +121,32 @@ async def _run_daily_apex(
         if ticker in seen_pt:
             continue
         seen_pt.add(ticker)
-        done_horizons = get_today_horizons(ticker, today)
+        _trig_type, _trig_event_id = trigger_map.get(ticker, (None, None))
+
+        if _trig_event_id is not None:
+            # Event-driven: a specific, identified event must never be
+            # suppressed just because SOME horizon already got a row today
+            # for an unrelated reason (routine morning cadence, an earlier
+            # event) — that was the "date-only suppression" bug. Only
+            # skip if THIS exact event has already produced a row.
+            if event_already_processed(ticker, _trig_event_id, today, scopes=SHARED_SCOPES):
+                log.info(
+                    f"  [skip] {ticker} — event {_trig_event_id} already processed today",
+                    event_type="info",
+                )
+            else:
+                log.info(
+                    f"  {ticker} — new event {_trig_event_id} ({_trig_type}), generating "
+                    f"regardless of any earlier same-day generation",
+                    event_type="info",
+                )
+                to_predict.append(ticker)
+            continue
+
+        done_horizons = get_today_horizons(ticker, today, scopes=SHARED_SCOPES)   # private rows never suppress shared generation
         missing       = [h for h in scheduled_horizons if h not in done_horizons]
         if not missing:
-            latest = get_latest_prediction(ticker)
+            latest = get_latest_prediction(ticker, scopes=SHARED_SCOPES)
             log.info(
                 f"  [skip] {ticker} — all horizons {scheduled_horizons} already saved today "
                 f"({latest['recommendation'] if latest else '?'})",
@@ -152,34 +182,48 @@ async def _run_daily_apex(
         f"  Pre-fetching APEX contexts for {len(to_predict)} tickers (parallel)…",
         event_type="fetch_start",
     )
-    ctx_map:    dict[str, str]   = {}
+    ctx_map:    dict[str, str]   = {}      # prompt JSON per ticker
+    mctx_map:   dict[str, object] = {}     # the MarketContext (provenance) per ticker
     price_map:  dict[str, float] = {}
     ctx_failed: list[str]        = []
+    policy_version = prompt_policy_version()
 
-    def _fetch_ctx(t: str) -> tuple[str, str | None, float | None]:
+    # One macro pull for the whole batch — macro data is ticker-independent, so
+    # every ticker's context below shares this exact snapshot instead of each
+    # of the (up to dozens of) parallel _fetch_ctx calls re-fetching it.
+    from portfolio_agent.tools.reasoning_tools import fetch_macro_snapshot
+    try:
+        shared_macro = fetch_macro_snapshot().payload
+    except Exception:
+        shared_macro = {}   # market_context falls back to its own per-call loader below
+
+    def _fetch_ctx(t: str) -> tuple[str, object | None, float | None, str | None]:
         ctx   = None
         price = None
+        err   = None
         try:
-            ctx = get_full_analysis_context(t, horizons=scheduled_horizons)
-        except Exception:
-            pass
+            ctx = build_market_context(t, horizons=scheduled_horizons,
+                                       macro_snapshot=shared_macro or None)
+        except Exception as exc:              # includes PrivateDataLeak: the ticker is skipped, never degraded to shared
+            err = type(exc).__name__
         try:
             price = _get_close(t, today)
         except Exception:
             pass
-        return t, ctx, price
+        return t, ctx, price, err
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         futs = {pool.submit(_fetch_ctx, t): t for t in to_predict}
         for f in _as_completed(futs):
-            t, ctx, price = f.result()
-            if ctx:
-                ctx_map[t] = ctx
+            t, ctx, price, err = f.result()
+            if ctx is not None:
+                mctx_map[t] = ctx
+                ctx_map[t] = ctx.to_json()
                 if price is not None:
                     price_map[t] = price
             else:
                 log.warning(
-                    f"  [warn] Context pre-fetch failed for {t} — skipping",
+                    f"  [warn] Context pre-fetch failed for {t} ({err or 'unknown'}) — skipping",
                     event_type="warning",
                 )
                 ctx_failed.append(t)
@@ -268,7 +312,7 @@ async def _run_daily_apex(
                 valuation_score=data.get("valuation_score"),
             )
 
-            done_today       = get_today_horizons(ticker, today)
+            done_today       = get_today_horizons(ticker, today, scopes=SHARED_SCOPES)
             horizons_data    = data.get("horizons") or []
             horizons_by_days = {
                 h.get("horizon_days"): h for h in horizons_data
@@ -276,9 +320,16 @@ async def _run_daily_apex(
             }
             saved_count   = 0
             save_errors: list[str] = []
-            horizons_needed = [h for h in scheduled_horizons if h not in done_today]
 
             _trig_type, _trig_ev_id = trigger_map.get(ticker, (None, None))
+            # This ticker reached generation for an event-driven reason (see
+            # the pre-fetch skip logic above, which already confirmed THIS
+            # event hasn't produced a row yet) -- the generic "done today"
+            # check must not suppress it again here just because an earlier,
+            # unrelated row exists for the same horizon. Non-event-driven
+            # tickers keep the original per-horizon dedup.
+            done_today_for_save = set() if _trig_ev_id is not None else done_today
+            horizons_needed = [h for h in scheduled_horizons if h not in done_today_for_save]
 
             _has_news = bool(_ctx_parsed.get("news"))
             try:
@@ -287,7 +338,7 @@ async def _run_daily_apex(
                 _trailing_10d = None
 
             for h_days in scheduled_horizons:
-                if h_days in done_today:
+                if h_days in done_today_for_save:
                     continue
                 h_data = horizons_by_days.get(h_days, {})
                 dist   = h_data.get("distribution") or {}
@@ -303,7 +354,12 @@ async def _run_daily_apex(
                         event_type="warning", ticker=ticker,
                     )
 
-                save   = insert_prediction(
+                _prov = ForecastProvenance(
+                    origin="pipeline.apex", model_used=f"{model_prov_used}:{model_label_used}",
+                    policy_version=policy_version, guardrail_version=GUARDRAIL_VERSION,
+                )
+                save   = write_shared_forecast(
+                    mctx_map[ticker], _prov,
                     **_common,
                     horizon_days=h_days,
                     predicted_direction=_pred_dir,

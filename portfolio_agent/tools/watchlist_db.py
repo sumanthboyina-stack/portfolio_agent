@@ -2,11 +2,16 @@
 Watchlist database — manually curated tickers tracked for daily pipeline coverage.
 
 Table (watchlist):
-  ticker, added_at
+  ticker, added_at, owner
 
 The watchlist is manual-only: tickers are added/removed via the Watchlist
 Manager screen or the Opportunity Engine's "Add to Watchlist" button.
 Nothing in the pipeline auto-promotes tickers here.
+
+owner is backfilled to LOCAL_OWNER on any pre-existing row (idempotent). The
+existing global functions below are unchanged (still what the pipeline and UI
+use); load_watchlist_tickers_for(ctx) is the new authorized read path — see
+the Phase 2 report's inventory for what still reads the unscoped path.
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ from pathlib import Path
 
 import yaml
 
-from portfolio_agent.tools.db import DB_PATH, db_conn
+from portfolio_agent.domain import LOCAL_OWNER
+from portfolio_agent.tools.db import DB_PATH, db_conn, migrate_columns
 
 _LEGACY_YAML = Path(__file__).resolve().parents[2] / "config" / "watchlist.yaml"
 
@@ -37,7 +43,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
             ticker   TEXT PRIMARY KEY,
-            added_at TEXT NOT NULL
+            added_at TEXT NOT NULL,
+            owner    TEXT
         )
     """)
 
@@ -49,7 +56,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     the YAML is renamed to `.migrated` so a later run never re-reads it.
     Gating this on "table is empty" instead would silently resurrect tickers
     from the stale YAML the moment someone removed the last one via the UI.
+
+    Also backfills owner on any pre-existing row to LOCAL_OWNER — idempotent,
+    a no-op once set.
     """
+    migrate_columns(conn, "watchlist", [("owner", "TEXT")])
+    conn.execute("UPDATE watchlist SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
     if not _LEGACY_YAML.exists():
         return
     try:
@@ -60,8 +72,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     now = datetime.now(timezone.utc).isoformat()
     if tickers:
         conn.executemany(
-            "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
-            [(t, now) for t in sorted(tickers)],
+            "INSERT OR IGNORE INTO watchlist (ticker, added_at, owner) VALUES (?, ?, ?)",
+            [(t, now, LOCAL_OWNER) for t in sorted(tickers)],
         )
     conn.commit()
     try:
@@ -71,9 +83,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def load_watchlist_tickers() -> list[str]:
-    """Return all watchlist tickers, sorted."""
+    """Return all watchlist tickers, sorted. Unscoped — see load_watchlist_tickers_for."""
     with _db() as conn:
         rows = conn.execute("SELECT ticker FROM watchlist ORDER BY ticker").fetchall()
+    return [r[0] for r in rows]
+
+
+def load_watchlist_tickers_for(ctx) -> list[str]:
+    """Authorized read: only the tickers owned by ctx's verified identity."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT ticker FROM watchlist WHERE owner = ? ORDER BY ticker", (ctx.actor,)
+        ).fetchall()
     return [r[0] for r in rows]
 
 
@@ -91,8 +112,8 @@ def add_tickers(to_add: list[str], cap: int = 70) -> tuple[list[str], str | None
         if new_unique:
             now = datetime.now(timezone.utc).isoformat()
             conn.executemany(
-                "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
-                [(t, now) for t in new_unique],
+                "INSERT OR IGNORE INTO watchlist (ticker, added_at, owner) VALUES (?, ?, ?)",
+                [(t, now, LOCAL_OWNER) for t in new_unique],
             )
             conn.commit()
     return new_unique, warning

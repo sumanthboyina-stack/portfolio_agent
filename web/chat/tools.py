@@ -431,8 +431,8 @@ def _chat_tool_get_macro() -> dict:
 
 
 def _chat_tool_get_predictions(ticker: str) -> dict:
-    from portfolio_agent.tools.prediction_db import get_prediction_history
-    hist = get_prediction_history(ticker.upper(), limit=10)
+    from portfolio_agent.tools.prediction_db import DISPLAY_SCOPES, get_prediction_history
+    hist = get_prediction_history(ticker.upper(), limit=10, scopes=DISPLAY_SCOPES)   # own view: shared + legacy + private
     return {"ticker": ticker.upper(), "prediction_history": hist}
 
 

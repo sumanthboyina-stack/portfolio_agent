@@ -28,7 +28,7 @@ from datetime import datetime, time, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from portfolio_agent.domain import NOTIFICATION_CHANNELS, UserNotificationPrefs
+from portfolio_agent.domain import LOCAL_OWNER, NOTIFICATION_CHANNELS, UserNotificationPrefs
 from portfolio_agent.tools.db import db_conn, migrate_columns
 
 _UPDATABLE_FIELDS = frozenset({
@@ -65,31 +65,48 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             quiet_hours_start        TEXT,
             quiet_hours_end          TEXT,
             created_at               TEXT NOT NULL,
-            updated_at               TEXT NOT NULL
+            updated_at               TEXT NOT NULL,
+            owner                    TEXT
         )
     """)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the first release, then backfill ownership
+    on any pre-existing row to LOCAL_OWNER (idempotent — a no-op once set)."""
     migrate_columns(conn, "user_notifications", [
         ("min_conviction_threshold", "INTEGER"),
         ("quiet_hours_start",        "TEXT"),
         ("quiet_hours_end",          "TEXT"),
+        ("owner",                    "TEXT"),
     ])
+    conn.execute("UPDATE user_notifications SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
 
 
 def _seed(conn: sqlite3.Connection) -> None:
     now = _now()
     conn.execute(
-        "INSERT OR IGNORE INTO user_notifications (id, created_at, updated_at) VALUES (1, ?, ?)",
-        (now, now),
+        "INSERT OR IGNORE INTO user_notifications (id, owner, created_at, updated_at) VALUES (1, ?, ?, ?)",
+        (LOCAL_OWNER, now, now),
     )
 
 
 def get_user_notifications() -> UserNotificationPrefs:
-    """Return the notification preferences. Always returns a row."""
+    """Return the notification preferences. Always returns a row. Unscoped — see
+    get_user_notifications_for for the authorized, owner-checked path."""
     with _db() as conn:
         row = conn.execute("SELECT * FROM user_notifications WHERE id = 1").fetchone()
+    return UserNotificationPrefs.from_db_row(dict(row))
+
+
+def get_user_notifications_for(ctx) -> UserNotificationPrefs:
+    """Authorized read: the notification prefs owned by ctx's verified identity."""
+    from portfolio_agent.services.account_service import NotAuthorized
+
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM user_notifications WHERE owner = ?", (ctx.actor,)).fetchone()
+    if row is None:
+        raise NotAuthorized(f"{ctx.actor!r} has no notification preferences here")
     return UserNotificationPrefs.from_db_row(dict(row))
 
 

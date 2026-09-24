@@ -33,7 +33,7 @@ import sqlite3
 from datetime import date
 
 from portfolio_agent.domain import LOCAL_OWNER
-from portfolio_agent.services.context import RequestContext
+from portfolio_agent.services.context import RequestContext, require_context
 from portfolio_agent.tools import holdings_db as repo
 
 
@@ -67,6 +67,7 @@ class DuplicateInstrument(ValueError):
 
 def resolve_portfolio(ctx: RequestContext, *, conn: sqlite3.Connection | None = None) -> dict:
     """The portfolio the actor may act on. The local owner's is created on first use."""
+    require_context(ctx)
     p = repo.get_portfolio_by_owner(ctx.actor, conn=conn)
     if p is None:
         raise NotAuthorized(f"{ctx.actor!r} has no portfolio here")
@@ -390,3 +391,40 @@ def change_instrument_ticker(ctx: RequestContext, instrument_id: int, new_ticker
                       "history_rows_moved": history["moved"], "history_rows_skipped": history["skipped"]},
                reason=reason)
         return after
+
+
+# ── Authorized reads ──────────────────────────────────────────────────────────
+#
+# Every read below checks resolve_portfolio(ctx) FIRST — before touching a
+# single holdings/account/cash/import/price row — so an unauthorized or
+# unverified caller never reaches private data, not even to get an empty
+# result back quietly. holdings_db's own read functions (get_holdings,
+# list_accounts, get_cash_balances, get_import_runs, get_price_history) stay
+# as they are: unscoped, single-portfolio, still what most of the web app
+# calls directly today. These are the authorized alternative going forward —
+# see the Phase 2 report's inventory of callers still on the unscoped path.
+
+def list_holdings_for(ctx: RequestContext) -> list:
+    resolve_portfolio(ctx)
+    return repo.get_holdings()
+
+
+def list_accounts_for(ctx: RequestContext, *, include_archived: bool = False) -> list[dict]:
+    portfolio = resolve_portfolio(ctx)
+    return repo.list_accounts(portfolio["portfolio_id"], include_archived=include_archived)
+
+
+def get_cash_balances_for(ctx: RequestContext) -> list[dict]:
+    resolve_portfolio(ctx)
+    return repo.get_cash_balances()
+
+
+def list_import_runs_for(ctx: RequestContext, *, limit: int = 25) -> list[dict]:
+    resolve_portfolio(ctx)
+    return repo.get_import_runs(limit=limit)
+
+
+def get_price_history_for(ctx: RequestContext, *, tickers: list[str] | None = None,
+                          brokers: list[str] | None = None) -> list[dict]:
+    resolve_portfolio(ctx)
+    return repo.get_price_history(tickers=tickers, brokers=brokers)

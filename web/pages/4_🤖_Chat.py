@@ -39,7 +39,9 @@ from web.styles import (
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
 )
 from web.chat.tools import _CHAT_TOOLS, _execute_chat_tool, _search_ticker_by_name
-from web.chat.rendering import _build_plan, _render_plan_card, _render_prediction_card
+from web.chat.rendering import (
+    _build_plan, _render_plan_card, _render_prediction_card, render_action_permission_and_fit,
+)
 from web.chat.orchestration import (
     _build_chat_history, _classify_intent,
     _run_chat_agent_thread, _run_apex_thread, _extract_json,
@@ -501,6 +503,13 @@ for msg in st.session_state.messages:
             if msg.get("type") == "prediction" and msg.get("metadata"):
                 _render_prediction_card(msg["metadata"], elapsed=msg.get("elapsed", 0),
                                         show_history=False)
+                # Re-evaluated fresh on every rerun, not cached from when this
+                # message was first generated — policy/blackout/approval state
+                # may have changed since (Phase 7: recheck before delivering
+                # an actionable proposal, even for an already-rendered card).
+                _hist_ticker = msg["metadata"].get("ticker")
+                if _hist_ticker:
+                    render_action_permission_and_fit(_hist_ticker, action="trade")
             else:
                 st.markdown(msg.get("content", ""))
 
@@ -871,16 +880,18 @@ if _has_message and (_has_ticker or _no_ticker):
 
                 st.divider()
                 _render_prediction_card(pred_data, elapsed, show_history=True)
+                render_action_permission_and_fit(ticker, action="trade")
 
                 # Save prediction to predictions DB -- one row per horizon
                 from portfolio_agent.tools.prediction_db import (
-                    insert_prediction, get_scheduled_horizons as _gs_h,
-                    get_today_horizons as _gth,
+                    DISPLAY_SCOPES, get_scheduled_horizons as _gs_h, get_today_horizons as _gth,
                 )
+                from portfolio_agent.tools.forecast_writer import ForecastProvenance, write_private_forecast
+                from portfolio_agent.services.context import local_context
                 from portfolio_agent.tools.yfinance_tools import get_close as _get_close
                 _today_save = date.today()
                 _sched_h = _gs_h(_today_save) or [5]
-                _done_h  = _gth(ticker, _today_save.isoformat())
+                _done_h  = _gth(ticker, _today_save.isoformat(), scopes=DISPLAY_SCOPES)
                 _start_price = _get_close(ticker, _today_save.isoformat())
                 _horizons_data = pred_data.get("horizons") or []
                 _h_by_days = {h.get("horizon_days"): h for h in _horizons_data
@@ -915,7 +926,12 @@ if _has_message and (_has_ticker or _no_ticker):
                         continue
                     _hd = _h_by_days.get(_h_days, {})
                     _dist = _hd.get("distribution") or {}
-                    _r = insert_prediction(
+                    # A chat answer is produced for one person from their question: it is stored
+                    # as PRIVATE and never enters shared history or prompts.
+                    _r = write_private_forecast(
+                        local_context("web:chat").actor,
+                        ForecastProvenance(origin="chat.ticker_prediction",
+                                           model_used=f"{used_model_provider}:{used_model_label}"),
                         **_common_save,
                         horizon_days=_h_days,
                         predicted_direction=_hd.get("predicted_direction"),

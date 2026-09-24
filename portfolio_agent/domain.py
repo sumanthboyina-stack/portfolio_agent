@@ -673,6 +673,20 @@ class Prediction(_DictCompat):
     actual_bucket: str | None = None
     brier_score: float | None = None
     log_loss: float | None = None
+    # Scope & provenance (see prediction_db): shared_market | private | legacy_unclassified
+    scope: str | None = None
+    origin: str | None = None
+    origin_run_id: str | None = None
+    origin_time_utc: str | None = None
+    owner_scope: str | None = None
+    evidence_refs: dict = field(default_factory=dict)
+    policy_version: str | None = None
+    model_used: str | None = None
+    guardrail_version: str | None = None
+    history_lineage: list = field(default_factory=list)
+    context_digest: str | None = None
+    trigger_type: str | None = None
+    trigger_event_id: int | None = None
 
     def __post_init__(self) -> None:
         self.ticker = self.ticker.upper().strip()
@@ -749,6 +763,19 @@ class Prediction(_DictCompat):
             actual_bucket=row.get("actual_bucket"),
             brier_score=_safe_float(row.get("brier_score")),
             log_loss=_safe_float(row.get("log_loss")),
+            scope=row.get("scope"),
+            origin=row.get("origin"),
+            origin_run_id=row.get("origin_run_id"),
+            origin_time_utc=row.get("origin_time_utc"),
+            owner_scope=row.get("owner_scope"),
+            evidence_refs=_parse_json_dict(row.get("evidence_refs")),
+            policy_version=row.get("policy_version"),
+            model_used=row.get("model_used"),
+            guardrail_version=row.get("guardrail_version"),
+            history_lineage=_parse_json_list(row.get("history_lineage")),
+            context_digest=row.get("context_digest"),
+            trigger_type=row.get("trigger_type"),
+            trigger_event_id=_safe_int(row.get("trigger_event_id")),
         )
 
     @property
@@ -768,6 +795,14 @@ class Prediction(_DictCompat):
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "scope": self.scope,
+            "origin": self.origin,
+            "origin_run_id": self.origin_run_id,
+            "origin_time_utc": self.origin_time_utc,
+            "evidence_refs": self.evidence_refs,
+            "history_lineage": self.history_lineage,
+            "model_used": self.model_used,
+            "policy_version": self.policy_version,
             "ticker": self.ticker,
             "created_at": self.created_at,
             "prediction_date": self.prediction_date,
@@ -812,6 +847,10 @@ class Prediction(_DictCompat):
             "actual_bucket": self.actual_bucket,
             "brier_score": self.brier_score,
             "log_loss": self.log_loss,
+            "guardrail_version": self.guardrail_version,
+            "context_digest": self.context_digest,
+            "trigger_type": self.trigger_type,
+            "trigger_event_id": self.trigger_event_id,
         }
 
 

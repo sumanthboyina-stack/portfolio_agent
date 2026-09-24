@@ -5,7 +5,7 @@ import pytest
 
 import portfolio_agent.tools.db as db_module
 from portfolio_agent.services import account_service as svc
-from portfolio_agent.services.context import RequestContext, local_context
+from portfolio_agent.services.context import RequestContext, _mint_identity_for_tests, local_context
 from portfolio_agent.tools import holdings_db as repo
 from tests.helpers_holdings import CTX, seed_holding
 
@@ -26,7 +26,7 @@ def _ops(**kw):
 
 def test_foreign_actor_cannot_touch_the_local_portfolio():
     a = seed_holding(_pos("AAPL", 1), "fidelity", "2026-09-01")
-    stranger = RequestContext(actor="someone-else", source="test")
+    stranger = RequestContext(identity=_mint_identity_for_tests("someone-else"), source="test")
     with pytest.raises(svc.NotAuthorized):
         svc.set_position(stranger, a["id"], expected_version=1, shares=2.0, avg_cost=1.0)
     with pytest.raises(svc.NotAuthorized):

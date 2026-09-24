@@ -254,6 +254,65 @@ def _render_plan_card(plan: dict) -> None:
 
 # ── Prediction result card ────────────────────────────────────────────────────
 
+def render_action_permission_and_fit(ticker: str, action: str = "trade") -> None:
+    """
+    Separate, plain-Streamlit banner shown alongside (never inside)
+    _render_prediction_card — Phase 7: "attach policy findings independently
+    of model-generated prose." The card above renders whatever the model
+    said (recommendation, panel verdicts, scores); this renders what THIS
+    system's deterministic rules say about the SAME ticker (tools.clearance,
+    Phase 6) and how it fits the actor's own book (tools.portfolio_
+    assessment, Phase 5) — neither depends on, or is expressed through, the
+    model's own text. A BLOCKED/PENDING_APPROVAL/UNKNOWN permission is
+    always shown, even though the prediction card above may have already
+    printed an unqualified-looking "STRONG_BUY" — this is what stops that
+    from being the last/only word the user sees.
+
+    Best-effort and additive: any failure here is shown as an explicit
+    "could not be evaluated" notice, never silently skipped (missing policy
+    data is not "no restriction" — see clearance.py) and never allowed to
+    break the rest of the chat page.
+    """
+    from portfolio_agent.clearance import evaluate_and_record_clearance
+    from portfolio_agent.services.account_service import NotAuthorized
+    from portfolio_agent.services.context import local_context
+    from portfolio_agent.tools.user_profile_db import get_user_profile_for
+
+    ctx = local_context("web:chat")
+    ticker = ticker.upper()
+
+    try:
+        profile = get_user_profile_for(ctx)
+        decision = evaluate_and_record_clearance(ticker, profile, owner_scope=f"user:{ctx.actor}", action=action)
+    except Exception as exc:
+        st.warning(f"⚠️ Action permission could not be evaluated ({type(exc).__name__}) — "
+                  "treat this recommendation as NOT actionable until it can be.")
+        return
+
+    if decision.decision == "ALLOWED_BY_RULES":
+        st.success(f"✅ **Action permission: ALLOWED_BY_RULES** — {decision.memo}")
+    elif decision.decision == "BLOCKED":
+        st.error(f"🚫 **Action permission: BLOCKED** — {decision.memo}")
+    elif decision.decision == "PENDING_APPROVAL":
+        st.warning(f"⏳ **Action permission: PENDING_APPROVAL** — {decision.memo}")
+    else:
+        st.warning(f"❓ **Action permission: UNKNOWN** — {decision.memo}")
+
+    try:
+        from portfolio_agent.tools.portfolio_assessment import build_portfolio_assessment
+        pa = build_portfolio_assessment(ctx, ticker)
+        w = pa.exposures.get("current_weight_pct")
+        s = pa.exposures.get("sector_concentration_pct")
+        w_str = f"{w:.1f}%" if isinstance(w, (int, float)) else str(w)
+        s_str = f"{s:.1f}%" if isinstance(s, (int, float)) else str(s)
+        st.caption(f"Portfolio fit — current weight {w_str} · sector concentration {s_str} "
+                  f"(as of {pa.built_at})")
+    except NotAuthorized:
+        pass   # no portfolio for this actor -- nothing to show, not an error
+    except Exception as exc:
+        st.caption(f"Portfolio fit could not be evaluated ({type(exc).__name__})")
+
+
 def _render_prediction_card(data: dict, elapsed: float = 0.0,
                              show_history: bool = True) -> None:
     rec   = data.get("recommendation", "HOLD")

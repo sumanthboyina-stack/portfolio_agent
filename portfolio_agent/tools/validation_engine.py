@@ -14,7 +14,9 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from portfolio_agent.tools.prediction_db import _db
+from portfolio_agent.tools.prediction_db import (
+    LEGACY_REVIEW_SCOPES, SHARED_SCOPES, _db, scope_clause,
+)
 from portfolio_agent.tools.yfinance_tools import get_close
 from portfolio_agent.log import get_logger as _get_logger
 
@@ -319,9 +321,10 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
                   event_type="summary", lookback_days=lookback_days)
         cutoff = (today - timedelta(days=lookback_days)).isoformat()
 
+        _legacy_sc, _legacy_sp = scope_clause(LEGACY_REVIEW_SCOPES)   # historical evaluation: shared + legacy, never private
         with _db() as c:
             rows = c.execute(
-                """SELECT horizon_days, ticker,
+                f"""SELECT id, as_of_date, horizon_days, ticker,
                           COALESCE(system_version, 'v1.0')  AS sys_ver,
                           trigger_type,
                           actual_direction, predicted_direction,
@@ -331,9 +334,30 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
                    FROM predictions
                    WHERE evaluation_status = 'evaluated'
                      AND evaluated_at >= ?
-                     AND horizon_days IS NOT NULL""",
-                [cutoff],
+                     AND horizon_days IS NOT NULL
+                     AND {_legacy_sc}""",
+                [cutoff, *_legacy_sp],
             ).fetchall()
+
+        # Evaluation cohorts: a same-day event-driven regeneration (Phase 8) can
+        # leave MULTIPLE shared rows for the same (ticker, horizon_days,
+        # as_of_date) -- e.g. a routine morning version plus an intraday
+        # event-triggered version. These are not independent samples; counting
+        # both would silently inflate n and skew accuracy toward whichever
+        # regime produces more same-day versions. Collapse each cohort to its
+        # single LATEST version (highest id) before aggregating. This changes
+        # nothing about any individual row -- its own start_price/evaluation_
+        # date/actual_* fields are untouched and still fully readable via the
+        # per-row audit reads (get_recent_evaluated_predictions etc.) -- only
+        # which rows count toward THESE aggregate accuracy/calibration stats.
+        _latest_by_cohort: dict[tuple, dict] = {}
+        for r in rows:
+            d = dict(r)
+            cohort = (d["ticker"], d["horizon_days"], d.get("as_of_date"))
+            existing = _latest_by_cohort.get(cohort)
+            if existing is None or d["id"] > existing["id"]:
+                _latest_by_cohort[cohort] = d
+        rows = list(_latest_by_cohort.values())
 
         # Group by (horizon_days, segment, system_version). Every row lands in the
         # blended 'all' bucket, plus exactly one of 'opportunity' (discovered via
@@ -639,9 +663,10 @@ def weekly_pattern_analysis() -> dict:
     if existing:
         return {"skipped": True, "reason": "already ran this week"}
 
+    _shared_sc, _shared_sp = scope_clause(SHARED_SCOPES)   # failure patterns are mined from market-only rows only
     with _db() as c:
         rows = c.execute(
-            """SELECT ticker, horizon_days, predicted_direction, actual_direction,
+            f"""SELECT ticker, horizon_days, predicted_direction, actual_direction,
                       predicted_return_low, predicted_return_high,
                       actual_return, outcome, conviction_score, weight_regime,
                       model_name, trigger_type, evaluated_at, error_magnitude
@@ -649,8 +674,9 @@ def weekly_pattern_analysis() -> dict:
                WHERE evaluation_status = 'evaluated'
                  AND evaluated_at >= ?
                  AND horizon_days IS NOT NULL
-                 AND actual_direction IS NOT NULL""",
-            [_week_ago],
+                 AND actual_direction IS NOT NULL
+                 AND {_shared_sc}""",
+            [_week_ago, *_shared_sp],
         ).fetchall()
     rows = [dict(r) for r in rows]
 
@@ -808,8 +834,9 @@ def get_active_failure_patterns(limit: int = 5) -> list[dict]:
 # ── Dashboard read helpers ─────────────────────────────────────────────────────
 
 def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None = None) -> list[dict]:
-    where = "WHERE evaluation_status IN ('evaluated', 'data_missing')"
-    params: list = []
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    where = f"WHERE evaluation_status IN ('evaluated', 'data_missing') AND {_sc}"
+    params: list = [*_sp]
     if lookback_days:
         cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
         where += " AND as_of_date >= ?"
@@ -834,8 +861,9 @@ def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None
 
 
 def get_accuracy_heatmap_data(lookback_days: int | None = None, model_names: list[str] | None = None) -> list[dict]:
-    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", "actual_direction IS NOT NULL"]
-    params: list = []
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", "actual_direction IS NOT NULL", _sc]
+    params: list = [*_sp]
     if lookback_days:
         clauses.append("as_of_date >= ?")
         params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
@@ -872,8 +900,9 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
       actual_up = 1 if actual_return > +1%, else 0
       Brier baseline = 0.25 (coin flip), log-loss baseline = ln(2) ≈ 0.693
     """
-    clauses = ["evaluation_status = 'evaluated'", "actual_direction IS NOT NULL"]
-    params: list = []
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    clauses = ["evaluation_status = 'evaluated'", "actual_direction IS NOT NULL", _sc]
+    params: list = [*_sp]
     if lookback_days:
         clauses.append("as_of_date >= ?")
         params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
@@ -993,10 +1022,11 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
 
 def get_drift_data(horizon_days: int = 5, window: int = 30, lookback_days: int = 90, model_names: list[str] | None = None) -> list[dict]:
     cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
-    extra = ""
-    params: list = [horizon_days, cutoff]
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    extra = f"AND {_sc}"
+    params: list = [horizon_days, cutoff, *_sp]
     if model_names:
-        extra = f"AND model_name IN ({','.join('?' * len(model_names))})"
+        extra += f" AND model_name IN ({','.join('?' * len(model_names))})"
         params.extend(model_names)
     with _db() as c:
         rows = c.execute(
@@ -1033,19 +1063,20 @@ def get_volume_by_horizon(lookback_days: int = 90) -> list[dict]:
     cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
     with _db() as c:
         rows = c.execute(
-            """SELECT as_of_date AS pred_date, horizon_days, COUNT(*) AS n
+            f"""SELECT as_of_date AS pred_date, horizon_days, COUNT(*) AS n
                FROM predictions
-               WHERE as_of_date >= ? AND horizon_days IS NOT NULL
+               WHERE as_of_date >= ? AND horizon_days IS NOT NULL AND {scope_clause(LEGACY_REVIEW_SCOPES)[0]}
                GROUP BY as_of_date, horizon_days
                ORDER BY as_of_date""",
-            [cutoff],
+            [cutoff, *scope_clause(LEGACY_REVIEW_SCOPES)[1]],
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_system_version_comparison(lookback_days: int | None = None, model_names: list[str] | None = None) -> list[dict]:
-    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL"]
-    params: list = []
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", _sc]
+    params: list = [*_sp]
     if lookback_days:
         clauses.append("as_of_date >= ?")
         params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())

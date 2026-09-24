@@ -184,37 +184,41 @@ def test_compute_dynamic_weights_legacy_includes_all_horizons_when_requested(tmp
     assert set(result["weights_by_horizon"].keys()) == set(HORIZON_BASE_WEIGHTS.keys())
     
 
-# ── preferred_horizons filter (display/generation filter, not weighting math) ──
+# ── preferred_horizons filter is now PURE and explicit-input only: no profile,  ──
+# ── no implicit singleton — see market_context/forecast_writer for the shared   ──
+# ── generation path, which never calls this at all (Phase 1: market-only ctx). ──
 
-def test_all_horizons_filtered_to_preferred_without_changing_weights(tmp_path, monkeypatch):
-    import portfolio_agent.tools.db as db_module
-    from portfolio_agent.tools.user_profile_db import update_user_profile
-    from portfolio_agent.tools.weight_engine import (
-        compute_dynamic_weights_all_horizons, filter_preferred_horizons,
-    )
-    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
-
+def test_generation_never_reads_the_profile_and_takes_explicit_horizons():
+    """compute_dynamic_weights_all_horizons takes exactly the horizons it's given —
+    no user_profile_db import anywhere in the module, whatever a caller's profile says."""
+    import portfolio_agent.tools.weight_engine as we
+    import inspect
+    assert "user_profile_db" not in inspect.getsource(we)
     ctx = {"news": [], "research": None, "fundamentals": None, "valuation": None}
-    full = compute_dynamic_weights_all_horizons("AAPL", [5, 21, 63, 250], ctx, {})
-    assert set(full) == {5, 21, 63, 250}   # default preference = all → unchanged
+    full = we.compute_dynamic_weights_all_horizons("AAPL", [5, 21, 63, 250], ctx, {})
+    assert set(full) == {5, 21, 63, 250}
 
-    update_user_profile(preferred_horizons=["5d", "63d"])
-    assert filter_preferred_horizons([5, 21, 63, 250]) == [5, 63]
-    filtered = compute_dynamic_weights_all_horizons("AAPL", [5, 21, 63, 250], ctx, {})
-    assert set(filtered) == {5, 63}
+    subset = we.compute_dynamic_weights_all_horizons("AAPL", [5, 63], ctx, {})
+    assert set(subset) == {5, 63}
     for h in (5, 63):
-        assert filtered[h] == full[h]      # weights for remaining horizons untouched
+        assert subset[h] == full[h]         # identical explicit inputs → identical weights
 
-    result = compute_dynamic_weights("AAPL", [], None, None, None, horizons=[5, 21, 63])
+    result = compute_dynamic_weights("AAPL", [], None, None, None, horizons=[5, 63])
     assert set(result["weights_by_horizon"]) == {5, 63}
     assert result["weights"] == compute_dynamic_weights("AAPL", [], None, None, None)["weights"]
 
 
-def test_empty_preferred_horizons_means_no_filtering(tmp_path, monkeypatch):
-    import portfolio_agent.tools.db as db_module
-    from portfolio_agent.tools.user_profile_db import update_user_profile
-    from portfolio_agent.tools.weight_engine import filter_preferred_horizons
-    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+def test_filter_preferred_horizons_is_pure_and_display_only():
+    from portfolio_agent.tools.weight_engine import filter_preferred_horizons, preferred_horizon_days_from_labels
 
-    update_user_profile(preferred_horizons=[])
-    assert filter_preferred_horizons([5, 21]) == [5, 21]
+    assert filter_preferred_horizons([5, 21, 63, 250]) == [5, 21, 63, 250]                     # no `preferred` → unchanged
+    assert filter_preferred_horizons([5, 21, 63, 250], preferred=None) == [5, 21, 63, 250]      # explicit None → unchanged
+    assert filter_preferred_horizons([5, 21, 63, 250], preferred={5, 63}) == [5, 63]            # order preserved
+    assert filter_preferred_horizons([5, 21], preferred=set()) == []                             # an explicit empty SET does filter to nothing
+
+    # The "an empty/unparseable preference means no filtering" rule lives HERE, in the
+    # labels→days translation — not in filter_preferred_horizons, which stays a plain filter.
+    assert preferred_horizon_days_from_labels(["5d", "63d"]) == {5, 63}
+    assert preferred_horizon_days_from_labels([]) is None
+    assert preferred_horizon_days_from_labels(["bogus"]) is None
+    assert filter_preferred_horizons([5, 21], preferred=preferred_horizon_days_from_labels([])) == [5, 21]

@@ -45,6 +45,32 @@ from portfolio_agent.tools.db import db_conn, migrate_columns
 
 CURRENT_SYSTEM_VERSION = "v1.0"
 
+# ── Scope of a forecast row ───────────────────────────────────────────────────
+# shared_market        built by scheduled generation from a market-only context
+#                      (portfolio_agent.tools.market_context) — may feed prompts,
+#                      shared history and failure-pattern mining.
+# private              produced for one person (chat questions, personalized
+#                      root-agent results) — never enters shared inputs.
+# legacy_unclassified  rows written before scopes existed. Their inputs cannot be
+#                      proven market-only, so they are NOT shared. They remain
+#                      readable through the restricted legacy path so existing
+#                      historical evaluation keeps working.
+SCOPE_SHARED = "shared_market"
+SCOPE_PRIVATE = "private"
+SCOPE_LEGACY = "legacy_unclassified"
+SHARED_SCOPES: tuple[str, ...] = (SCOPE_SHARED,)                           # prompts, shared history, failure patterns
+LEGACY_REVIEW_SCOPES: tuple[str, ...] = (SCOPE_SHARED, SCOPE_LEGACY)       # restricted: historical evaluation/dashboards
+DISPLAY_SCOPES: tuple[str, ...] = (SCOPE_SHARED, SCOPE_LEGACY, SCOPE_PRIVATE)  # what the local user may see of their own data
+WRITABLE_SCOPES = frozenset({SCOPE_SHARED, SCOPE_PRIVATE})
+
+
+def scope_clause(scopes: tuple[str, ...]) -> tuple[str, list]:
+    """SQL fragment + params restricting a predictions query to *scopes*."""
+    scopes = tuple(scopes)
+    if not scopes:
+        raise ValueError("scope_clause: at least one scope is required")
+    return f"scope IN ({','.join('?' * len(scopes))})", list(scopes)
+
 
 @contextmanager
 def _db():
@@ -205,7 +231,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("weights_used",                "TEXT"),
         ("valuation_score",             "INTEGER"),
         ("guardrail_flags",             "TEXT"),
+        # Scope & provenance (see SCOPE_* above)
+        ("scope",                       "TEXT"),
+        ("origin",                      "TEXT"),
+        ("origin_run_id",               "TEXT"),
+        ("origin_time_utc",             "TEXT"),
+        ("owner_scope",                 "TEXT"),
+        ("evidence_refs",               "TEXT"),
+        ("policy_version",              "TEXT"),
+        ("model_used",                  "TEXT"),
+        ("guardrail_version",           "TEXT"),
+        ("history_lineage",             "TEXT"),
+        ("context_digest",              "TEXT"),
     ])
+    # Rows that predate scopes stay unclassified: they are never promoted to shared
+    # by default and only reach readers through the restricted legacy path.
+    conn.execute("UPDATE predictions SET scope = ? WHERE scope IS NULL", [SCOPE_LEGACY])
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_scope ON predictions(scope, ticker, created_at)")
     # Index for per-model accuracy queries and parent linkage
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_predictions_model "
@@ -309,16 +351,38 @@ def get_scheduled_horizons(today: date) -> list[int]:
     return horizons
 
 
-def get_today_horizons(ticker: str, today: str) -> set[int]:
-    """Return the set of horizon_days already saved for ticker on today (ISO date)."""
+def get_today_horizons(ticker: str, today: str, *, scopes: tuple[str, ...] = DISPLAY_SCOPES) -> set[int]:
+    """Horizon_days already saved for ticker today within *scopes*. The scheduled writer
+    passes SHARED_SCOPES so a private chat forecast never suppresses shared generation."""
+    sc, sp = scope_clause(scopes)
     with _db() as c:
         rows = c.execute(
-            """SELECT horizon_days FROM predictions
-               WHERE ticker = ? AND as_of_date = ?
-               AND horizon_days IS NOT NULL""",
-            [ticker.upper(), today],
+            f"""SELECT horizon_days FROM predictions
+                WHERE ticker = ? AND as_of_date = ? AND horizon_days IS NOT NULL AND {sc}""",
+            [ticker.upper(), today, *sp],
         ).fetchall()
     return {r[0] for r in rows}
+
+
+def event_already_processed(ticker: str, trigger_event_id: int, today: str, *,
+                            scopes: tuple[str, ...] = DISPLAY_SCOPES) -> bool:
+    """
+    True if a row already exists today carrying this EXACT trigger_event_id —
+    the event-driven counterpart to get_today_horizons's "any horizon done
+    today" check. Used so a new, not-yet-processed event is never suppressed
+    just because some OTHER (e.g. routine cadence) generation already ran for
+    the same ticker earlier today — see pipeline.daily.apex.
+    """
+    if trigger_event_id is None:
+        return False
+    sc, sp = scope_clause(scopes)
+    with _db() as c:
+        row = c.execute(
+            f"""SELECT 1 FROM predictions
+                WHERE ticker = ? AND as_of_date = ? AND trigger_event_id = ? AND {sc} LIMIT 1""",
+            [ticker.upper(), today, trigger_event_id, *sp],
+        ).fetchone()
+    return row is not None
 
 
 # ── Core write/read API ────────────────────────────────────────────────────────
@@ -375,15 +439,32 @@ def insert_prediction(
     weights_used: Optional[dict] = None,
     # Deterministic post-hoc guardrails applied before this row was stored
     guardrail_flags: Optional[list] = None,
+    # Scope & provenance. The default scope is PRIVATE: only forecast_writer.write_shared_forecast,
+    # holding a market-only MarketContext, stores a row as shared_market.
+    scope: str = SCOPE_PRIVATE,
+    origin: str = "unspecified",
+    origin_run_id: Optional[str] = None,
+    owner_scope: Optional[str] = None,
+    evidence_refs: Optional[dict] = None,
+    policy_version: Optional[str] = None,
+    model_used: Optional[str] = None,
+    guardrail_version: Optional[str] = None,
+    history_lineage: Optional[list] = None,
+    context_digest: Optional[str] = None,
 ) -> dict:
     """
     Insert a new prediction row (append-only). One row per horizon per ticker per date.
     Returns {saved, ticker, changed, previous}.
     """
+    if scope not in WRITABLE_SCOPES:
+        raise ValueError(f"insert_prediction: scope must be one of {sorted(WRITABLE_SCOPES)}, not {scope!r}")
+    if scope == SCOPE_SHARED and not context_digest:
+        raise ValueError("insert_prediction: a shared_market row needs the market-context digest it was built from")
     ticker = ticker.upper()
     now_cst   = _now_cst()
     today_str = _today_cst()
     today_date = date.fromisoformat(today_str)
+    origin_time_utc = datetime.now(ZoneInfo("UTC")).isoformat(timespec="seconds")
 
     # Derive horizon_days from legacy horizon string if not provided
     if horizon_days is None and horizon:
@@ -404,7 +485,9 @@ def insert_prediction(
     if not reasoning_text and reasoning:
         reasoning_text = reasoning
 
-    prev = get_latest_prediction(ticker)
+    # "Changed from previous" is judged against the same kind of history the row belongs to:
+    # a shared row against shared rows only; a private row against everything its owner may see.
+    prev = get_latest_prediction(ticker, scopes=SHARED_SCOPES if scope == SCOPE_SHARED else DISPLAY_SCOPES)
     prev_pred = prev["recommendation"] if prev else None
     changed = 1 if prev_pred and prev_pred != recommendation else 0
 
@@ -428,11 +511,14 @@ def insert_prediction(
                         p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                         used_fallback, parent_merged_id,
                         trigger_type, trigger_event_id,
-                        weight_regime, weights_used, valuation_score, guardrail_flags)
+                        weight_regime, weights_used, valuation_score, guardrail_flags,
+                        scope, origin, origin_run_id, origin_time_utc, owner_scope, evidence_refs,
+                        policy_version, model_used, guardrail_version, history_lineage, context_digest)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -456,6 +542,11 @@ def insert_prediction(
                     weight_regime, json.dumps(weights_used) if weights_used else None,
                     valuation_score,
                     json.dumps(guardrail_flags) if guardrail_flags else None,
+                    scope, origin, origin_run_id, origin_time_utc, owner_scope,
+                    json.dumps(evidence_refs, default=str) if evidence_refs else None,
+                    policy_version, model_used, guardrail_version,
+                    json.dumps(history_lineage, default=str) if history_lineage else None,
+                    context_digest,
                 ],
             )
             c.commit()
@@ -464,33 +555,41 @@ def insert_prediction(
         return {"saved": False, "ticker": ticker, "error": str(exc)}
 
 
-def get_latest_prediction(ticker: str, horizon_days: Optional[int] = None) -> Optional[Prediction]:
-    """Return the most recent prediction row for ticker (optionally filtered by horizon_days)."""
+def get_latest_prediction(ticker: str, horizon_days: Optional[int] = None, *,
+                          scopes: tuple[str, ...] = DISPLAY_SCOPES) -> Optional[Prediction]:
+    """Most recent prediction row for ticker within *scopes* (optionally one horizon)."""
+    sc, sp = scope_clause(scopes)
     with _db() as c:
         if horizon_days is not None:
             row = c.execute(
-                """SELECT * FROM predictions WHERE ticker = ? AND horizon_days = ?
-                   ORDER BY created_at DESC LIMIT 1""",
-                [ticker.upper(), horizon_days],
+                f"""SELECT * FROM predictions WHERE ticker = ? AND horizon_days = ? AND {sc}
+                    ORDER BY created_at DESC LIMIT 1""",
+                [ticker.upper(), horizon_days, *sp],
             ).fetchone()
         else:
             row = c.execute(
-                """SELECT * FROM predictions WHERE ticker = ?
-                   ORDER BY created_at DESC LIMIT 1""",
-                [ticker.upper()],
+                f"""SELECT * FROM predictions WHERE ticker = ? AND {sc}
+                    ORDER BY created_at DESC LIMIT 1""",
+                [ticker.upper(), *sp],
             ).fetchone()
     if not row:
         return None
     return Prediction.from_db_row(dict(row))
 
 
-def get_prediction_history(ticker: str, limit: int = 10) -> list[Prediction]:
-    """Return the last limit prediction rows for ticker, newest first."""
+def get_prediction_history(ticker: str, limit: int = 10, *,
+                           scopes: tuple[str, ...] = SHARED_SCOPES) -> list[Prediction]:
+    """
+    Last *limit* rows for ticker, newest first. Defaults to SHARED history only —
+    this is what feeds prompts. Callers showing a person their own track record
+    pass DISPLAY_SCOPES explicitly; historical evaluation passes LEGACY_REVIEW_SCOPES.
+    """
+    sc, sp = scope_clause(scopes)
     with _db() as c:
         rows = c.execute(
-            """SELECT * FROM predictions WHERE ticker = ?
-               ORDER BY created_at DESC LIMIT ?""",
-            [ticker.upper(), limit],
+            f"""SELECT * FROM predictions WHERE ticker = ? AND {sc}
+                ORDER BY created_at DESC LIMIT ?""",
+            [ticker.upper(), *sp, limit],
         ).fetchall()
     return [Prediction.from_db_row(dict(row)) for row in rows]
 
@@ -618,16 +717,17 @@ def _parse_pred_row(row) -> dict:
     return d
 
 
-def get_all_latest_predictions() -> dict[str, Prediction]:
-    """Return the most recent prediction row for every ticker that has one."""
+def get_all_latest_predictions(*, scopes: tuple[str, ...] = DISPLAY_SCOPES) -> dict[str, Prediction]:
+    """Most recent prediction row per ticker within *scopes* (default: everything the local user may see)."""
+    sc, sp = scope_clause(scopes)
     with _db() as c:
-        rows = c.execute("""
+        rows = c.execute(f"""
             SELECT p.* FROM predictions p
             INNER JOIN (
                 SELECT ticker, MAX(id) AS max_id
-                FROM predictions GROUP BY ticker
+                FROM predictions WHERE {sc} GROUP BY ticker
             ) latest ON p.id = latest.max_id
-        """).fetchall()
+        """, sp).fetchall()
     result = {}
     for row in rows:
         pred = Prediction.from_db_row(dict(row))

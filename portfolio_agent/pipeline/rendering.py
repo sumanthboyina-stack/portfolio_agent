@@ -14,6 +14,48 @@ from portfolio_agent.log import get_logger as _get_logger
 _log = _get_logger("cli")
 
 
+def _print_action_permission_qualifier(state: dict) -> None:
+    """
+    root_agent's "recommendation" (synthesis_agent) and "clearance" (Phase 6's
+    deterministic clearance_agent gate) print as two independent sections
+    above — nothing ties them together, so a reader could see
+    "action: STRONG BUY" and, several lines later and easy to miss,
+    "clearance_status: BLOCKED" with no link between them. This prints one
+    explicit qualifier line so a blocked/pending/unknown permission is never
+    left silently next to an unqualified actionable-looking recommendation.
+    Deliberately does NOT use tools.decision_composer: root_agent's
+    recommendation is ephemeral ADK session state, never a stored/shared
+    forecast (see agent.py's docstring) — there is nothing in the persisted
+    MarketForecast/PortfolioAssessment tables for that composer to compose
+    against here; this is root_agent's own two already-computed values,
+    just finally read together instead of independently.
+    """
+    rec_raw = state.get("recommendation")
+    clearance_raw = state.get("clearance")
+    if not rec_raw or not clearance_raw:
+        return
+    try:
+        rec = json.loads(rec_raw) if isinstance(rec_raw, str) else rec_raw
+        clearance = json.loads(clearance_raw) if isinstance(clearance_raw, str) else clearance_raw
+        action = rec.get("action") if isinstance(rec, dict) else None
+        status = clearance.get("clearance_status") if isinstance(clearance, dict) else None
+    except Exception:
+        return
+    if not action or not status:
+        return
+
+    _log.info("\n── Action permission " + "─" * 28, event_type="summary")
+    if status == "ALLOWED_BY_RULES":
+        _log.info(f"  {action} — ALLOWED_BY_RULES (this system's rules only, not external compliance approval)",
+                  event_type="summary")
+    else:
+        _log.info(f"  {action} is NOT actionable — clearance status is {status}, not ALLOWED_BY_RULES",
+                  event_type="summary")
+        memo = clearance.get("memo") if isinstance(clearance, dict) else None
+        if memo:
+            _log.info(f"  {memo}", event_type="summary")
+
+
 def print_news(data: dict) -> None:
     """Rich terminal display for the news state key."""
     _log.info(f"\n  Sentiment : {data.get('sentiment')}  ({data.get('sentiment_score', 0):+.2f})",
@@ -99,6 +141,7 @@ def pretty_print(ticker: str, agent_name: str, state: dict) -> None:
         _section("Risk",           "risk")
         _section("Recommendation", "recommendation")
         _section("Clearance",      "clearance")
+        _print_action_permission_qualifier(state)
     else:
         key_map = {
             "fundamentals": "fundamentals",

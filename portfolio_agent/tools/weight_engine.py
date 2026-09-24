@@ -74,6 +74,24 @@ DEFAULT_BASE_WEIGHTS: dict[str, float] = {
 
 WEIGHT_FLOOR = 0.05
 
+# ── Effective settings: database-backed overrides on top of the module defaults above ──
+# The module constants (BASE, HORIZON_BASE_WEIGHTS, DEFAULT_BASE_WEIGHTS, WEIGHT_FLOOR)
+# stay put as the seed values engine_settings_db seeds its singleton row from, and as
+# the fixed inputs the Phase 1 golden tests check — they never change. What the engine
+# actually computes with is whatever an administrator has since saved in that row
+# (Settings → Engine Weights); a DB read failure falls back to these constants so the
+# engine never hard-fails on a settings problem.
+
+def effective_settings() -> dict:
+    try:
+        from portfolio_agent.tools.engine_settings_db import get_engine_settings
+        return get_engine_settings()
+    except Exception:
+        return {"base_weights": dict(BASE), "horizon_base_weights": {k: dict(v) for k, v in HORIZON_BASE_WEIGHTS.items()},
+                "default_base_weights": dict(DEFAULT_BASE_WEIGHTS), "weight_floor": WEIGHT_FLOOR,
+                "no_news_conviction_threshold": 7.0, "no_news_cap": 5.0,
+                "bounce_return_threshold": -0.05, "bounce_cap": 5.0}
+
 # ── Boost / penalty constants ─────────────────────────────────────────────────
 _B_NONE     = 0.00
 _B_LOW      = 0.40
@@ -464,10 +482,10 @@ def _apply_signals(
     return raw, regime, rationale, data_caps, signal_strengths
 
 
-def _normalize(raw: dict[str, float], use_floor: bool = False) -> dict[str, float]:
-    """Normalize weights to 1.0, with optional WEIGHT_FLOOR clamping."""
+def _normalize(raw: dict[str, float], use_floor: bool = False, floor: float | None = None) -> dict[str, float]:
+    """Normalize weights to 1.0, with optional floor clamping (default: WEIGHT_FLOOR, the module constant)."""
     if use_floor:
-        raw = {k: max(v, WEIGHT_FLOOR) for k, v in raw.items()}
+        raw = {k: max(v, WEIGHT_FLOOR if floor is None else floor) for k, v in raw.items()}
     total = sum(raw.values())
     weights = {k: round(v / total, 3) for k, v in raw.items()}
     diff = round(1.000 - sum(weights.values()), 3)
@@ -491,7 +509,8 @@ def compute_dynamic_weights_for_horizon(
     db_context expects keys: 'news' (list), 'research' (dict),
     'fundamentals' (dict), 'valuation' (dict, optional).
     """
-    base = HORIZON_BASE_WEIGHTS.get(horizon_days, DEFAULT_BASE_WEIGHTS).copy()
+    settings = effective_settings()
+    base = dict(settings["horizon_base_weights"].get(horizon_days, settings["default_base_weights"]))
     raw, _, _, _, _ = _apply_signals(
         base,
         db_context.get("news") or [],
@@ -500,21 +519,18 @@ def compute_dynamic_weights_for_horizon(
         db_context.get("fundamentals"),
         db_context.get("valuation"),
     )
-    return _normalize(raw, use_floor=True)
+    return _normalize(raw, use_floor=True, floor=settings["weight_floor"])
 
 
-def _preferred_horizon_days() -> set[int] | None:
+SUPPORTED_HORIZONS: tuple[int, ...] = tuple(sorted(HORIZON_BASE_WEIGHTS))
+
+
+def preferred_horizon_days_from_labels(labels) -> set[int] | None:
     """
-    Horizon days the user wants generated, from user_profile.preferred_horizons
-    (labels like "5d"). Returns None for "no filtering" — when the profile is
-    unavailable, or when the stored list is empty/unparseable (an empty
-    preference must never silently produce zero horizons).
+    Parse profile-style horizon labels ("5d", "21d") into day counts. Returns
+    None for "no filtering" — an empty or unparseable preference must never
+    silently produce zero horizons. Pure; callers pass the labels explicitly.
     """
-    try:
-        from portfolio_agent.tools.user_profile_db import get_user_profile
-        labels = get_user_profile().preferred_horizons
-    except Exception:
-        return None
     days: set[int] = set()
     for label in labels or []:
         try:
@@ -524,10 +540,14 @@ def _preferred_horizon_days() -> set[int] | None:
     return days or None
 
 
-def filter_preferred_horizons(horizons: list[int]) -> list[int]:
-    """Keep only the horizons in the user's preferred_horizons (order preserved).
-    A pure output filter — it never changes how any remaining horizon is weighted."""
-    preferred = _preferred_horizon_days()
+def filter_preferred_horizons(horizons: list[int], preferred: set[int] | None = None) -> list[int]:
+    """
+    Presentation-side filter: keep only the horizons in *preferred* (order
+    preserved); None means no filtering. This is the only place a personal
+    preference touches horizons, and it happens AFTER shared generation — it
+    never changes how any horizon is weighted and is never consulted by the
+    market-context builder or the pipeline.
+    """
     if preferred is None:
         return list(horizons)
     return [h for h in horizons if int(h) in preferred]
@@ -539,11 +559,11 @@ def compute_dynamic_weights_all_horizons(
     db_context: dict,
     macro_snapshot: dict,
 ) -> dict[int, dict[str, float]]:
-    """Compute weights for all requested horizons in a single call, limited to
-    the user's preferred_horizons (see filter_preferred_horizons)."""
+    """Compute weights for exactly the requested horizons in a single call. No
+    profile is consulted: the caller states the horizons explicitly."""
     return {
         h: compute_dynamic_weights_for_horizon(ticker, h, db_context, macro_snapshot)
-        for h in filter_preferred_horizons(horizons)
+        for h in horizons
     }
 
 
@@ -562,9 +582,9 @@ def compute_dynamic_weights(
     Compute context-aware weights for the APEX panel synthesis.
 
     When horizons is provided, also computes per-horizon weights under the
-    'weights_by_horizon' key — for the subset of those horizons that appear in
-    the user's preferred_horizons (default: all). The weighting math for each
-    remaining horizon is unchanged; the preference only filters the output.
+    'weights_by_horizon' key for exactly those horizons. Nothing here reads a
+    user profile: horizons are an explicit input (see SUPPORTED_HORIZONS), so
+    identical inputs give identical weights whoever asks.
 
     Returns a dict with:
       weights              — single-horizon weights (legacy BASE)
@@ -572,7 +592,7 @@ def compute_dynamic_weights(
       data_caps, regime, weight_summary, per_source, signal_strengths
     """
     raw, regime, rationale, data_caps, signal_strengths = _apply_signals(
-        BASE, news_data, research_data, macro_snapshot, fundamentals_data, valuation_data
+        effective_settings()["base_weights"], news_data, research_data, macro_snapshot, fundamentals_data, valuation_data
     )
     weights = _normalize(raw, use_floor=False)
 

@@ -12,6 +12,16 @@ The Risk specialist's own tools only see one ticker at a time and can't
 compute correlation/sector-aggregate/beta/issuer-concentration across the
 whole portfolio — portfolio_risk.py computes that once per run (pure math,
 no LLM) and this module folds it into the Risk specialist's query text.
+
+Technical: the LLM Technical specialist below produces an optional,
+market-only NARRATIVE (score + summary) written to risk_flags, unchanged.
+The deterministic indicator MATH behind it (SMA/RSI/MACD/Bollinger/ATR) is
+computed and stored separately by tools.technical_features, keyed by
+(instrument, data_snapshot, interval, lookback, adjustment_method,
+calculation_version) — see _store_deterministic_technical_features below.
+That write is best-effort and never affects this phase's pass/fail
+accounting: a caller wanting the raw numbers reads technical_features
+directly rather than parsing the specialist's narrative.
 """
 
 from __future__ import annotations
@@ -122,6 +132,8 @@ async def _run_daily_risk_technical(portfolio_tickers: list[str], tracker=None) 
         if tracker:
             tracker.tick("risk_technical", completed, total_calls, ticker=ticker, note=f"{i}/{len(to_run)}")
 
+        _store_deterministic_technical_features(ticker, log)
+
         log.info(
             f"  [{i}/{len(to_run)}] {ticker} — risk={'✓' if risk_data else '✗'} "
             f"technical={'✓' if tech_data else '✗'}",
@@ -167,3 +179,20 @@ def _save_technical_flag(ticker: str, as_of_date: str, data: dict, model_used: s
         flag=flag, score=score, summary=data.get("summary", ""),
         raw_json=json.dumps(data), model_used=model_used,
     )
+
+
+def _store_deterministic_technical_features(ticker: str, log) -> None:
+    """
+    Best-effort, market-only side write of the deterministic indicator math
+    (see module docstring). Uses the shared history cache and the store's own
+    reuse-by-key check — a ticker already computed today by this run, another
+    run, or a chat request reading the same instrument is not recomputed.
+    Never raises into the caller and never affects risk_technical's own
+    completed/failed counts — a caller wanting these numbers reads
+    tools.technical_features directly, not this pipeline's pass/fail state.
+    """
+    from portfolio_agent.tools.technical_features import fetch_and_store_technical_features
+    try:
+        fetch_and_store_technical_features(ticker)
+    except Exception as exc:
+        log.warning(f"  [warn] technical_features store failed for {ticker}: {exc}", event_type="warning")
