@@ -338,6 +338,54 @@ class UserNotificationPrefs(_DictCompat):
         }
 
 
+# ── AuthUser ───────────────────────────────────────────────────────────────────
+
+@dataclass
+class AuthUser(_DictCompat):
+    """One auth_users row: an invited login, bound to an OIDC identity after
+    first sign-in. See portfolio_agent/tools/auth_users_db.py."""
+    id: int
+    email: str
+    owner: str
+    role: str = "member"
+    enabled: bool = True
+    issuer: str | None = None
+    subject: str | None = None
+    created_at: str | None = None
+    last_login_at: str | None = None
+
+    @classmethod
+    def from_db_row(cls, row: dict) -> "AuthUser":
+        return cls(
+            id=row["id"],
+            email=row["email"],
+            owner=row["owner"],
+            role=row.get("role") or "member",
+            enabled=bool(row.get("enabled", 1)),
+            issuer=row.get("issuer"),
+            subject=row.get("subject"),
+            created_at=row.get("created_at"),
+            last_login_at=row.get("last_login_at"),
+        )
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "email": self.email,
+            "owner": self.owner,
+            "role": self.role,
+            "enabled": self.enabled,
+            "issuer": self.issuer,
+            "subject": self.subject,
+            "created_at": self.created_at,
+            "last_login_at": self.last_login_at,
+        }
+
+
 # ── FundamentalsSnapshot ───────────────────────────────────────────────────────
 
 @dataclass

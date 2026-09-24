@@ -71,6 +71,20 @@ holdings:
 
 Edit `config/watchlist.yaml` to add tickers you want tracked but don't hold. Group them by category if you want organized filtering in the UI.
 
+### Web login (Entra ID)
+
+The web dashboard requires signing in with Entra ID (`st.login("entra")`) plus an allow-list check — nobody can reach a page without both a real login and an invited, enabled row.
+
+1. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and fill in `cookie_secret` (any long random string), `client_id`, `client_secret`, and `server_metadata_url` from your Entra app registration. `.streamlit/secrets.toml` is gitignored — never commit it.
+2. Add `http://localhost:8501/oauth2callback` as a redirect URI on that app registration for local runs.
+3. Seed yourself as the first admin — **`--owner` must be `portfolio_agent.domain.LOCAL_OWNER`** (currently `sumanth_b`), not a placeholder string, or your session's identity won't match any of your existing data:
+   ```bash
+   python main.py --auth-invite you@example.com --owner sumanth_b --role admin
+   ```
+4. `./run_web.sh`, sign in, then invite/disable further users from the Users section on the Profile page (admin only).
+
+`--auth-list` and `--auth-disable EMAIL` manage users from the CLI the same way.
+
 ### Run the dashboard
 
 ```bash

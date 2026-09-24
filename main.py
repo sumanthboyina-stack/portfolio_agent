@@ -140,12 +140,73 @@ def _parse_args() -> argparse.Namespace:
             "Omit for a full analysis."
         ),
     )
+    p.add_argument(
+        "--auth-invite",
+        metavar="EMAIL",
+        help="Invite EMAIL to sign in to the web app (requires --owner).",
+    )
+    p.add_argument(
+        "--auth-disable",
+        metavar="EMAIL",
+        help="Disable an invited or active web login.",
+    )
+    p.add_argument(
+        "--auth-list",
+        action="store_true",
+        help="List invited web logins.",
+    )
+    p.add_argument(
+        "--owner",
+        metavar="OWNER",
+        help="Internal owner id for --auth-invite, e.g. portfolio_agent.domain.LOCAL_OWNER.",
+    )
+    p.add_argument(
+        "--role",
+        default="member",
+        choices=["admin", "member"],
+        help="Role for --auth-invite (default: member).",
+    )
     return p.parse_args()
 
 
 async def _main() -> None:
     log = _get_logger("main")
     args = _parse_args()
+
+    if args.auth_invite:
+        from portfolio_agent.tools.auth_users_db import invite_user
+        if not args.owner:
+            log.error("[error] --auth-invite requires --owner.", event_type="error")
+            sys.exit(1)
+        user = invite_user(args.auth_invite, owner=args.owner, role=args.role)
+        log.info(
+            f"Invited {user.email} (owner={user.owner}, role={user.role}).",
+            event_type="summary",
+        )
+        return
+
+    if args.auth_disable:
+        from portfolio_agent.tools.auth_users_db import disable_user
+        if disable_user(args.auth_disable):
+            log.info(f"Disabled {args.auth_disable}.", event_type="summary")
+        else:
+            log.error(f"[error] No auth user found for {args.auth_disable}.", event_type="error")
+            sys.exit(1)
+        return
+
+    if args.auth_list:
+        from portfolio_agent.tools.auth_users_db import list_users
+        users = list_users()
+        if not users:
+            log.info("No invited users.", event_type="summary")
+        for u in users:
+            status = "enabled" if u.enabled else "disabled"
+            bound = "bound" if u.subject else "pending first login"
+            log.info(
+                f"  {u.email:<40} owner={u.owner:<12} role={u.role:<8} {status:<8} {bound}",
+                event_type="summary",
+            )
+        return
 
     tickers: list[str] = [t.upper() for t in args.tickers]
 
