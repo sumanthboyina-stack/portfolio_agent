@@ -47,6 +47,8 @@ from web.chat.orchestration import (
     _run_chat_agent_thread, _run_apex_thread, _extract_json,
 )
 
+from web.auth import current_context, render_account_menu, require_login
+
 st.set_page_config(
     page_title="APEX Chat · Financial AI",
     page_icon=material("smart_toy"),
@@ -54,7 +56,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_global_css()
+require_login()
 top_nav("chat")
+render_account_menu()
 
 # ── Chat-specific CSS (supplements global styles.py) ──────────────────────────
 st.markdown("""
@@ -898,7 +902,6 @@ if _has_message and (_has_ticker or _no_ticker):
                     DISPLAY_SCOPES, get_scheduled_horizons as _gs_h, get_today_horizons as _gth,
                 )
                 from portfolio_agent.tools.forecast_writer import ForecastProvenance, write_private_forecast
-                from portfolio_agent.services.context import local_context
                 from portfolio_agent.tools.yfinance_tools import get_close as _get_close
                 _sched_h = _gs_h(_today_save) or [5]
                 _done_h  = _gth(ticker, _today_save.isoformat(), scopes=DISPLAY_SCOPES)
@@ -939,7 +942,7 @@ if _has_message and (_has_ticker or _no_ticker):
                     # A chat answer is produced for one person from their question: it is stored
                     # as PRIVATE and never enters shared history or prompts.
                     _r = write_private_forecast(
-                        local_context("web:chat").actor,
+                        current_context("web:chat").actor,
                         ForecastProvenance(origin="chat.ticker_prediction",
                                            model_used=f"{used_model_provider}:{used_model_label}",
                                            guardrail_version=GUARDRAIL_VERSION),

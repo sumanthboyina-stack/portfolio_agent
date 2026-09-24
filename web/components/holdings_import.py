@@ -30,10 +30,10 @@ from web.data.portfolio import _enrich_prices
 from portfolio_agent.services.account_service import (
     DuplicateAccount, DuplicatePosition, add_position, create_account, delete_account_permanently,
 )
-from portfolio_agent.services.context import local_context
 from portfolio_agent.tools.holdings_import import (
     BROKER_LABELS, ImportPlan, ImportResult, ParsedUpload, build_plan, commit_plan, parse_upload,
 )
+from web.auth import current_context
 
 BROKER_META = {
     "fidelity": {"label": "Fidelity", "color": "#22863A",
@@ -180,7 +180,7 @@ def render_import_flow(key: str, on_close: Callable[[], None] | None = None) -> 
         b1, b2 = st.columns([1, 1])
         if b1.button("Confirm & import", type="primary", key=f"{key}_confirm", icon=material("check")):
             with st.spinner("Importing and fetching prices…"):
-                result: ImportResult = commit_plan(plan, context=local_context("web:import"))
+                result: ImportResult = commit_plan(plan, context=current_context("web:import"))
             bump_holdings_version()
             st.session_state["holdings_flash"] = result.message
             _close()
@@ -236,7 +236,7 @@ def render_add_position_form(accounts: list[dict], key: str = "add", on_close: C
                    "current_price": None, "current_value": None, "sector": "",
                    **{k: target[k] for k in ("account_name", "account_number", "account_type")}}
         enriched = _enrich_prices([holding])[0]
-        ctx = local_context("web:add_position")
+        ctx = current_context("web:add_position")
         try:
             if chosen == _NEW_ACCOUNT:
                 account_pk = create_account(ctx, broker="manual", display_name=new_name, account_type=new_type)["account_id"]
@@ -269,7 +269,7 @@ def confirm_remove(account_pk: int, label: str, n_positions: int) -> None:
     if c1.button("Cancel", key="rm_cancel", width="stretch"):
         st.rerun()
     if c2.button("Yes, remove permanently", key="rm_confirm", type="primary", icon=material("delete"), width="stretch"):
-        res = delete_account_permanently(local_context("web:accounts"), account_pk, reason="user removed from Accounts page")
+        res = delete_account_permanently(current_context("web:accounts"), account_pk, reason="user removed from Accounts page")
         bump_holdings_version()
         n = res["positions"]
         st.session_state["holdings_flash"] = f"Removed {n} position{'s' if n != 1 else ''} from {label}."

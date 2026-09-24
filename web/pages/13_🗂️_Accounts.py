@@ -24,12 +24,15 @@ from web.components.holdings_import import (
 )
 from portfolio_agent.tools.holdings_db import get_holdings, get_cash_balances, get_import_runs, list_accounts
 from portfolio_agent.services.account_service import rename_account, archive_account, restore_account, VersionConflict
-from portfolio_agent.services.context import local_context
+
+from web.auth import current_context, render_account_menu, require_login
 
 st.set_page_config(page_title="Accounts & Imports — Portfolio Intelligence", page_icon=material("account_balance"),
                    layout="wide", initial_sidebar_state="expanded")
 inject_global_css()
+require_login()
 top_nav("accounts")
+render_account_menu()
 page_header("Accounts & Imports", subtitle="Brokerage accounts, holdings file imports, and import history",
             icon="account_balance")
 
@@ -87,7 +90,7 @@ if _tile_1:
                         new_name = st.text_input("Account name", value=acct["account_name"] or "", key=f"rename_{i}")
                         if st.button("Save name", key=f"rename_save_{i}", type="primary"):
                             try:
-                                rename_account(local_context("web:accounts"), acct["account_pk"], new_name)
+                                rename_account(current_context("web:accounts"), acct["account_pk"], new_name)
                                 st.session_state["holdings_flash"] = f"Renamed account to {new_name} ({acct['count']} positions)."
                             except (ValueError, VersionConflict) as exc:
                                 st.session_state["holdings_flash"] = f"Rename failed: {exc}"
@@ -95,7 +98,7 @@ if _tile_1:
                             st.rerun()
                     if r2.button("", key=f"archive_{i}", icon=material("archive"), width="stretch",
                                  help=f"Archive {name}: hide it from Portfolio and totals; positions, cash and history are kept and it can be restored below."):
-                        archive_account(local_context("web:accounts"), acct["account_pk"], reason="user archived from Accounts page")
+                        archive_account(current_context("web:accounts"), acct["account_pk"], reason="user archived from Accounts page")
                         bump_holdings_version()
                         st.session_state["holdings_flash"] = f"Archived {name}."
                         st.rerun()
@@ -112,7 +115,7 @@ if _tile_1:
                                  f"<span style='color:#94A3B8'>{esc(masked_account_number(a['account_number']))}</span>",
                                  unsafe_allow_html=True)
                     if ac2.button("Restore", key=f"restore_{a['account_id']}", icon=material("unarchive"), width="stretch"):
-                        restore_account(local_context("web:accounts"), a["account_id"], reason="user restored from Accounts page")
+                        restore_account(current_context("web:accounts"), a["account_id"], reason="user restored from Accounts page")
                         bump_holdings_version()
                         st.session_state["holdings_flash"] = f"Restored {a['display_name'] or a['account_number']}."
                         st.rerun()

@@ -16,6 +16,8 @@ from portfolio_agent.tools.restricted_list_db import (
     list_pipeline_skip, add_pipeline_skip, remove_pipeline_skip,
 )
 
+from web.auth import current_context, current_user, render_account_menu, require_login
+
 st.set_page_config(
     page_title="Restricted List — Portfolio Intelligence",
     page_icon=material("block"),
@@ -23,7 +25,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_global_css()
+require_login()
 top_nav("restricted")
+render_account_menu()
+
+if not current_user().is_admin:
+    st.error("Admin only.")
+    st.stop()
 
 with st.sidebar:
     st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Restricted List</p>', unsafe_allow_html=True)

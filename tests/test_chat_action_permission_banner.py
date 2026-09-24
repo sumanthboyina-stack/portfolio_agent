@@ -21,6 +21,11 @@ from portfolio_agent.tools import portfolio_risk as risk
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    # This suite exercises rendering, not the web login gate — stand in for a
+    # verified web session so current_context() (called by rendering.py) works
+    # without a real Streamlit auth flow.
+    import web.auth as auth
+    monkeypatch.setattr(auth, "current_context", lambda source: local_context(source))
 
 
 def _capture_streamlit(monkeypatch):

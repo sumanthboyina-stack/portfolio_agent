@@ -26,6 +26,8 @@ from web.styles import (
 
 _DB = _ROOT / "data" / "portfolio.db"
 
+from web.auth import current_context, render_account_menu, require_login
+
 st.set_page_config(
     page_title="Portfolio Intelligence",
     page_icon=material("trending_up"),
@@ -33,7 +35,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 inject_global_css()
+require_login()
 top_nav("dashboard")
+render_account_menu()
 
 
 # ── DB load (single pass, 120 s cache) ───────────────────────────────────────

@@ -18,9 +18,13 @@ from web.components.predictions_cards import render_action_items, render_all_pre
 
 _DB = _ROOT / "data" / "portfolio.db"
 
+from web.auth import current_context, render_account_menu, require_login
+
 st.set_page_config(page_title="APEX Predictions", page_icon=material("insights"), layout="wide")
 inject_global_css()
+require_login()
 top_nav("predictions")
+render_account_menu()
 
 
 # ── Main page ─────────────────────────────────────────────────────────────────

@@ -46,7 +46,6 @@ from web.components.portfolio_charts import (
 )
 from portfolio_agent.tools.company_names import get_company_names, get_company_name, search_companies
 from portfolio_agent.services.account_service import set_position, remove_position, NotFound, VersionConflict
-from portfolio_agent.services.context import local_context
 from portfolio_agent.tools.holdings_db import (
     get_holdings, get_cash_balances, get_holdings_version, get_price_history,
     get_history_coverage, repair_legacy_history,
@@ -59,6 +58,8 @@ from web.components.holdings_import import (
     esc as _esc, broker_label as _broker_label,
 )
 
+from web.auth import current_context, render_account_menu, require_login
+
 st.set_page_config(
     page_title="Portfolio — Portfolio Intelligence",
     page_icon=material("work"),
@@ -66,7 +67,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_global_css()
+require_login()
 top_nav("portfolio")
+render_account_menu()
 
 with st.sidebar:
     st.markdown('<p style="font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6B7280;margin:0 0 10px">Portfolio</p>', unsafe_allow_html=True)
@@ -282,7 +285,7 @@ def _render_edit_position_form(h) -> None:
     b1, b2 = st.columns(2)
     if b1.button("Save changes", type="primary", key=f"edit_save_{hid}", icon=material("save"), width="stretch"):
         try:
-            set_position(local_context("web:portfolio"), hid, expected_version=h.get("version"),
+            set_position(current_context("web:portfolio"), hid, expected_version=h.get("version"),
                          shares=float(e_shares) if e_shares else None, avg_cost=float(e_cost) if e_cost else None,
                          reason="edited in Portfolio")
             flash = f"Updated {h['ticker']}."
@@ -295,7 +298,7 @@ def _render_edit_position_form(h) -> None:
         st.rerun()
     if b2.button("Remove this position", key=f"edit_remove_{hid}", icon=material("delete"), width="stretch"):
         try:
-            remove_position(local_context("web:portfolio"), hid, expected_version=h.get("version"),
+            remove_position(current_context("web:portfolio"), hid, expected_version=h.get("version"),
                             reason="removed in Portfolio")
             flash = f"Removed {h['ticker']} from {acct}."
         except NotFound:

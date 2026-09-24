@@ -275,10 +275,10 @@ def render_action_permission_and_fit(ticker: str, action: str = "trade") -> None
     """
     from portfolio_agent.clearance import evaluate_and_record_clearance
     from portfolio_agent.services.account_service import NotAuthorized
-    from portfolio_agent.services.context import local_context
     from portfolio_agent.tools.user_profile_db import get_user_profile_for
+    from web.auth import current_context
 
-    ctx = local_context("web:chat")
+    ctx = current_context("web:chat")
     ticker = ticker.upper()
 
     try:

@@ -30,6 +30,8 @@ from portfolio_agent.tools.user_notifications_db import (
     get_user_notifications, update_user_notifications,
 )
 
+from web.auth import current_context, current_user, render_account_menu, require_login
+
 st.set_page_config(
     page_title="Profile — Portfolio Intelligence",
     page_icon=material("person"),
@@ -37,7 +39,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_global_css()
+require_login()
 top_nav("profile")
+render_account_menu()
 
 with st.sidebar:
     st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Profile</p>', unsafe_allow_html=True)
@@ -332,3 +336,55 @@ if submitted:
         )
         st.session_state["profile_flash"] = "Profile saved."
         st.rerun()
+
+# ── Admin: invited users ──────────────────────────────────────────────────────
+
+if current_user().is_admin:
+    from portfolio_agent.domain import LOCAL_OWNER
+    from portfolio_agent.tools.auth_users_db import disable_user, invite_user, list_users
+
+    st.divider()
+    _tile_users = section_tile("Users", badge_text="admin", badge_color=PRIMARY, expanded=True, key="admin_users")
+    if _tile_users:
+        with _tile_users:
+            users = list_users()
+            if users:
+                st.dataframe(
+                    [
+                        {
+                            "email": u.email,
+                            "owner": u.owner,
+                            "role": u.role,
+                            "enabled": u.enabled,
+                            "status": "bound" if u.subject else "pending first login",
+                            "last_login_at": u.last_login_at or "",
+                        }
+                        for u in users
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.caption("No invited users yet.")
+
+            with st.form("admin_invite_user", clear_on_submit=True):
+                cols = st.columns([3, 2, 1.5, 1])
+                invite_email = cols[0].text_input("Email", placeholder="name@example.com")
+                invite_owner = cols[1].text_input("Owner", value=LOCAL_OWNER)
+                invite_role = cols[2].selectbox("Role", ["member", "admin"])
+                if cols[3].form_submit_button("Invite", width="stretch"):
+                    if invite_email.strip():
+                        invite_user(invite_email.strip(), owner=invite_owner.strip(), role=invite_role)
+                        st.session_state["profile_flash"] = f"Invited {invite_email.strip()}."
+                        st.rerun()
+                    else:
+                        st.error("Email is required.", icon=material("error"))
+
+            if users:
+                disable_email = st.selectbox(
+                    "Disable a user", [""] + [u.email for u in users if u.enabled], key="admin_disable_select"
+                )
+                if disable_email and st.button("Disable", key="admin_disable_btn"):
+                    disable_user(disable_email)
+                    st.session_state["profile_flash"] = f"Disabled {disable_email}."
+                    st.rerun()

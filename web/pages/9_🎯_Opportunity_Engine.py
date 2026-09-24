@@ -40,6 +40,8 @@ def _price_change_since(ticker: str, since_date: str) -> float | None:
     return (current / anchor) - 1.0
 
 
+from web.auth import current_context, render_account_menu, require_login
+
 st.set_page_config(
     page_title="Opportunity Engine — Portfolio Intelligence",
     page_icon=material("track_changes"),
@@ -47,7 +49,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_global_css()
+require_login()
 top_nav("opportunity_engine")
+render_account_menu()
 
 with st.sidebar:
     st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Opportunity Engine</p>', unsafe_allow_html=True)

@@ -55,6 +55,8 @@ def _available_dates() -> list[str]:
         return [_TODAY]
     return sorted(dates, reverse=True)
 
+from web.auth import current_context, current_user, render_account_menu, require_login
+
 st.set_page_config(
     page_title="Today's Data — Portfolio Intelligence",
     page_icon=material("database"),
@@ -62,7 +64,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_global_css()
+require_login()
 top_nav("database")
+render_account_menu()
+
+if not current_user().is_admin:
+    st.error("Admin only.")
+    st.stop()
 
 if not _DB.exists():
     page_header("Database", icon="database")
