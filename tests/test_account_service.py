@@ -121,5 +121,6 @@ def test_operations_compose_into_one_transaction_via_conn():
 
 
 def test_local_context_resolves_to_the_seeded_local_portfolio():
+    from portfolio_agent.domain import LOCAL_OWNER
     p = svc.resolve_portfolio(local_context("web:test"))
-    assert p["owner"] == "local" and p["base_currency"] == "USD"
+    assert p["owner"] == LOCAL_OWNER and p["base_currency"] == "USD"

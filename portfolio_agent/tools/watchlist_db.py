@@ -62,6 +62,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     migrate_columns(conn, "watchlist", [("owner", "TEXT")])
     conn.execute("UPDATE watchlist SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
+    # One-time rename: LOCAL_OWNER was "local" before this deployment's single
+    # user was named "sumanth_b" ahead of registration/login. Idempotent.
+    conn.execute("UPDATE watchlist SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
     if not _LEGACY_YAML.exists():
         return
     try:

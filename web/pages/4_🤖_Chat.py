@@ -878,6 +878,17 @@ if _has_message and (_has_ticker or _no_ticker):
                 pred_data.setdefault("pt_num_analysts",  _res.get("num_analysts"))
                 pred_data.setdefault("pt_current_price", _res.get("current_price"))
 
+                # Chat is judged by the same deterministic conviction caps as the
+                # scheduled pipeline, before it is shown or saved (not just before
+                # it's allowed to trade -- that's a separate, later check via
+                # render_action_permission_and_fit). See docstring in orchestration.
+                from portfolio_agent.tools.forecast_writer import GUARDRAIL_VERSION
+                from web.chat.orchestration import apply_conviction_guardrails_to_horizons
+                _today_save = date.today()
+                apply_conviction_guardrails_to_horizons(
+                    ticker, pred_data.get("horizons") or [], _today_save,
+                )
+
                 st.divider()
                 _render_prediction_card(pred_data, elapsed, show_history=True)
                 render_action_permission_and_fit(ticker, action="trade")
@@ -889,7 +900,6 @@ if _has_message and (_has_ticker or _no_ticker):
                 from portfolio_agent.tools.forecast_writer import ForecastProvenance, write_private_forecast
                 from portfolio_agent.services.context import local_context
                 from portfolio_agent.tools.yfinance_tools import get_close as _get_close
-                _today_save = date.today()
                 _sched_h = _gs_h(_today_save) or [5]
                 _done_h  = _gth(ticker, _today_save.isoformat(), scopes=DISPLAY_SCOPES)
                 _start_price = _get_close(ticker, _today_save.isoformat())
@@ -931,13 +941,16 @@ if _has_message and (_has_ticker or _no_ticker):
                     _r = write_private_forecast(
                         local_context("web:chat").actor,
                         ForecastProvenance(origin="chat.ticker_prediction",
-                                           model_used=f"{used_model_provider}:{used_model_label}"),
+                                           model_used=f"{used_model_provider}:{used_model_label}",
+                                           guardrail_version=GUARDRAIL_VERSION),
                         **_common_save,
                         horizon_days=_h_days,
                         predicted_direction=_hd.get("predicted_direction"),
                         predicted_return_low=_hd.get("predicted_return_low"),
                         predicted_return_high=_hd.get("predicted_return_high"),
-                        conviction_score=_hd.get("conviction_score"),
+                        conviction_score=_hd.get("conviction_score"),      # already capped, above
+                        raw_conviction_score=_hd.get("raw_conviction_score"),
+                        guardrail_flags=_hd.get("guardrail_flags"),
                         reasoning_text=_hd.get("reasoning_text") or pred_data.get("reasoning",""),
                         start_price=_start_price,
                         p_strong_down=_dist.get("strong_down"),

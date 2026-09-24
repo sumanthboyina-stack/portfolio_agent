@@ -86,7 +86,7 @@ def _existing_holding_candidates(
         if pred is None:
             continue
         composite_score = pred.get("composite_score")
-        if _classify(pred.get("recommendation") or "", composite_score) != "BUY":
+        if _classify(pred.get("recommendation") or "", composite_score, pred.get("guardrail_flags")) != "BUY":
             continue
 
         ctx = risk_ctx.get(ticker, {})

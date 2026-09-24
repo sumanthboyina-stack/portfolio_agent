@@ -130,6 +130,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     owner is set, never touches id or any other column)."""
     migrate_columns(conn, "user_profile", _MIGRATED_COLUMNS)
     conn.execute("UPDATE user_profile SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
+    # One-time rename: LOCAL_OWNER was the placeholder "local" before this
+    # deployment's single user was named "sumanth_b" ahead of registration/
+    # login. Idempotent -- a no-op once no row still says "local".
+    conn.execute("UPDATE user_profile SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
 
 
 def _seed(conn: sqlite3.Connection) -> None:

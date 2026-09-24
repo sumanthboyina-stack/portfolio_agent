@@ -55,7 +55,7 @@ def _latest_trending_opportunity_predictions() -> list[dict]:
         rows = conn.execute(
             f"""SELECT ticker, horizon_days, recommendation, composite_score,
                       fundamental_score, research_score, macro_score, news_score,
-                      reasoning, reasoning_text, panel_summary, created_at
+                      reasoning, reasoning_text, panel_summary, created_at, guardrail_flags
                FROM predictions
                WHERE trigger_type = 'trending_opportunity' AND as_of_date = ? AND {_sc}
                ORDER BY created_at DESC""",
@@ -99,9 +99,24 @@ def _portfolio_fit_bonus(impact: Optional[dict]) -> float:
     return corr_bonus + concentration_bonus
 
 
-def _classify(recommendation: str, composite_score: Optional[float]) -> Optional[str]:
+def _classify(recommendation: str, composite_score: Optional[float],
+              guardrail_flags=None) -> Optional[str]:
+    """
+    A STRONG_BUY/BUY call only counts as a BUY pick when the conviction
+    guardrails never fired on it -- a capped bounce/no-news call is
+    deliberately no longer trustworthy enough to rank as a BUY (it would
+    otherwise still lead the Opportunity Engine's list on its unmodified
+    recommendation string, even after its own conviction/composite_score
+    were capped). It falls through to the same score-only judgment an
+    uncapped HOLD gets: WATCH if it still clears the floor, else dropped.
+    """
+    was_capped = bool(guardrail_flags)
     if recommendation in ("STRONG_BUY", "BUY"):
-        return "BUY"
+        if not was_capped:
+            return "BUY"
+        if composite_score is not None and composite_score >= _WATCH_COMPOSITE_FLOOR:
+            return "WATCH"
+        return None
     if recommendation == "HOLD" and composite_score is not None and composite_score >= _WATCH_COMPOSITE_FLOOR:
         return "WATCH"
     return None
@@ -148,7 +163,7 @@ def _score_candidate(
 
     ticker = row["ticker"]
     composite_score = row.get("composite_score")
-    call = _classify(row.get("recommendation") or "", composite_score)
+    call = _classify(row.get("recommendation") or "", composite_score, row.get("guardrail_flags"))
 
     impact: Optional[dict] = None
     if holdings:
@@ -213,7 +228,7 @@ def get_opportunity_history(ticker: str, window_days: int = 30) -> dict:
     _sc, _sp = scope_clause(SHARED_SCOPES)
     with db_conn() as conn:
         rows = conn.execute(
-            f"""SELECT as_of_date, composite_score, recommendation
+            f"""SELECT as_of_date, composite_score, recommendation, guardrail_flags
                FROM predictions
                WHERE trigger_type = 'trending_opportunity' AND ticker = ?
                  AND as_of_date >= ? AND {_sc}
@@ -224,7 +239,7 @@ def get_opportunity_history(ticker: str, window_days: int = 30) -> dict:
     all_rows = [dict(r) for r in rows]
     qualifying = [
         d for d in all_rows
-        if _classify(d.get("recommendation") or "", d.get("composite_score")) is not None
+        if _classify(d.get("recommendation") or "", d.get("composite_score"), d.get("guardrail_flags")) is not None
     ]
     if not qualifying:
         return {

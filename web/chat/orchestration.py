@@ -499,6 +499,48 @@ def _run_apex_thread(ticker: str, query: str, q: Queue) -> None:
         loop.close()
 
 
+# ── Post-hoc conviction guardrails ─────────────────────────────────────────────
+
+def apply_conviction_guardrails_to_horizons(ticker: str, horizons_data: list, today: date) -> None:
+    """
+    Apply apex.py's deterministic post-hoc conviction caps (no-news-bullish,
+    buy-the-dip bounce theses) to a chat prediction's horizons, in place,
+    BEFORE it is rendered or saved.
+
+    Without this, chat is the only write path that skips the caps: a chat
+    "buy the dip, no news" call would show and persist its raw, uncapped
+    conviction, while the scheduled pipeline's identical call is capped --
+    the action-permission banner shown alongside a chat prediction covers
+    whether a trade is currently allowed, not whether the call itself is any
+    good, so it does not substitute for this.
+
+    Mutates each horizon dict: conviction_score becomes the capped value;
+    raw_conviction_score is set to the original only when a cap actually
+    fired (None otherwise, so "never capped" stays distinguishable from
+    "capped to exactly its own raw value"); guardrail_flags records why.
+    """
+    from portfolio_agent.pipeline.daily.apex import _apply_conviction_guardrails
+    from portfolio_agent.tools.reasoning_tools import _get_recent_news
+    from portfolio_agent.tools.yfinance_tools import get_trailing_return
+
+    has_news = bool(_get_recent_news(ticker, days=7))
+    try:
+        trailing_10d = get_trailing_return(ticker, today.isoformat())
+    except Exception:
+        trailing_10d = None
+
+    for hrow in horizons_data:
+        if not isinstance(hrow, dict):
+            continue
+        raw_conv = hrow.get("conviction_score")
+        capped_conv, flags = _apply_conviction_guardrails(
+            hrow.get("predicted_direction"), raw_conv, has_news, trailing_10d,
+        )
+        hrow["conviction_score"] = capped_conv
+        hrow["raw_conviction_score"] = raw_conv if flags else None
+        hrow["guardrail_flags"] = flags or None
+
+
 # ── JSON extractor ────────────────────────────────────────────────────────────
 
 def _extract_json(text: str) -> dict:

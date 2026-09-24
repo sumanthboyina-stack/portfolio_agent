@@ -91,6 +91,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("next_transition_at", "TEXT"),
         ("valid_until", "TEXT"),
     ])
+    # One-time rename: the single local owner was "user:local" before this
+    # deployment's one user was named "sumanth_b" ahead of registration/login.
+    # Idempotent -- a no-op once no row still says "user:local".
+    from portfolio_agent.domain import LOCAL_OWNER
+    conn.execute("UPDATE policy_decisions SET owner_scope = ? WHERE owner_scope = 'user:local'",
+                 (f"user:{LOCAL_OWNER}",))
 
 
 def record_policy_decision(*, owner_scope: str, ticker: str, decision: str, reason: str | None,

@@ -384,6 +384,35 @@ perfect = 0.0 · coin flip = 0.25 · worst = 1.0
 # ── Tab 3: Post-mortems ───────────────────────────────────────────────────────
 
 with tabs[2]:
+    from portfolio_agent.tools.validation_engine import get_active_failure_patterns
+
+    # Deterministic, statistically-confirmed patterns -- not the LLM's own
+    # narrative below. These are exactly what protects predictions before
+    # weekly_pattern_analysis() has 20+ shared evaluated rows recurring across
+    # 2+ weekly reports to promote something here: until then this list stays
+    # empty and apex.py's hand-coded conviction caps (no-news-bullish, buy-
+    # the-dip bounce) are the only protection -- see get_active_failure_patterns().
+    active_patterns = get_active_failure_patterns(limit=10)
+    _tile_active = section_tile("Active Failure Patterns (feeding every APEX prompt)",
+                                expanded=True, key="validation_qa_active_patterns")
+    if _tile_active:
+        with _tile_active:
+            if not active_patterns:
+                st.info(
+                    "No recurring failure pattern has cleared the bar yet (needs >=20 shared "
+                    "evaluated predictions in a segment, recurring across 2+ weekly reports). "
+                    "The hand-coded conviction guardrails in apex.py are the only protection "
+                    "against known bad patterns until one does."
+                )
+            else:
+                st.caption(
+                    f"{len(active_patterns)} pattern(s) currently injected into every APEX/chat "
+                    "prompt as a known recurring failure mode."
+                )
+                for pat in active_patterns:
+                    st.write(f"- **{pat.get('description', pat.get('key', '?'))}** "
+                            f"— seen in {pat.get('weeks_seen', '?')} of the last weekly reports")
+
     reports = get_validation_reports(limit=5)
     if not reports:
         st.info(
@@ -409,6 +438,28 @@ with tabs[2]:
                         st.write("**Suggested improvements:**")
                         for sug in sugs:
                             st.write(f"- {sug}")
+                    # Structured, deterministic fields weekly_pattern_analysis() always
+                    # computes and stores alongside the LLM's free-form summary above --
+                    # previously never rendered anywhere (only consumed programmatically
+                    # via get_active_failure_patterns()).
+                    seg_flags = pi.get("segment_flags") or []
+                    if seg_flags:
+                        st.write("**Statistically confirmed failure segments this week:**")
+                        for seg in seg_flags:
+                            _acc  = seg.get("accuracy")
+                            _base = seg.get("baseline_accuracy")
+                            st.write(
+                                f"- {seg.get('description', seg.get('key'))}: "
+                                f"{fmt_pct(_acc * 100 if _acc is not None else None)} accuracy vs "
+                                f"{fmt_pct(_base * 100 if _base is not None else None)} baseline "
+                                f"(n={seg.get('n')}, p={seg.get('p_value')})"
+                            )
+                    cand_guardrails = pi.get("candidate_guardrails") or []
+                    if cand_guardrails:
+                        st.write("**Recurring across multiple weekly reports (candidate guardrails):**")
+                        for c in cand_guardrails:
+                            st.write(f"- {c.get('description', c.get('key'))} "
+                                    f"— seen in {c.get('weeks_seen', '?')} reports")
                     snap = report.get("metrics_snapshot") or {}
                     if snap.get("wrong_count"):
                         st.caption(f"Analyzed {snap['wrong_count']} wrong predictions.")

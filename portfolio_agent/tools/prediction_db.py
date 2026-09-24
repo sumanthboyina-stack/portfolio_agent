@@ -248,6 +248,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # Rows that predate scopes stay unclassified: they are never promoted to shared
     # by default and only reach readers through the restricted legacy path.
     conn.execute("UPDATE predictions SET scope = ? WHERE scope IS NULL", [SCOPE_LEGACY])
+    # One-time attribution: this deployment has exactly one user; legacy rows
+    # predate owner_scope entirely (NULL, not "unowned by design" the way a
+    # shared_market row's NULL owner_scope is). Attribute them to that user
+    # without touching `scope` -- they stay legacy_unclassified, still excluded
+    # from SHARED_SCOPES-gated prompts/mining, still visible via
+    # LEGACY_REVIEW_SCOPES/DISPLAY_SCOPES exactly as before. Idempotent.
+    from portfolio_agent.domain import LOCAL_OWNER
+    conn.execute(
+        "UPDATE predictions SET owner_scope = ? WHERE scope = ? AND owner_scope IS NULL",
+        (f"user:{LOCAL_OWNER}", SCOPE_LEGACY),
+    )
+    # One-time rename: any row already owner-scoped to the old "user:local"
+    # placeholder now belongs to "user:sumanth_b" -- idempotent.
+    conn.execute("UPDATE predictions SET owner_scope = ? WHERE owner_scope = 'user:local'",
+                 (f"user:{LOCAL_OWNER}",))
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_scope ON predictions(scope, ticker, created_at)")
     # Index for per-model accuracy queries and parent linkage
     conn.execute(

@@ -95,7 +95,11 @@ class _DictCompat:
 # ── Holding ────────────────────────────────────────────────────────────────────
 
 # The single local owner every request resolves to until multi-user auth exists.
-LOCAL_OWNER = "local"
+# Was "local" (a generic placeholder) until this deployment's one real user was
+# named ahead of building registration/login -- see prediction_db.py, user_profile_db.py,
+# restricted_list_db.py, watchlist_db.py, notification_log_db.py, policy_decisions_db.py,
+# and trade_approvals_db.py for the matching one-time backfill of existing "local"-owned rows.
+LOCAL_OWNER = "sumanth_b"
 
 
 @dataclass

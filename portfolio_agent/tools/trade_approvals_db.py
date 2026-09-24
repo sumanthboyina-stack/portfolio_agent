@@ -37,6 +37,7 @@ GRANTED_BY_LLM_FORBIDDEN = "llm"   # sentinel: never a legitimate granted_by val
 def _db():
     def _setup(conn: sqlite3.Connection) -> None:
         _create_schema(conn)
+        _migrate(conn)
         conn.commit()
     with db_conn(setup=_setup) as conn:
         yield conn
@@ -59,6 +60,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_approvals_lookup "
                 "ON trade_approvals(owner_scope, ticker, action, id DESC)")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """One-time rename: the single local owner was "user:local" before this
+    deployment's one user was named "sumanth_b" ahead of registration/login.
+    Idempotent -- a no-op once no row still says "user:local"."""
+    from portfolio_agent.domain import LOCAL_OWNER
+    conn.execute("UPDATE trade_approvals SET owner_scope = ? WHERE owner_scope = 'user:local'",
+                 (f"user:{LOCAL_OWNER}",))
 
 
 def _now_iso() -> str:

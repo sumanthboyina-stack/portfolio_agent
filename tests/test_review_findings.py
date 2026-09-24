@@ -16,6 +16,18 @@ session:
      nothing else in the codebase ever read — including market_context.py,
      so APEX's own prompt never saw it.
 
+A second review pass found two more:
+
+  5. events/detector.py was missing run_all_detectors/detect_material_news
+     entirely (present only in the module docstring), while morning.py and
+     intraday.py still imported run_all_detectors — an ImportError that
+     crashed both batches right before the APEX step. No test imported the
+     function, so the suite gave false confidence.
+  6. Chat (web/pages/4_🤖_Chat.py) was the only write path that skipped the
+     conviction guardrails: it showed and saved the model's raw conviction,
+     so a "buy the dip, no news" call could show as high conviction in chat
+     even though the identical scheduled-pipeline call would be capped.
+
 Each is fixed in the module it was found in; see that module's diff/
 docstring for the mechanism. This file tests the fixes directly.
 """
@@ -263,3 +275,167 @@ def test_pattern_mining_buckets_by_raw_conviction_not_the_capped_value():
     assert _conv_bucket(genuinely_low) == ("conviction", 5, "low")
     assert _conv_bucket(never_capped) == ("conviction", 5, "high")   # falls back to conviction_score
     assert _conv_bucket(missing_horizon) is None
+
+
+# ── Finding 1 (second pass): run_all_detectors went missing from detector.py ──
+# while morning.py/intraday.py still imported it, an ImportError that crashed
+# both batches right before APEX. No test caught it because none imported the
+# function -- these do.
+
+def test_run_all_detectors_is_importable_by_its_callers():
+    from portfolio_agent.pipeline.batch import morning as _m   # noqa: F401 -- import must not raise
+    from portfolio_agent.pipeline.batch import intraday as _i  # noqa: F401
+    from portfolio_agent.events.detector import run_all_detectors, detect_material_news
+    assert callable(run_all_detectors)
+    assert callable(detect_material_news)
+
+
+def test_run_all_detectors_detects_and_persists_material_news():
+    from portfolio_agent.events.detector import run_all_detectors
+    from portfolio_agent.events.db import get_pending_events
+    import portfolio_agent.tools.news_db as news_db
+
+    today = "2026-09-24"
+    with news_db._db() as conn:
+        conn.execute(
+            """INSERT INTO news_filter_log
+               (as_of_date, ticker, stage_2_decision, stage_3_decision, stage_3_score,
+                stage_3_summary, final_decision)
+               VALUES (?, 'AAPL', 'interesting', 'pass', 8, 'Material news happened', 'analyzed')""",
+            [today],
+        )
+        conn.commit()
+
+    events = run_all_detectors(["AAPL"], today, {"enabled": True, "intraday_severity_threshold": 3})
+    assert len(events) == 1
+    assert events[0]["ticker"] == "AAPL"
+    assert events[0]["event_type"] == "material_news"
+
+    pending = get_pending_events(today, min_severity=3)
+    assert any(e["ticker"] == "AAPL" for e in pending)
+
+
+# ── Finding 4: chat skipped the conviction guardrails entirely ────────────────
+# apex.py capped conviction for the scheduled pipeline; chat showed and saved
+# the model's raw value. web.chat.orchestration.apply_conviction_guardrails_to_horizons
+# closes that gap -- it's called from the chat page before render and save.
+
+def test_chat_guardrails_cap_a_no_news_bullish_call_and_preserve_raw(monkeypatch):
+    import portfolio_agent.tools.reasoning_tools as reasoning_tools
+    import portfolio_agent.tools.yfinance_tools as yfinance_tools
+    from web.chat.orchestration import apply_conviction_guardrails_to_horizons
+
+    monkeypatch.setattr(reasoning_tools, "_get_recent_news", lambda t, days=7: [])  # no news
+    monkeypatch.setattr(yfinance_tools, "get_trailing_return", lambda t, d: 0.01)   # not a bounce
+
+    horizons = [{"horizon_days": 5, "predicted_direction": "UP", "conviction_score": 9.0}]
+    apply_conviction_guardrails_to_horizons("AAPL", horizons, date(2026, 9, 24))
+
+    assert horizons[0]["conviction_score"] <= 5.0
+    assert horizons[0]["raw_conviction_score"] == 9.0
+    assert horizons[0]["guardrail_flags"] and "no_news_bullish_capped" in horizons[0]["guardrail_flags"]
+
+
+def test_chat_guardrails_leave_an_uncapped_call_unchanged(monkeypatch):
+    import portfolio_agent.tools.reasoning_tools as reasoning_tools
+    import portfolio_agent.tools.yfinance_tools as yfinance_tools
+    from web.chat.orchestration import apply_conviction_guardrails_to_horizons
+
+    monkeypatch.setattr(reasoning_tools, "_get_recent_news", lambda t, days=7: [{"headline_1": "x"}])
+    monkeypatch.setattr(yfinance_tools, "get_trailing_return", lambda t, d: 0.01)
+
+    horizons = [{"horizon_days": 5, "predicted_direction": "UP", "conviction_score": 6.0}]
+    apply_conviction_guardrails_to_horizons("AAPL", horizons, date(2026, 9, 24))
+
+    assert horizons[0]["conviction_score"] == 6.0
+    assert horizons[0]["raw_conviction_score"] is None
+    assert horizons[0]["guardrail_flags"] is None
+
+
+# ── Finding 5: capped calls still ranked as BUY in the Opportunity Engine ─────
+# _classify looked only at the (unmodified) recommendation string, so a capped
+# bounce/no-news call -- lower composite_score and all -- still showed as BUY.
+
+def test_classify_downgrades_a_capped_buy_call_to_watch():
+    from portfolio_agent.tools.opportunity_engine import _classify
+    assert _classify("BUY", 6.0, ["no_news_bullish_capped"]) == "WATCH"
+    assert _classify("STRONG_BUY", 6.0, ["bounce_thesis_capped"]) == "WATCH"
+
+
+def test_classify_drops_a_capped_buy_call_that_no_longer_clears_the_floor():
+    from portfolio_agent.tools.opportunity_engine import _classify
+    assert _classify("BUY", 4.0, ["no_news_bullish_capped"]) is None
+
+
+def test_classify_still_returns_buy_for_an_uncapped_call():
+    from portfolio_agent.tools.opportunity_engine import _classify
+    assert _classify("BUY", 9.0, None) == "BUY"
+    assert _classify("STRONG_BUY", 9.0, []) == "BUY"
+
+
+def test_classify_unaffected_for_non_buy_recommendations():
+    from portfolio_agent.tools.opportunity_engine import _classify
+    assert _classify("HOLD", 6.0, None) == "WATCH"
+    assert _classify("HOLD", 4.0, None) is None
+    assert _classify("SELL", 9.0, None) is None
+
+
+# ── Finding 6: single-user identity named "sumanth_b", legacy rows attributed ─
+# LOCAL_OWNER was the generic placeholder "local" pending real login/registration.
+# It's now this deployment's actual (single) user, with a one-time backfill of
+# every already-owned row plus attribution of the pre-scope-system legacy
+# predictions -- ahead of adding real multi-user registration/login later.
+
+def test_local_owner_is_now_sumanth_b():
+    from portfolio_agent.domain import LOCAL_OWNER
+    assert LOCAL_OWNER == "sumanth_b"
+
+
+def test_user_profile_owner_migrates_from_local_to_sumanth_b():
+    import portfolio_agent.tools.user_profile_db as m
+    from portfolio_agent.domain import LOCAL_OWNER
+    with m._db() as conn:
+        conn.execute("UPDATE user_profile SET owner = 'local' WHERE id = 1")
+        conn.commit()
+    with m._db() as conn:   # re-entering _db() re-runs _migrate()
+        row = conn.execute("SELECT owner FROM user_profile WHERE id = 1").fetchone()
+    assert row["owner"] == LOCAL_OWNER == "sumanth_b"
+
+
+def test_policy_decisions_owner_scope_migrates_from_local_to_sumanth_b():
+    import portfolio_agent.tools.policy_decisions_db as m
+    from portfolio_agent.domain import LOCAL_OWNER
+    with m._db() as conn:
+        conn.execute(
+            "INSERT INTO policy_decisions (evaluated_at, owner_scope, ticker, decision, policy_version, decided_by) "
+            "VALUES ('2026-01-01', 'user:local', 'AAPL', 'ALLOWED_BY_RULES', 'v1', 'deterministic-policy-engine')"
+        )
+        conn.commit()
+    with m._db() as conn:
+        row = conn.execute("SELECT owner_scope FROM policy_decisions WHERE ticker = 'AAPL'").fetchone()
+    assert row["owner_scope"] == f"user:{LOCAL_OWNER}" == "user:sumanth_b"
+
+
+def test_legacy_predictions_are_attributed_to_sumanth_b_without_becoming_shared():
+    import portfolio_agent.tools.prediction_db as pdb2
+    pdb2.insert_prediction(ticker="AAPL", prediction="NEUTRAL", recommendation="HOLD")
+    with pdb2._db() as conn:   # simulate a pre-scope-system row: predates the scope column
+        conn.execute("UPDATE predictions SET scope = NULL WHERE ticker = 'AAPL'")
+        conn.commit()
+    with pdb2._db() as conn:   # re-entering _db() re-runs _migrate()
+        row = conn.execute("SELECT scope, owner_scope FROM predictions WHERE ticker = 'AAPL'").fetchone()
+    assert row["scope"] == pdb2.SCOPE_LEGACY
+    assert row["owner_scope"] == "user:sumanth_b"
+
+
+def test_shared_predictions_stay_ownerless_not_attributed_to_sumanth_b():
+    """Shared/market-only rows must never gain an owner_scope -- that's what
+    makes them reusable across future users, unlike the legacy backfill above."""
+    import portfolio_agent.tools.prediction_db as pdb2
+    pdb2.insert_prediction(ticker="MSFT", prediction="NEUTRAL", recommendation="HOLD",
+                           scope=pdb2.SCOPE_SHARED, context_digest="test-digest")
+    with pdb2._db() as conn:
+        row = conn.execute(
+            "SELECT owner_scope FROM predictions WHERE ticker = 'MSFT' AND scope = ?", [pdb2.SCOPE_SHARED]
+        ).fetchone()
+    assert row["owner_scope"] is None

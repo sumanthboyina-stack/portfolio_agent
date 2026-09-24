@@ -221,7 +221,8 @@ def test_notification_log_is_private_and_never_touches_shared_prediction_tables(
     detector._maybe_notify({"id": 5, "ticker": "AAPL", "event_type": "material_news",
                             "severity": 4, "summary": "x"})
 
-    assert was_delivered("user:local", "event:5", "email") is True
+    from portfolio_agent.domain import LOCAL_OWNER
+    assert was_delivered(f"user:{LOCAL_OWNER}", "event:5", "email") is True
     assert was_delivered("user:someone-else", "event:5", "email") is False   # scoped, not global
     assert pdb.get_prediction_history("AAPL", scopes=pdb.SHARED_SCOPES) == []   # a notification never writes a forecast
 

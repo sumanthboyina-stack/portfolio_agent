@@ -39,7 +39,7 @@ def _todays_prediction_rows(today: str) -> list[dict]:
     with db_conn() as conn:
         rows = conn.execute(
             f"""SELECT ticker, composite_score, valuation_score, recommendation,
-                      reasoning, reasoning_text, panel_summary, created_at
+                      reasoning, reasoning_text, panel_summary, created_at, guardrail_flags
                FROM predictions
                WHERE as_of_date = ? AND {_sc}
                ORDER BY created_at DESC""",
