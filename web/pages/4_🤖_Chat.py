@@ -47,18 +47,17 @@ from web.chat.orchestration import (
     _run_chat_agent_thread, _run_apex_thread, _extract_json,
 )
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="APEX Chat · Financial AI",
-    page_icon=material("smart_toy"),
+    page_title="APEX — Chat",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("chat")
-render_account_menu()
 
 # ── Chat-specific CSS (supplements global styles.py) ──────────────────────────
 st.markdown("""
@@ -301,7 +300,7 @@ with st.sidebar:
         '<div style="padding:10px 0 16px">'
         f'<h2 style="margin:0;font-size:1rem;font-weight:700;color:#F9FAFB;'
         f'letter-spacing:-0.02em;display:flex;align-items:center;gap:6px">'
-        f'{icon_html("smart_toy", 18)} APEX Chat</h2>'
+        f'{icon_html("smart_toy", 18)} Chat</h2>'
         '<p style="margin:4px 0 0;font-size:0.72rem;color:#4B5563;font-weight:500">'
         'Financial AI · stocks · markets · news</p>'
         '</div>',
@@ -374,7 +373,7 @@ if not st.session_state.session_id and not st.session_state.messages:
         'width:64px;height:64px;background:#EFF6FF;border-radius:18px;'
         f'margin-bottom:16px">{icon_html("smart_toy", 32, color="#2563EB")}</div>'
         '<h1 style="font-size:2rem;font-weight:800;color:#111827;margin:0;'
-        'letter-spacing:-0.04em">APEX Chat</h1>'
+        'letter-spacing:-0.04em">Chat</h1>'
         '<p style="font-size:0.95rem;color:#6B7280;margin:8px 0 0;font-weight:400;'
         'line-height:1.5">Your AI financial assistant -- stocks, markets, economy &amp; more'
         '</p></div>'

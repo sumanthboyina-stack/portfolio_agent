@@ -8,6 +8,7 @@ import sys
 from datetime import date as _date
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +20,11 @@ from web.styles import (
     badge_html, ticker_label, score_color, SUCCESS, WARNING, NEUTRAL, PRIMARY, PRIMARY_LIGHT,
 )
 from web.data.watchlist import load_watchlist_tickers, add_tickers
-from portfolio_agent.tools.opportunity_engine import get_daily_opportunities, get_opportunity_history
+from web.data.predictions import _load_predictions
+from web.components.predictions_cards import render_action_items, render_all_predictions
+from portfolio_agent.tools.opportunity_engine import (
+    get_daily_opportunities, get_opportunity_history, latest_trending_opportunity_date,
+)
 from portfolio_agent.tools.universe_db import (
     get_latest_signal_date, get_signals, has_any_universe_data, get_conviction_data,
     rank_by_conviction, PERSISTENCE_STEP as _PERSISTENCE_STEP,
@@ -40,18 +45,17 @@ def _price_change_since(ticker: str, since_date: str) -> float | None:
     return (current / anchor) - 1.0
 
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="Opportunity Engine — Portfolio Intelligence",
-    page_icon=material("track_changes"),
+    page_title="APEX — Opportunity Engine",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("opportunity_engine")
-render_account_menu()
 
 with st.sidebar:
     st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Opportunity Engine</p>', unsafe_allow_html=True)
@@ -63,11 +67,21 @@ page_header(
 )
 
 st.markdown(
-    '<p style="font-size:0.85rem;color:#64748B;margin-bottom:14px">'
+    '<p style="font-size:0.85rem;color:#64748B;margin-bottom:4px">'
     'Candidates that received a full APEX analysis today (fundamentals, research, macro, news) '
     'as either a news-trending name or a top quant-screener pick — not simply "what\'s moving," '
     'but what the panel would actually call a BUY or WATCH, weighed against what it would do to '
     'your portfolio\'s concentration and correlation.</p>',
+    unsafe_allow_html=True,
+)
+st.markdown(
+    '<p style="font-size:0.78rem;color:#94A3B8;margin-bottom:14px">'
+    '<strong>Three views below, same underlying data, decreasing filtering:</strong> '
+    '"Today\'s Top Opportunities" is the top 10, ranked and scored against your actual holdings. '
+    '"All Analyzed Candidates Today" is the complete set behind that ranking — every recommendation, '
+    'unranked, before portfolio-fit narrows it down. '
+    '"Also Flagged Today" is one step earlier still — raw quant-screener signals that haven\'t '
+    'gotten a full APEX call yet at all.</p>',
     unsafe_allow_html=True,
 )
 
@@ -188,13 +202,63 @@ else:
                         st.rerun()
 st.divider()
 
-# ── Section 2: raw quant-screener feed — everything flagged, not yet analyzed ─
+# ── Section 2: every APEX-analyzed candidate today — before ranking ──────────
 #
-# Opportunity Engine above only ever covers ~10 names/day (whatever got a full
-# APEX call). This surfaces the much wider screener universe (often 50-200+
-# candidates) so nothing flagged by the daily quant screen goes unseen just
-# because APEX hasn't gotten to it yet — merged in from the old standalone
-# Opportunities page rather than dropped when that page was retired.
+# Section 1 above is the top 10 from *this same* day's trending_opportunity
+# predictions, scored against your actual holdings (portfolio fit + BUY/WATCH
+# only). This section is the complete underlying set — every ticker that got
+# a full APEX call today under trending discovery, unranked and not filtered
+# to BUY/WATCH — merged in from the Predictions page's old "New Opportunities"
+# section so both opportunity views live on one screen.
+
+_opp_date = latest_trending_opportunity_date()
+if _opp_date:
+    _df_opp_raw = _load_predictions(selected_date=_date.fromisoformat(_opp_date))
+    if not _df_opp_raw.empty and "trigger_type" in _df_opp_raw.columns:
+        _df_opp_raw = _df_opp_raw[
+            _df_opp_raw["trigger_type"].fillna("") == "trending_opportunity"
+        ].reset_index(drop=True)
+    else:
+        _df_opp_raw = pd.DataFrame()
+
+    if not _df_opp_raw.empty:
+        _tile_raw = section_tile(
+            "All Analyzed Candidates Today", badge_text="pre-ranking, all recommendations",
+            badge_color=PRIMARY_LIGHT, expanded=False, key="opportunity_1b",
+        )
+        if _tile_raw:
+            with _tile_raw:
+                _OPP_TICKER_CAP = 20
+                _n_total_opp_tickers = len(_df_opp_raw["ticker"].unique())
+                if _n_total_opp_tickers > _OPP_TICKER_CAP:
+                    _top_tickers = (
+                        _df_opp_raw.groupby("ticker")["conviction_score"].max()
+                        .sort_values(ascending=False)
+                        .head(_OPP_TICKER_CAP)
+                        .index
+                    )
+                    _df_opp_raw = _df_opp_raw[_df_opp_raw["ticker"].isin(_top_tickers)].reset_index(drop=True)
+
+                n_opp_tickers = len(_df_opp_raw["ticker"].unique())
+                _opp_caption = (
+                    f"Top {n_opp_tickers} of {_n_total_opp_tickers} by conviction — same {_opp_date} "
+                    "trending-discovery run as the ranked picks above, before portfolio-fit scoring narrows it down"
+                    if _n_total_opp_tickers > _OPP_TICKER_CAP else
+                    f"{n_opp_tickers} trending ticker{'s' if n_opp_tickers != 1 else ''} analyzed on {_opp_date} — "
+                    "same run as the ranked picks above, before portfolio-fit scoring narrows it down"
+                )
+                st.caption(_opp_caption)
+                render_action_items(_df_opp_raw, title="High-Conviction Candidates")
+                render_all_predictions(_df_opp_raw, title="All Candidates by Recommendation")
+        st.divider()
+
+# ── Section 3: raw quant-screener feed — everything flagged, not yet analyzed ─
+#
+# Sections 1-2 above only ever cover trending_opportunity names (whatever got
+# a full APEX call). This surfaces the much wider screener universe (often
+# 50-200+ candidates) so nothing flagged by the daily quant screen goes unseen
+# just because APEX hasn't gotten to it yet — merged in from the old
+# standalone Opportunities page rather than dropped when that page was retired.
 
 _tile_2 = section_tile("Also Flagged Today — Not Yet Analyzed", badge_text="raw quant screener feed", badge_color=NEUTRAL, expanded=False, key="opportunity_2")
 if _tile_2:

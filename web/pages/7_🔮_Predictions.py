@@ -12,25 +12,24 @@ import streamlit as st
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
-from web.styles import inject_global_css, page_header, section_title, section_tile, top_nav, material, icon_html, PURPLE
+from web.styles import inject_global_css, page_header, section_title, section_tile, top_nav, material, icon_html
 from web.data.predictions import _latest_as_of_date, _load_edge_data, _load_predictions
 from web.components.predictions_cards import render_action_items, render_all_predictions, render_drill_down, render_system_strip
 
 _DB = _ROOT / "data" / "portfolio.db"
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
-st.set_page_config(page_title="APEX Predictions", page_icon=material("insights"), layout="wide")
+st.set_page_config(page_title="APEX — Predictions", page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"), layout="wide")
 inject_global_css()
 require_login()
 top_nav("predictions")
-render_account_menu()
 
 
 # ── Main page ─────────────────────────────────────────────────────────────────
 
 if not _DB.exists():
-    page_header("APEX Predictions", icon="insights")
+    page_header("Predictions", icon="insights")
     st.warning("Database not found. Run `python main.py --daily` to initialise it.", icon=material("warning"))
     st.stop()
 
@@ -142,47 +141,21 @@ if _tile_actions:
         render_action_items(df_portfolio)
 
 # ── Section 2: All Portfolio Predictions ──────────────────────────────────────
-_tile_all = section_tile("All Portfolio Predictions", badge_text=f"{len(df_portfolio)} rows", key="pred_all")
+_tile_all = section_tile("All Portfolio Predictions", badge_text=f"{len(df_portfolio)} rows", expanded=True, key="pred_all")
 if _tile_all:
     with _tile_all:
         render_all_predictions(df_portfolio)
 
-# ── Section 3: New Opportunities ──────────────────────────────────────────────
-_OPP_TICKER_CAP = 20
-
+# ── Section 3: New Opportunities — moved to the Opportunity Engine page ───────
+# Trending-discovery candidates (df_opps, computed above so df_portfolio stays
+# clean of them) now render on the Opportunity Engine page instead, alongside
+# its portfolio-ranked BUY/WATCH picks, so both opportunity views live on one
+# screen rather than being split across two pages.
 if not df_opps.empty:
-    _tile_opps = section_tile("New Opportunities", badge_text="Trending Discovery", badge_color=PURPLE,
-                              icon="star", key="pred_opps")
-    if _tile_opps:
-        with _tile_opps:
-
-            _n_total_opp_tickers = len(df_opps["ticker"].unique())
-            if _n_total_opp_tickers > _OPP_TICKER_CAP:
-                # Rank each ticker by its best conviction score across horizons, then
-                # keep every horizon row for the top 20 so multi-horizon cards and the
-                # full score breakdown (fundamentals/research/macro/news) still render
-                # intact -- trending discovery can surface far more candidates than is
-                # useful to scroll through.
-                _top_tickers = (
-                    df_opps.groupby("ticker")["conviction_score"].max()
-                    .sort_values(ascending=False)
-                    .head(_OPP_TICKER_CAP)
-                    .index
-                )
-                df_opps = df_opps[df_opps["ticker"].isin(_top_tickers)].reset_index(drop=True)
-
-            n_opp_tickers = len(df_opps["ticker"].unique())
-            _opp_caption = (
-                f"Top {n_opp_tickers} of {_n_total_opp_tickers} trending tickers by conviction"
-                if _n_total_opp_tickers > _OPP_TICKER_CAP else
-                f"{n_opp_tickers} trending ticker{'s' if n_opp_tickers != 1 else ''} analyzed today"
-            )
-            st.caption(
-                f"{_opp_caption} — same full pipeline as portfolio: "
-                "News · Research · Fundamentals · APEX predictions"
-            )
-            render_action_items(df_opps, title="High-Conviction Opportunities")
-            render_all_predictions(df_opps, title="All Opportunities by Recommendation")
+    st.caption(
+        f"{len(df_opps['ticker'].unique())} trending-discovery ticker(s) analyzed for {selected_date} — "
+        "see the **Opportunity Engine** page for these, ranked against your portfolio."
+    )
 
 # ── Piece 5: Drill-down ───────────────────────────────────────────────────────
 drill_ticker = st.session_state.get("drill_ticker")

@@ -58,18 +58,17 @@ from web.components.holdings_import import (
     esc as _esc, broker_label as _broker_label,
 )
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="Portfolio — Portfolio Intelligence",
-    page_icon=material("work"),
+    page_title="APEX — Portfolio",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("portfolio")
-render_account_menu()
 
 with st.sidebar:
     st.markdown('<p style="font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6B7280;margin:0 0 10px">Portfolio</p>', unsafe_allow_html=True)

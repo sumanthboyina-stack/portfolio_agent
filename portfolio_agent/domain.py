@@ -338,6 +338,44 @@ class UserNotificationPrefs(_DictCompat):
         }
 
 
+# ── AccessRequest ──────────────────────────────────────────────────────────────
+
+@dataclass
+class AccessRequest(_DictCompat):
+    """One access_requests row: an uninvited visitor's request to be added to
+    the auth allow-list. See portfolio_agent/tools/access_requests_db.py."""
+    id: int
+    name: str
+    email: str
+    message: str = ""
+    status: str = "pending"
+    created_at: str | None = None
+    reviewed_at: str | None = None
+
+    @classmethod
+    def from_db_row(cls, row: dict) -> "AccessRequest":
+        return cls(
+            id=row["id"],
+            name=row["name"],
+            email=row["email"],
+            message=row.get("message") or "",
+            status=row.get("status") or "pending",
+            created_at=row.get("created_at"),
+            reviewed_at=row.get("reviewed_at"),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "email": self.email,
+            "message": self.message,
+            "status": self.status,
+            "created_at": self.created_at,
+            "reviewed_at": self.reviewed_at,
+        }
+
+
 # ── AuthUser ───────────────────────────────────────────────────────────────────
 
 @dataclass

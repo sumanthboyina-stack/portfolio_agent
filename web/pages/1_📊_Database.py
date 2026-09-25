@@ -55,18 +55,17 @@ def _available_dates() -> list[str]:
         return [_TODAY]
     return sorted(dates, reverse=True)
 
-from web.auth import current_context, current_user, render_account_menu, require_login
+from web.auth import current_context, current_user, require_login
 
 st.set_page_config(
-    page_title="Today's Data — Portfolio Intelligence",
-    page_icon=material("database"),
+    page_title="APEX — Database",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("database")
-render_account_menu()
 
 if not current_user().is_admin:
     st.error("Admin only.")

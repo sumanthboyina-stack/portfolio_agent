@@ -21,23 +21,22 @@ from web.styles import (
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, PURPLE,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
     freshness_color, accuracy_color, brier_color,
-    icon_html, material, status_dot_html, fmt_money, fmt_pct,
+    icon_html, status_dot_html, fmt_money, fmt_pct,
 )
 
 _DB = _ROOT / "data" / "portfolio.db"
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="Portfolio Intelligence",
-    page_icon=material("trending_up"),
+    page_title="APEX — Dashboard",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 inject_global_css()
 require_login()
 top_nav("dashboard")
-render_account_menu()
 
 
 # ── DB load (single pass, 120 s cache) ───────────────────────────────────────

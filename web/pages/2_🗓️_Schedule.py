@@ -31,18 +31,17 @@ _CP   = _ROOT / "data" / "batch_checkpoint.json"
 _DB   = _ROOT / "data" / "portfolio.db"
 _LOGS.mkdir(parents=True, exist_ok=True)
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="Schedule — Portfolio Intelligence",
-    page_icon=material("calendar_month"),
+    page_title="APEX — Schedule",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("schedule")
-render_account_menu()
 
 # Sidebar button styling — must be injected into the page head, not inside the sidebar block
 st.markdown("""

@@ -18,18 +18,17 @@ from web.styles import (
     SUCCESS, SUCCESS_LIGHT, WARNING, WARNING_LIGHT, DANGER, DANGER_LIGHT, NEUTRAL, PRIMARY, PRIMARY_LIGHT,
 )
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="Valuation — Portfolio Intelligence",
-    page_icon=material("calculate"),
+    page_title="APEX — Valuation",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("valuation")
-render_account_menu()
 
 page_header(
     "Valuation",

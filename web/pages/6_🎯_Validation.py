@@ -32,18 +32,17 @@ import pandas as pd
 import streamlit as st
 from web.styles import inject_global_css, top_nav, icon_html, material, fmt_pct, fmt_money, section_tile
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="Validation — Portfolio Intelligence",
-    page_icon=material("track_changes"),
+    page_title="APEX — Validation",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("validation")
-render_account_menu()
 
 from portfolio_agent.tools.prediction_db import CURRENT_SYSTEM_VERSION
 from web.data.validation import (

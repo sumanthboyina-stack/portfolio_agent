@@ -7,8 +7,11 @@ clean, minimal, airy — professional finance edition.
 
 from __future__ import annotations
 import re
+from pathlib import Path
 
 import streamlit as st
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # ── Color tokens ──────────────────────────────────────────────────────────────
 
@@ -727,6 +730,15 @@ def inject_global_css() -> None:
     /* hide the popover's caret so it reads as a plain icon */
     [class*="st-key-settings_menu"] button svg,
     [class*="st-key-settings_menu"] button > div > div[aria-hidden="true"] { display:none !important; }
+
+    /* ── Admin-only entries in the account/settings dropdown ─── */
+    [class*="st-key-nav_admin_only_"] [data-testid="stPageLink"] p,
+    [class*="st-key-nav_admin_only_"] [data-testid="stIconMaterial"] {
+        color: #DC2626 !important;
+    }
+    [class*="st-key-nav_admin_only_"] [data-testid="stPageLink"]:hover p {
+        color: #B91C1C !important;
+    }
     .settings-active-dot {
         width: 6px; height: 6px; border-radius: 50%; background: #2563EB;
         margin: -8px 14px 0 auto;
@@ -909,20 +921,23 @@ _NAV_SECONDARY = [
     ("chat",        "smart_toy",     "Chat",          "pages/4_🤖_Chat.py"),
     ("valuation",   "calculate",     "Valuation",     "pages/10_📐_Valuation.py"),
 ]
+# (key, icon, label, path, admin_only) — ordered by how often each is actually
+# used, not alphabetically. admin_only entries are hidden from the menu
+# entirely for non-admins, and color-coded (DANGER) for admins.
 _NAV_ADMIN = [
-    ("schedule",    "calendar_month", "Schedule",    "pages/2_🗓️_Schedule.py"),
-    ("database",    "database",       "Database",      "pages/1_📊_Database.py"),
-    ("restricted",  "block",          "Restricted List", "pages/8_🚫_Restricted_List.py"),
-    ("validation_qa", "science",      "Validation QA", "pages/11_🔬_Validation_QA.py"),
-    ("accounts",    "account_balance", "Accounts & Imports", "pages/13_🗂️_Accounts.py"),
-    ("profile",     "person",         "Profile",       "pages/12_👤_Profile.py"),
+    ("profile",       "person",          "Profile",             "pages/12_👤_Profile.py",     False),
+    ("schedule",      "calendar_month",  "Schedule",            "pages/2_🗓️_Schedule.py",     False),
+    ("accounts",      "account_balance", "Accounts & Imports",  "pages/13_🗂️_Accounts.py",    False),
+    ("validation_qa", "science",         "Validation QA",       "pages/11_🔬_Validation_QA.py", False),
+    ("database",      "database",        "Database",            "pages/1_📊_Database.py",      True),
+    ("restricted",    "block",           "Restricted List",     "pages/8_🚫_Restricted_List.py", True),
 ]
 
 def top_nav(active: str = "dashboard") -> None:
-    """Render a sticky top nav: primary + secondary tabs on the left, and a
-    settings (gear) icon in the top-right corner that opens the Settings pages
-    (Schedule, Database, Restricted List, Validation QA, Accounts & Imports,
-    Profile) in a dropdown — those links are visible only while it is open."""
+    """Render a sticky top nav: primary + secondary tabs on the left, and one
+    merged account/settings icon in the top-right corner — who's signed in,
+    the settings pages (usage-ordered; admin-only ones grouped, colored, and
+    hidden entirely from non-admins), and sign out, all in one dropdown."""
     # column width scales with label length so longer labels (e.g. "Opportunity
     # Engine") don't get clipped next to short ones (e.g. "Chat") in a uniform grid
     def _w(label: str) -> float:
@@ -942,7 +957,8 @@ def top_nav(active: str = "dashboard") -> None:
 
     with cols[0]:
         st.markdown(
-            f'<div class="nav-brand">{icon_html("trending_up", 19)} <span class="brand-text">Portfolio Intelligence</span></div>',
+            f'<div class="nav-brand"><span style="display:inline-flex;width:19px;height:19px;'
+            f'vertical-align:middle">{brand_mark_svg()}</span> <span class="brand-text">APEX</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -973,30 +989,51 @@ def top_nav(active: str = "dashboard") -> None:
             else:
                 st.page_link(path, label=label, icon=material(icon), width="stretch")
 
-    on_settings_page = any(key == active for key, _, _, _ in _NAV_ADMIN)
+    on_settings_page = any(key == active for key, *_ in _NAV_ADMIN)
     with settings_col, st.container(key="settings_menu_active" if on_settings_page else "settings_menu"):
-        _settings_menu(active)
+        _account_menu(active)
 
     st.markdown('<div class="nav-underline"></div>', unsafe_allow_html=True)
 
 
-def _settings_menu(active: str) -> None:
-    """Gear icon in the top-right corner; the Settings page links live inside
-    its dropdown and are only visible while it is open."""
-    on_settings_page = any(key == active for key, _, _, _ in _NAV_ADMIN)
-    with st.popover("", icon=material("settings"), help="Settings"):
+def _account_menu(active: str) -> None:
+    """Merged account + settings dropdown in the nav's top-right corner: who's
+    signed in, the settings pages, and sign out — one popover instead of the
+    separate settings-gear and account-circle ones this replaced."""
+    from web.auth import current_user, sign_out
+
+    user = current_user()
+
+    with st.popover("", icon=material("account_circle"), help=user.email):
+        st.caption(user.email)
+        st.caption(f"Role: {user.role}")
         st.markdown(
-            f'<div class="side-nav-title">{icon_html("settings", 15)} <span>Settings</span></div>',
+            '<div style="border-top:1px solid #E5E7EB;margin:6px 0 8px"></div>',
             unsafe_allow_html=True,
         )
-        for key, icon, label, path in _NAV_ADMIN:
+        for key, icon, label, path, admin_only in _NAV_ADMIN:
+            if admin_only and not user.is_admin:
+                continue
+            color = DANGER if admin_only else None
             if key == active:
+                style = f'style="color:{color}"' if color else ""
                 st.markdown(
-                    f'<div class="nav-menu-item active">{icon_html(icon, 17)} <span>{label}</span></div>',
+                    f'<div class="nav-menu-item active" {style}>'
+                    f'{icon_html(icon, 17, color=color or "currentColor")} <span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
+            elif admin_only:
+                with st.container(key=f"nav_admin_only_{key}"):
+                    st.page_link(path, label=label, icon=material(icon), width="stretch")
             else:
                 st.page_link(path, label=label, icon=material(icon), width="stretch")
+
+        st.markdown(
+            '<div style="border-top:1px solid #E5E7EB;margin:8px 0 8px"></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Sign out", key="auth_sign_out", width="stretch"):
+            sign_out()
 
 
 # ── Icon system (Material Symbols Rounded — same font Streamlit's own
@@ -1017,6 +1054,16 @@ def icon_html(name: str, size: int = 18, color: str = "currentColor", extra_styl
 def material(name: str) -> str:
     """Format an icon name for Streamlit's native icon= kwargs, e.g. st.button(icon=material("refresh"))."""
     return f":material/{name}:"
+
+
+@st.cache_data(show_spinner=False)
+def brand_mark_svg() -> str:
+    """Inline contents of the APEX brand mark (web/static/apex_mark.svg) — four
+    analyst dots converging into one solid apex point. Hardcoded fill colors
+    (not currentColor), since the same file also serves as the standalone
+    favicon; embed this string directly (unsafe_allow_html) rather than an
+    <img> tag so it sizes via a wrapping span like the other nav icons."""
+    return (_STATIC_DIR / "apex_mark.svg").read_text()
 
 
 def status_dot_html(color: str, size: int = 8) -> str:

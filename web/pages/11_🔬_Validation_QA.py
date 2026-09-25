@@ -22,18 +22,17 @@ import pandas as pd
 import streamlit as st
 from web.styles import inject_global_css, top_nav, icon_html, material, fmt_pct, section_tile
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
 st.set_page_config(
-    page_title="Validation QA — Portfolio Intelligence",
-    page_icon=material("science"),
+    page_title="APEX — Validation QA",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("validation_qa")
-render_account_menu()
 
 from portfolio_agent.tools.validation_engine import (
     get_calibration_data,

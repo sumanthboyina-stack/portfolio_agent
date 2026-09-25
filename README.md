@@ -1,4 +1,4 @@
-# Portfolio Agent
+# APEX
 
 A personal investment research assistant that runs a structured multi-analyst pipeline on your portfolio holdings and watchlist tickers. It pulls financial data from multiple public sources, runs a four-role AI analyst panel through a weighted deliberation, stores predictions in a local SQLite database, and measures its own accuracy over time.
 

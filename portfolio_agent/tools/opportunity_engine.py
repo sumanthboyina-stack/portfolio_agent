@@ -30,6 +30,21 @@ _CONCENTRATION_BONUS_CAP = 6.0
 _CONCENTRATION_BONUS_SCALE = 8.0
 
 
+def latest_trending_opportunity_date() -> str | None:
+    """The most recent as_of_date with a SHARED_SCOPES trending_opportunity
+    prediction, or None if today's morning batch hasn't produced any yet.
+    Shared by _latest_trending_opportunity_predictions() and by the
+    Opportunity Engine page's raw (pre-ranking) candidate list, so both
+    sections on that page always agree on which date they're showing."""
+    _sc, _sp = scope_clause(SHARED_SCOPES)
+    with db_conn() as conn:
+        row = conn.execute(
+            f"SELECT MAX(as_of_date) AS d FROM predictions WHERE trigger_type = 'trending_opportunity' AND {_sc}",
+            _sp,
+        ).fetchone()
+    return row["d"] if row else None
+
+
 def _latest_trending_opportunity_predictions() -> list[dict]:
     """One row per ticker (preferring the 21d horizon when present) for the
     most recent as_of_date that has trending_opportunity predictions.
@@ -42,16 +57,12 @@ def _latest_trending_opportunity_predictions() -> list[dict]:
     pipeline discovered; it must never surface a private row just because a
     future caller starts stamping trigger_type on one.
     """
+    latest_date = latest_trending_opportunity_date()
+    if not latest_date:
+        return []
+
     _sc, _sp = scope_clause(SHARED_SCOPES)
     with db_conn() as conn:
-        latest_date_row = conn.execute(
-            f"SELECT MAX(as_of_date) AS d FROM predictions WHERE trigger_type = 'trending_opportunity' AND {_sc}",
-            _sp,
-        ).fetchone()
-        latest_date = latest_date_row["d"] if latest_date_row else None
-        if not latest_date:
-            return []
-
         rows = conn.execute(
             f"""SELECT ticker, horizon_days, recommendation, composite_score,
                       fundamental_score, research_score, macro_score, news_score,

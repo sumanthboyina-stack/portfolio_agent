@@ -25,14 +25,13 @@ from web.components.holdings_import import (
 from portfolio_agent.tools.holdings_db import get_holdings, get_cash_balances, get_import_runs, list_accounts
 from portfolio_agent.services.account_service import rename_account, archive_account, restore_account, VersionConflict
 
-from web.auth import current_context, render_account_menu, require_login
+from web.auth import current_context, require_login
 
-st.set_page_config(page_title="Accounts & Imports — Portfolio Intelligence", page_icon=material("account_balance"),
+st.set_page_config(page_title="APEX — Accounts & Imports", page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
                    layout="wide", initial_sidebar_state="expanded")
 inject_global_css()
 require_login()
 top_nav("accounts")
-render_account_menu()
 page_header("Accounts & Imports", subtitle="Brokerage accounts, holdings file imports, and import history",
             icon="account_balance")
 

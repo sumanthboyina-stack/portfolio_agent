@@ -30,18 +30,17 @@ from portfolio_agent.tools.user_notifications_db import (
     get_user_notifications, update_user_notifications,
 )
 
-from web.auth import current_context, current_user, render_account_menu, require_login
+from web.auth import current_context, current_user, require_login
 
 st.set_page_config(
-    page_title="Profile — Portfolio Intelligence",
-    page_icon=material("person"),
+    page_title="APEX — Profile",
+    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
 inject_global_css()
 require_login()
 top_nav("profile")
-render_account_menu()
 
 with st.sidebar:
     st.markdown('<p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#475569;margin:0 0 10px">Profile</p>', unsafe_allow_html=True)
@@ -387,4 +386,31 @@ if current_user().is_admin:
                 if disable_email and st.button("Disable", key="admin_disable_btn"):
                     disable_user(disable_email)
                     st.session_state["profile_flash"] = f"Disabled {disable_email}."
+                    st.rerun()
+
+    from portfolio_agent.tools.access_requests_db import approve_request, deny_request, list_requests as list_access_requests
+
+    pending_requests = list_access_requests(status="pending")
+    _tile_requests = section_tile(
+        "Access Requests", badge_text=f"{len(pending_requests)} pending" if pending_requests else "none pending",
+        badge_color=WARNING if pending_requests else PRIMARY, expanded=bool(pending_requests), key="admin_requests",
+    )
+    if _tile_requests:
+        with _tile_requests:
+            if not pending_requests:
+                st.caption("No pending requests from the landing page's \"Request an invite\" form.")
+            for req in pending_requests:
+                r_cols = st.columns([2, 2, 3, 1.3, 1, 1])
+                r_cols[0].markdown(f"**{req.name}**")
+                r_cols[1].caption(req.email)
+                r_cols[2].caption(req.message or "—")
+                req_owner = r_cols[3].text_input("Owner", value=LOCAL_OWNER, key=f"req_owner_{req.id}", label_visibility="collapsed")
+                req_role = r_cols[4].selectbox("Role", ["member", "admin"], key=f"req_role_{req.id}", label_visibility="collapsed")
+                if r_cols[5].button("Approve", key=f"req_approve_{req.id}", width="stretch"):
+                    approve_request(req.id, owner=req_owner.strip(), role=req_role)
+                    st.session_state["profile_flash"] = f"Approved {req.email} — invited as {req_role}."
+                    st.rerun()
+                if st.button("Deny", key=f"req_deny_{req.id}"):
+                    deny_request(req.id)
+                    st.session_state["profile_flash"] = f"Denied {req.email}'s request."
                     st.rerun()
