@@ -31,7 +31,7 @@ _CP   = _ROOT / "data" / "batch_checkpoint.json"
 _DB   = _ROOT / "data" / "portfolio.db"
 _LOGS.mkdir(parents=True, exist_ok=True)
 
-from web.auth import current_context, require_login
+from web.auth import current_context, current_user, require_login
 
 st.set_page_config(
     page_title="APEX — Schedule",
@@ -42,6 +42,10 @@ st.set_page_config(
 inject_global_css()
 require_login()
 top_nav("schedule")
+
+if not current_user().is_admin:
+    st.error("Admin only.")
+    st.stop()
 
 # Sidebar button styling — must be injected into the page head, not inside the sidebar block
 st.markdown("""

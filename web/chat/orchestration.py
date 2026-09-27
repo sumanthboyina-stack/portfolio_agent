@@ -186,11 +186,15 @@ def _classify_intent(query: str, tickers: list[str]) -> str:
 # ── Conversational chat agent thread ─────────────────────────────────────────
 
 def _run_chat_agent_thread(
-    tickers: list[str], query: str, history: list[dict], q: Queue
+    tickers: list[str], query: str, history: list[dict], q: Queue, owner: str | None = None
 ) -> None:
     """
     LLM-orchestrated conversational agent with tool-calling.
     Runs in a daemon thread; pushes events to *q*.
+
+    owner: the logged-in user (current_context("web:chat").actor) — passed
+    through to portfolio-reading tools so a chat question about "my
+    portfolio" never answers with another user's holdings.
     """
     async def _inner():
         from dotenv import load_dotenv
@@ -228,7 +232,7 @@ def _run_chat_agent_thread(
                             fn_name = tc.function.name
                             fn_args = json.loads(tc.function.arguments or "{}")
                             q.put(("tool", f"{fn_name}({json.dumps(fn_args)})"))
-                            result_str = _execute_chat_tool(fn_name, fn_args)
+                            result_str = _execute_chat_tool(fn_name, fn_args, owner=owner)
                             q.put(("result", f"{fn_name} → {result_str[:250]}"))
                             tool_results.append({
                                 "role": "tool",
@@ -295,8 +299,14 @@ def _is_apex_transient(exc: Exception) -> bool:
 
 
 async def _apex_adk_run(ticker: str, query: str, model_id: str, label: str,
-                        provider: str, chain_pos: str, q: Queue) -> bool:
-    """Run APEX via ADK Runner (Claude / Gemini). Returns True on success."""
+                        provider: str, chain_pos: str, q: Queue, owner: str | None = None) -> bool:
+    """Run APEX via ADK Runner (Claude / Gemini). Returns True on success.
+
+    owner is carried into the ADK session state (never the model's own
+    output) so the risk specialist's portfolio tools (see
+    portfolio_agent.tools.portfolio_tools) read only this user's holdings —
+    see portfolio_tools._owner_from_tool_context.
+    """
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
@@ -308,7 +318,7 @@ async def _apex_adk_run(ticker: str, query: str, model_id: str, label: str,
     runner = Runner(agent=agent, app_name="apex_chat", session_service=svc)
     sess   = await svc.create_session(
         app_name="apex_chat", user_id="chat_user",
-        state={"current_ticker": ticker.upper(), "user_query": query},
+        state={"current_ticker": ticker.upper(), "user_query": query, "owner": owner},
     )
     msg = types.Content(role="user",
                         parts=[types.Part(text=f"Analyze {ticker.upper()}: {query}")])
@@ -462,7 +472,7 @@ End your response with EXACTLY this JSON block (no text after):
     return True
 
 
-def _run_apex_thread(ticker: str, query: str, q: Queue) -> None:
+def _run_apex_thread(ticker: str, query: str, q: Queue, owner: str | None = None) -> None:
     async def _inner():
         from dotenv import load_dotenv
         load_dotenv(_ROOT / ".env")
@@ -479,7 +489,7 @@ def _run_apex_thread(ticker: str, query: str, q: Queue) -> None:
                                            provider, chain_pos, q)
                 else:
                     await _apex_adk_run(ticker, query, model_id, label,
-                                        provider, chain_pos, q)
+                                        provider, chain_pos, q, owner)
                 return
 
             except Exception as exc:

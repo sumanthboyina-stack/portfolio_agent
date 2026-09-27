@@ -98,6 +98,36 @@ Given this inventory, hosted multi-user mode MUST stay blocked: the schema
 now has the scope column everywhere this phase touched, but the majority of
 read paths in the app still bypass it entirely.
 
+UPDATE — cross-user data leak fixes (see the "data leaks between users"
+review): several items in the inventory above are now stale.
+  - chat_db.py: chat_sessions gained an owner column; every function takes a
+    RequestContext and checks ownership on every lookup by session id.
+  - holdings_db.get_holdings()/get_cash_balances()/get_portfolio_tickers()
+    gained an optional portfolio_id filter; account_service's list_holdings_
+    for/get_cash_balances_for/list_accounts_for actually pass it now (they
+    used to check authorization and then still read every portfolio's rows —
+    fixed). web/pages/5_Portfolio.py and 13_Accounts.py were rewired onto
+    these *_for functions. portfolio_tools.get_portfolio_holdings/
+    get_portfolio_concentration read tool_context.state["owner"] (ADK) so the
+    chat risk agent no longer computes over the combined book of every user.
+  - clearance.py's _profile_gate now reads state["owner"] (set server-side)
+    instead of always resolving to local_context(...) — though this path is
+    ADK-CLI-only in practice (see test_execution_trace_characterization.py);
+    the live web clearance path (decision_composer.py) was already correct.
+  - restricted_list is no longer ticker-globally-unique: it's UNIQUE(owner,
+    ticker), personal-only, no shared/global scope. is_restricted/
+    add_restricted/remove_restricted all now REQUIRE an owner; the old
+    owner-less list_restricted() is gone (list_restricted_for(ctx) is the
+    only read path). scenarios/prepare.py's restricted-list lookup and
+    web/pages/8_Restricted_List.py were updated; its get_user_profile() call
+    (a different finding, #5) was deliberately left as-is.
+  - Still NOT migrated (deferred, "#5"/"#7" in that review): scenarios/
+    prepare.py:75's get_user_profile(), events/detector.py's
+    _action_permission_note, user_notifications_db.should_notify's fallback
+    profile/prefs reads, and risk_technical's batch risk_flags (no owner
+    column, computed over the global ticker union by design) — these need a
+    per-user scheduler/batch loop, not just a query filter.
+
 EXISTING TEST STATUS: `pytest tests/ -q` → 243 passed, 0 failed, before this
 phase's additions — no pre-existing failures to report separately.
 """
@@ -216,6 +246,44 @@ def test_cross_user_cannot_read_or_write_user_profile():
     assert user_profile_db.get_user_profile_for(local_context("test")).display_name == "Real Owner"
 
 
+def test_list_holdings_for_never_mixes_two_owners_holdings():
+    """
+    The bug this guards against: get_holdings()/get_cash_balances() with no
+    portfolio filter returned every portfolio's rows combined, so
+    list_holdings_for/get_cash_balances_for (and every caller behind them —
+    the chat risk agent, portfolio_assessment, the Portfolio/Accounts pages)
+    computed weight/concentration/cash totals over EVERYONE's combined book,
+    not just the caller's own. Two real, distinct owners must each see only
+    their own tickers, shares and cash.
+    """
+    from tests.helpers_holdings import seed_holding
+    seed_holding({"ticker": "AAPL", "shares": 10, "avg_cost": 100.0, "cost_basis_total": 1000.0,
+                 "account_name": "Individual", "account_number": "X1", "account_type": "TAXABLE"},
+                "fidelity", "2026-09-01")
+    account_service.record_account_cash(
+        local_context("test"),
+        repo.find_account(repo.get_portfolio_by_owner(LOCAL_OWNER)["portfolio_id"], "fidelity", "X1")["account_id"],
+        500.0, as_of_date="2026-09-01",
+    )
+
+    _seed_second_owner("bob")
+    bob = RequestContext(identity=_mint_identity_for_tests("bob"), source="test")
+    bob_acct = account_service.create_account(bob, broker="manual", display_name="Bob's account")
+    account_service.add_position(bob, bob_acct["account_id"],
+                                 {"ticker": "TSLA", "shares": 5, "avg_cost": 200.0, "cost_basis_total": 1000.0})
+    account_service.record_account_cash(bob, bob_acct["account_id"], 9000.0, as_of_date="2026-09-01")
+
+    local_holdings = account_service.list_holdings_for(local_context("test"))
+    bob_holdings = account_service.list_holdings_for(bob)
+    assert {h["ticker"] for h in local_holdings} == {"AAPL"}
+    assert {h["ticker"] for h in bob_holdings} == {"TSLA"}
+
+    local_cash = account_service.get_cash_balances_for(local_context("test"))
+    bob_cash = account_service.get_cash_balances_for(bob)
+    assert [c["amount"] for c in local_cash] == [500.0]
+    assert [c["amount"] for c in bob_cash] == [9000.0]
+
+
 def test_a_second_verified_identity_with_no_portfolio_is_refused_not_given_an_empty_result():
     """Authorization failure raises — it never silently degrades to 'here's an empty list.'"""
     bob = RequestContext(identity=_mint_identity_for_tests("bob"), source="test")
@@ -248,7 +316,7 @@ def test_repeated_user_profile_migrations_preserve_id_and_owner():
 
 
 def test_repeated_restricted_list_and_watchlist_migrations_preserve_owner_and_dont_duplicate():
-    restricted_list_db.add_restricted("AAPL", "insider list")
+    restricted_list_db.add_restricted("AAPL", "insider list", LOCAL_OWNER)
     watchlist_db.add_tickers(["NVDA"])
 
     for _ in range(3):

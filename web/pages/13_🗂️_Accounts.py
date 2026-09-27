@@ -22,8 +22,11 @@ from web.components.holdings_import import (
     render_import_flow, render_add_position_form, confirm_remove, broker_label, esc,
     bump_holdings_version,
 )
-from portfolio_agent.tools.holdings_db import get_holdings, get_cash_balances, get_import_runs, list_accounts
-from portfolio_agent.services.account_service import rename_account, archive_account, restore_account, VersionConflict
+from portfolio_agent.tools.holdings_db import get_import_runs
+from portfolio_agent.services.account_service import (
+    rename_account, archive_account, restore_account, VersionConflict,
+    list_holdings_for, get_cash_balances_for, list_accounts_for,
+)
 
 from web.auth import current_context, require_login
 
@@ -38,13 +41,14 @@ page_header("Accounts & Imports", subtitle="Brokerage accounts, holdings file im
 if flash := st.session_state.pop("holdings_flash", None):
     st.success(flash, icon=material("check_circle"))
 
-all_holdings = get_holdings()
-cash_rows = get_cash_balances()
+_ctx = current_context("web:accounts")
+all_holdings = list_holdings_for(_ctx)
+cash_rows = get_cash_balances_for(_ctx)
 cash_by_acct = {account_id(c["broker"], c["account_number"]): c for c in cash_rows}
 accounts = group_holdings_by_account(all_holdings)
 # Accounts are records now: one that exists but holds no positions yet still shows up.
 _known = {a["account_pk"] for a in accounts}
-for _a in list_accounts():
+for _a in list_accounts_for(_ctx):
     if _a["account_id"] not in _known:
         accounts.append({"account_id": account_id(_a["broker"], _a["account_number"]), "account_pk": _a["account_id"],
                          "broker": _a["broker"], "account_number": _a["account_number"],
@@ -105,7 +109,7 @@ if _tile_1:
                                  help=f"Permanently delete all holdings and cash recorded for {name}"):
                         confirm_remove(acct["account_pk"], name, acct["count"])
 
-        _archived = [a for a in list_accounts(include_archived=True) if a["status"] != "active"]
+        _archived = [a for a in list_accounts_for(_ctx, include_archived=True) if a["status"] != "active"]
         if _archived:
             with st.expander(f"Archived accounts ({len(_archived)})", icon=material("archive")):
                 for a in _archived:

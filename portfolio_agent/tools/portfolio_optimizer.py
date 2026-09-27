@@ -299,7 +299,8 @@ def _apply_trades_to_holdings(
 
 
 def recommend_allocation(cash_amount: float, top_n_candidates: int = 5,
-                         holdings: list[dict] | None = None, scope: str = "all") -> dict:
+                         holdings: list[dict] | None = None, scope: str = "all",
+                         owner: str | None = None) -> dict:
     """
     Compatibility entry point: prepare frozen inputs → propose → evaluate, and
     return the legacy {allocation, reduce, cash_reserved, impact} shape built
@@ -321,7 +322,7 @@ def recommend_allocation(cash_amount: float, top_n_candidates: int = 5,
 
     raw_holdings = ([dict(h) for h in holdings] if holdings is not None
                     else json.loads(get_portfolio_holdings()).get("holdings", []))
-    inputs, ctx = prepare_inputs(scope=scope, holdings=raw_holdings, contribution=cash_amount)
+    inputs, ctx = prepare_inputs(scope=scope, holdings=raw_holdings, contribution=cash_amount, owner=owner)
     trades = propose_trades(inputs, ctx, top_n=top_n_candidates)
     result = evaluate(inputs, trades)
 

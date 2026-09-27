@@ -215,6 +215,21 @@ def get_user_profile_for(ctx) -> UserProfile:
     return UserProfile.from_db_row(dict(row))
 
 
+def get_user_profile_by_owner(owner: str) -> UserProfile | None:
+    """
+    Unauthenticated-by-design lookup by a raw owner string, mirroring
+    holdings_db.get_portfolio_by_owner(). For server-side callers that
+    already trust *owner* (e.g. an ADK tool reading tool_context.state["owner"],
+    set by the web layer from a verified login — never from model output) but
+    have no RequestContext/Identity to construct, since only
+    identity_from_verified_login() (web/auth.py) or a real login can mint one.
+    Returns None rather than falling back to a different owner's row.
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM user_profile WHERE owner = ?", (owner,)).fetchone()
+    return UserProfile.from_db_row(dict(row)) if row else None
+
+
 def update_user_profile_for(ctx, **fields) -> UserProfile:
     """Authorized write: only updates the row owned by ctx's verified identity.
     Raises NotAuthorized if that identity owns no row — see get_user_profile_for."""

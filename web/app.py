@@ -42,14 +42,20 @@ top_nav("dashboard")
 # ── DB load (single pass, 120 s cache) ───────────────────────────────────────
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _load() -> dict:
+def _load(owner: str) -> dict:
     if not _DB.exists():
         return {"no_db": True}
     from portfolio_agent.tools.db import db_conn
+    from portfolio_agent.tools.holdings_db import get_portfolio_by_owner
 
     ago2d   = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
     ago3d   = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
     stale10 = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+
+    portfolio = get_portfolio_by_owner(owner)
+    portfolio_id = portfolio["portfolio_id"] if portfolio else None
+    # A real logged-in owner with no portfolio yet gets an empty dashboard,
+    # never someone else's — see the holdings query's WHERE clause below.
 
     d: dict = {}
     with db_conn(_DB) as c:
@@ -60,7 +66,7 @@ def _load() -> dict:
         # Cash is not in the holdings table at all, so this is securities only.
         cols = {r[1] for r in c.execute("PRAGMA table_info(holdings)").fetchall()}
         price_col = "MIN(price_as_of)" if "price_as_of" in cols else "NULL"
-        rows = c.execute(f"""
+        rows = [] if portfolio_id is None else c.execute(f"""
             SELECT ticker,
                    SUM(shares) shares,
                    SUM(current_value) value,
@@ -70,8 +76,8 @@ def _load() -> dict:
                    MIN(synced_at) oldest_sync,
                    MAX(synced_at) newest_sync,
                    {price_col} oldest_price
-            FROM holdings GROUP BY ticker ORDER BY value DESC
-        """).fetchall()
+            FROM holdings WHERE portfolio_id = ? GROUP BY ticker ORDER BY value DESC
+        """, [portfolio_id]).fetchall()
         holdings = [dict(r) for r in rows]
         tv = sum(h["value"] or 0 for h in holdings)
         tc = sum(h["cost_basis"] for h in holdings)
@@ -102,7 +108,7 @@ def _load() -> dict:
             # opened before the morning batch finishes; yesterday's flags are
             # still meaningfully current for something that changes this slowly.
             d["risk_flags"] = [
-                f for f in get_active_flags(None) if f["ticker"] in d["holding_set"]
+                f for f in get_active_flags(owner, None) if f["ticker"] in d["holding_set"]
             ]
         except Exception:
             d["risk_flags"] = []
@@ -588,7 +594,7 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) 
 # RENDER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-d     = _load()
+d     = _load(current_context("dashboard").actor)
 d["trending_opps"] = _trending_opportunities()
 macro = _macro()
 queue = _build_queue(d, macro)

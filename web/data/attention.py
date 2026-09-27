@@ -21,19 +21,27 @@ sys.path.insert(0, str(_ROOT))
 from portfolio_agent.tools.db import db_conn
 
 
-def get_critical_nudge_items(limit: int = 3) -> list[dict]:
+def get_critical_nudge_items(owner: str, limit: int = 3) -> list[dict]:
     """
-    Return up to *limit* critical items across held positions: unprocessed
-    severity-3 events, SELL/STRONG_SELL recommendations, >20% single-name
-    concentration, and active 'risk' flags from the risk_flags table. Each
-    item carries a `query` string meant to be dropped straight into Chat.
+    Return up to *limit* critical items across *owner*'s OWN held positions:
+    unprocessed severity-3 events, SELL/STRONG_SELL recommendations, >20%
+    single-name concentration, and active 'risk' flags from the risk_flags
+    table. Each item carries a `query` string meant to be dropped straight
+    into Chat.
     """
+    from portfolio_agent.tools.holdings_db import get_portfolio_by_owner
+
+    portfolio = get_portfolio_by_owner(owner)
+    if portfolio is None:
+        return []
+    portfolio_id = portfolio["portfolio_id"]
+
     items: list[dict] = []
     with db_conn() as c:
         holdings = [dict(r) for r in c.execute("""
             SELECT ticker, SUM(COALESCE(current_value,0)) value
-            FROM holdings GROUP BY ticker
-        """).fetchall()]
+            FROM holdings WHERE portfolio_id = ? GROUP BY ticker
+        """, [portfolio_id]).fetchall()]
         if not holdings:
             return []
         hset = {h["ticker"] for h in holdings}
@@ -89,7 +97,7 @@ def get_critical_nudge_items(limit: int = 3) -> list[dict]:
 
     try:
         from portfolio_agent.tools.risk_flags_db import get_active_flags
-        for rf in get_active_flags(None):
+        for rf in get_active_flags(owner, None):
             if rf["source"] == "risk" and rf["ticker"] in hset:
                 items.append({
                     "ticker": rf["ticker"],

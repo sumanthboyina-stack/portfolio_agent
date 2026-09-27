@@ -38,14 +38,14 @@ def _capture_streamlit(monkeypatch):
 
 def _no_restriction(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (False, None))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
 
 
 def test_blocked_ticker_renders_an_error_banner_not_a_success(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (True, "insider list"))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (True, "insider list"))
     calls = _capture_streamlit(monkeypatch)
 
     from web.chat.rendering import render_action_permission_and_fit
@@ -99,7 +99,7 @@ def test_portfolio_fit_caption_shown_when_a_portfolio_exists(monkeypatch):
 def test_evaluation_failure_never_raises_and_says_not_actionable(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
 
-    def _boom(t):
+    def _boom(t, owner=None):
         raise RuntimeError("db locked")
 
     monkeypatch.setattr(rl, "is_restricted", _boom)

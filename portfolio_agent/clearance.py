@@ -177,12 +177,26 @@ def _now_in(tz_name: Optional[str]) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _check_restricted(ticker: str) -> tuple[Optional[bool], Optional[str], Optional[str]]:
+def _owner_from_scope(owner_scope: Optional[str]) -> Optional[str]:
+    """restricted_list_db has no shared/global scope — every check is against
+    ONE owner's own list. owner_scope is always built as f"user:{owner}" by
+    every caller in this codebase; this recovers the raw owner from it."""
+    if owner_scope and owner_scope.startswith("user:"):
+        return owner_scope[len("user:"):]
+    return None
+
+
+def _check_restricted(ticker: str, owner_scope: Optional[str] = None) -> tuple[Optional[bool], Optional[str], Optional[str]]:
     """(is_restricted, reason, error). error is set (and the other two None) on lookup
-    failure — the caller must treat that as UNKNOWN, never as "not restricted"."""
+    failure — the caller must treat that as UNKNOWN, never as "not restricted".
+    No owner resolvable from owner_scope is itself a lookup failure (there is
+    no owner-less/global list to fall back to)."""
     try:
         from portfolio_agent.tools.restricted_list_db import is_restricted
-        restricted, reason = is_restricted(ticker)
+        owner = _owner_from_scope(owner_scope)
+        if not owner:
+            raise ValueError("no owner to check the restricted list against")
+        restricted, reason = is_restricted(ticker, owner)
         return restricted, reason, None
     except Exception as exc:
         return None, None, f"{type(exc).__name__}: {exc}"
@@ -297,7 +311,7 @@ def evaluate_clearance(ticker: str, profile, *, action: str = DEFAULT_ACTION, si
     next_transition_candidates: list[str] = []
 
     # 1. Restricted list.
-    restricted, restricted_reason, lookup_error = _check_restricted(ticker)
+    restricted, restricted_reason, lookup_error = _check_restricted(ticker, owner_scope)
     evidence["restricted_list_checked"] = lookup_error is None
     if lookup_error is not None:
         evidence["restricted_list_error"] = lookup_error
@@ -461,17 +475,29 @@ def _profile_gate(callback_context: CallbackContext) -> types.Content:
     and short-circuits the LLM, for every ticker/profile combination. There is
     no remaining path where clearance_agent's model or its check_restricted_list
     tool call determines the decision.
+
+    state["owner"] is set by the caller when one exists — a real logged-in
+    identity threaded through from the web layer (never model output; see
+    web/chat/orchestration.py's create_session and portfolio_tools.py's
+    _owner_from_tool_context for the same pattern). Falls back to the local,
+    single-operator identity only when no owner was supplied — the ADK
+    CLI (`adk run` / `python main.py TICKER --agent all`), which has no
+    logged-in user concept at all.
     """
     from portfolio_agent.domain import UserProfile
     from portfolio_agent.services.context import local_context
-    from portfolio_agent.tools.user_profile_db import get_user_profile
+    from portfolio_agent.tools.user_profile_db import get_user_profile, get_user_profile_by_owner
 
     ticker = str(callback_context.state.get("current_ticker") or "").upper()
+    owner = callback_context.state.get("owner")
     try:
-        profile = get_user_profile()
+        if owner:
+            profile = get_user_profile_by_owner(owner) or UserProfile()
+        else:
+            profile = get_user_profile()
     except Exception:
         profile = UserProfile()   # profile store unavailable — evaluate with safe defaults, never skip the gate
-    owner_scope = f"user:{local_context('adk.clearance').actor}"
+    owner_scope = f"user:{owner}" if owner else f"user:{local_context('adk.clearance').actor}"
     decision = evaluate_and_record_clearance(ticker, profile, owner_scope=owner_scope)
     payload = json.dumps(decision.to_dict())
     callback_context.state["clearance"] = payload

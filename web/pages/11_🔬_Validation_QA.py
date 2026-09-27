@@ -22,7 +22,7 @@ import pandas as pd
 import streamlit as st
 from web.styles import inject_global_css, top_nav, icon_html, material, fmt_pct, section_tile
 
-from web.auth import current_context, require_login
+from web.auth import current_context, current_user, require_login
 
 st.set_page_config(
     page_title="APEX — Validation QA",
@@ -33,6 +33,10 @@ st.set_page_config(
 inject_global_css()
 require_login()
 top_nav("validation_qa")
+
+if not current_user().is_admin:
+    st.error("Admin only.")
+    st.stop()
 
 from portfolio_agent.tools.validation_engine import (
     get_calibration_data,

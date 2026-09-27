@@ -8,6 +8,13 @@ font                     = "sans serif"
 [browser]
 gatherUsageStats  = false
 
+[client]
+# The app has its own top nav (web/styles.py::top_nav) instead of Streamlit's
+# default per-page sidebar list — this stops that default nav from ever being
+# generated, instead of letting it render and then hiding it via CSS (which
+# left a brief flash of raw page names during load/navigation).
+showSidebarNavigation = false
+
 [server]
 headless          = true
 port              = 8501

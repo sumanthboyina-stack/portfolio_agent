@@ -25,15 +25,18 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
                    funding_account_id: int | None = None,
                    starting_cash_overrides: dict[int, Decimal | None] | None = None,
                    assumptions: Assumptions | None = None,
-                   opportunities_top_n: int = 15) -> tuple[ScenarioInputs, dict]:
+                   opportunities_top_n: int = 15, owner: str | None = None) -> tuple[ScenarioInputs, dict]:
     """
     holdings: account-level holding rows for the scope (dicts with account_id,
     ticker, shares, sector, current_price, price_as_of). contribution: new
     money entering `funding_account_id` (defaults to the scoped account, else
-    the account with the most value — recorded as a warning). Returns
-    (inputs, proposal_context); the context carries the float-world research
-    the proposer scores with (baseline metrics, risk context, predictions,
-    opportunities) and is not needed to evaluate.
+    the account with the most value — recorded as a warning). owner: whose
+    restricted list to exclude candidates from (restricted_list is personal-
+    only, no shared/global scope — omitting it means no restrictions are
+    known, not "check everyone's"). Returns (inputs, proposal_context); the
+    context carries the float-world research the proposer scores with
+    (baseline metrics, risk context, predictions, opportunities) and is not
+    needed to evaluate.
     """
     from portfolio_agent.tools import holdings_db as repo
     from portfolio_agent.tools.db import db_conn
@@ -42,7 +45,7 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
         _expected_return, compute_portfolio_aggregate_metrics, compute_portfolio_risk_context,
     )
     from portfolio_agent.tools.prediction_db import get_all_latest_predictions
-    from portfolio_agent.tools.restricted_list_db import list_restricted
+    from portfolio_agent.tools.restricted_list_db import list_restricted_by_owner
     from portfolio_agent.tools.user_profile_db import get_user_profile
 
     warnings: list[str] = []
@@ -75,7 +78,8 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
     profile = get_user_profile()
     limits = Limits.from_profile(profile)
     excluded = frozenset(s for s in (profile.sector_exclusions or []) if s)
-    restricted = frozenset(str(r["ticker"]).upper() for r in list_restricted())
+    restricted = (frozenset(str(r["ticker"]).upper() for r in list_restricted_by_owner(owner))
+                 if owner else frozenset())
 
     # Research: baseline metrics (gives pinned closes), per-holding risk context, predictions, opportunities.
     consolidated = _consolidate(rows)

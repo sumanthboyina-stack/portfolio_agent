@@ -82,20 +82,18 @@ def _preview_card(title: str, body_html: str) -> str:
     )
 
 
-def _render_request_access() -> None:
-    from web.styles import material
-
-    with st.expander("First time user? Register", icon=material("person_add")):
-        with st.form("landing_access_request", clear_on_submit=True):
-            name = st.text_input("Name")
-            email = st.text_input("Email")
-            message = st.text_area("What would you like access for? (optional)", height=80)
-            if st.form_submit_button("Request access", type="primary"):
-                if not name.strip() or not email.strip():
-                    st.error("Name and email are required.")
-                else:
-                    submit_request(name, email, message)
-                    st.success("Request sent — an admin will follow up once it's reviewed.")
+@st.dialog("First time user? Register")
+def _register_dialog() -> None:
+    with st.form("landing_access_request", clear_on_submit=True):
+        name = st.text_input("Name")
+        email = st.text_input("Email")
+        message = st.text_area("What would you like access for? (optional)", height=80)
+        if st.form_submit_button("Request access", type="primary"):
+            if not name.strip() or not email.strip():
+                st.error("Name and email are required.")
+            else:
+                submit_request(name, email, message)
+                st.success("Request sent — an admin will follow up once it's reviewed.")
 
 
 def _render_login_screen() -> None:
@@ -106,7 +104,7 @@ def _render_login_screen() -> None:
     news, risk limits) — never the internal multi-role/agent architecture
     that produces them.
     """
-    from web.styles import PRIMARY, WARNING, brand_mark_svg, icon_html, material
+    from web.styles import PRIMARY, WARNING, brand_mark_svg, icon_html
 
     st.markdown(
         '<style>'
@@ -152,20 +150,18 @@ def _render_login_screen() -> None:
             unsafe_allow_html=True,
         )
         st.markdown('<div style="height:22px"></div>', unsafe_allow_html=True)
-        _, cta_col, _ = st.columns([1, 2, 1])
-        with cta_col:
-            if st.button(
-                "Sign in to view your portfolio", type="primary",
-                key="landing_signin_hero", width="stretch",
-            ):
+        _, cta_signin, cta_register, _ = st.columns([1.3, 1.3, 1.3, 1.3])
+        with cta_signin:
+            if st.button("Sign in", type="primary", key="landing_signin_hero", width="stretch"):
                 st.login("entra")
+        with cta_register:
+            if st.button("First time user? Register", key="landing_register_open", width="stretch"):
+                _register_dialog()
         st.markdown(
             '<p style="text-align:center;margin:10px 0 0;font-size:13px;color:#9CA3AF">'
             'Private workspace — access is by invitation only</p>',
             unsafe_allow_html=True,
         )
-        st.markdown('<div style="height:14px"></div>', unsafe_allow_html=True)
-        _render_request_access()
 
     st.markdown('<div style="height:48px"></div>', unsafe_allow_html=True)
 
@@ -259,7 +255,6 @@ def _render_login_screen() -> None:
     st.markdown('<div style="height:56px"></div>', unsafe_allow_html=True)
 
     # ── Feature strip — what it weighs, never how it's built internally ───
-    feat_cols = st.columns(4, gap="medium")
     _FEATURES = [
         ("insights", "Multi-signal scoring",
          "Market data, valuation, macro conditions, and news are each weighed "
@@ -273,16 +268,24 @@ def _render_login_screen() -> None:
         ("shield", "Pre-trade clearance",
          "Every recommendation is checked against your restricted list before "
          "it reaches you."),
+        ("smart_toy", "Ask APEX anything",
+         "Get a plain-language read on any ticker or your whole portfolio, "
+         "grounded in the same scoring pipeline — not a generic chatbot."),
+        ("track_changes", "Tracked accuracy",
+         "Every prediction is scored against what actually happened — rolling "
+         "accuracy and calibration are visible, not just claimed."),
     ]
-    for col, (icon, title, desc) in zip(feat_cols, _FEATURES):
-        with col:
-            st.markdown(
-                f'<div style="display:flex;flex-direction:column;gap:10px">'
-                f'{icon_html(icon, 24, color=PRIMARY)}'
-                f'<div style="font-size:14px;font-weight:700;color:#111827">{title}</div>'
-                f'<div style="font-size:13px;line-height:1.5;color:#6B7280">{desc}</div></div>',
-                unsafe_allow_html=True,
-            )
+    for row_start in range(0, len(_FEATURES), 3):
+        feat_cols = st.columns(3, gap="medium")
+        for col, (icon, title, desc) in zip(feat_cols, _FEATURES[row_start:row_start + 3]):
+            with col:
+                st.markdown(
+                    f'<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:28px">'
+                    f'{icon_html(icon, 24, color=PRIMARY)}'
+                    f'<div style="font-size:14px;font-weight:700;color:#111827">{title}</div>'
+                    f'<div style="font-size:13px;line-height:1.5;color:#6B7280">{desc}</div></div>',
+                    unsafe_allow_html=True,
+                )
 
     st.markdown('<div style="height:12px;border-top:1px solid #E5E7EB;margin-top:44px"></div>', unsafe_allow_html=True)
 

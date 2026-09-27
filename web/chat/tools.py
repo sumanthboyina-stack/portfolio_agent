@@ -19,6 +19,22 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 
+def _resolve_portfolio_id(owner: str | None) -> tuple[int | None, bool]:
+    """
+    (portfolio_id, scoped). scoped=False means no owner was supplied (a
+    caller outside a real chat request, e.g. a direct test call) — the
+    legacy, unscoped, single-portfolio read. scoped=True with
+    portfolio_id=None means a real logged-in owner who simply has no
+    portfolio yet — callers MUST treat that as EMPTY holdings, never fall
+    back to the global read.
+    """
+    if owner is None:
+        return None, False
+    from portfolio_agent.tools.holdings_db import get_portfolio_by_owner
+    p = get_portfolio_by_owner(owner)
+    return (p["portfolio_id"] if p else None), True
+
+
 # ── Company-name → ticker lookup ──────────────────────────────────────────────
 
 def _search_ticker_by_name(text: str) -> tuple[str, str] | tuple[None, None]:
@@ -731,21 +747,28 @@ def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: i
         return {"note": f"DB query failed: {exc}"}
 
 
-def _chat_tool_get_portfolio_summary() -> dict:
+def _chat_tool_get_portfolio_summary(owner: str | None = None) -> dict:
     db_path = _ROOT / "data" / "portfolio.db"
     if not db_path.exists():
         return {"note": "Database not found. Run the pipeline first."}
+    portfolio_id, scoped = _resolve_portfolio_id(owner)
+    if scoped and portfolio_id is None:
+        return {"source": "db", "total_value": 0, "total_cost": 0, "unrealized_pct": None,
+                "day_change_dollar": None, "day_change_pct": None, "holdings": [],
+                "note": "No portfolio found for this account yet."}
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
-        holdings = [dict(r) for r in conn.execute("""
+        where = "WHERE portfolio_id = ?" if portfolio_id is not None else ""
+        params = [portfolio_id] if portfolio_id is not None else []
+        holdings = [dict(r) for r in conn.execute(f"""
             SELECT ticker,
                    SUM(shares) shares,
                    SUM(COALESCE(current_value,0)) current_value,
                    SUM(COALESCE(cost_basis_total, shares*avg_cost, 0)) cost_basis,
                    MAX(sector) sector
-            FROM holdings GROUP BY ticker ORDER BY current_value DESC
-        """).fetchall()]
+            FROM holdings {where} GROUP BY ticker ORDER BY current_value DESC
+        """, params).fetchall()]
         tv = sum(h["current_value"] for h in holdings)
         tc = sum(h["cost_basis"] for h in holdings)
         for h in holdings:
@@ -867,7 +890,8 @@ def _compute_day_performance(conn: "sqlite3.Connection", holdings: list[dict]) -
 
 
 def _chat_tool_get_predictions_summary(segment: str = "all",
-                                        recommendation: str | None = None) -> dict:
+                                        recommendation: str | None = None,
+                                        owner: str | None = None) -> dict:
     db_path = _ROOT / "data" / "portfolio.db"
     if not db_path.exists():
         return {"note": "Database not found."}
@@ -879,7 +903,8 @@ def _chat_tool_get_predictions_summary(segment: str = "all",
         if segment == "portfolio":
             try:
                 from portfolio_agent.tools.holdings_db import get_portfolio_tickers
-                ptickers = get_portfolio_tickers()
+                portfolio_id, scoped = _resolve_portfolio_id(owner)
+                ptickers = [] if (scoped and portfolio_id is None) else get_portfolio_tickers(portfolio_id=portfolio_id)
                 if ptickers:
                     ph = ",".join("?" * len(ptickers))
                     seg_clause = f"AND p.ticker IN ({ph})"
@@ -921,17 +946,22 @@ def _chat_tool_get_technical_snapshot(ticker: str) -> dict:
         return {"ticker": ticker.upper(), "note": f"Technical data unavailable: {exc}"}
 
 
-def _chat_tool_get_portfolio_sector_allocation() -> dict:
+def _chat_tool_get_portfolio_sector_allocation(owner: str | None = None) -> dict:
     db_path = _ROOT / "data" / "portfolio.db"
     if not db_path.exists():
         return {"note": "Database not found. Run the pipeline first."}
+    portfolio_id, scoped = _resolve_portfolio_id(owner)
+    if scoped and portfolio_id is None:
+        return {"note": "No portfolio found for this account yet."}
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
-        holdings = [dict(r) for r in conn.execute("""
+        where = "WHERE portfolio_id = ?" if portfolio_id is not None else ""
+        params = [portfolio_id] if portfolio_id is not None else []
+        holdings = [dict(r) for r in conn.execute(f"""
             SELECT ticker, SUM(COALESCE(current_value,0)) current_value
-            FROM holdings GROUP BY ticker
-        """).fetchall()]
+            FROM holdings {where} GROUP BY ticker
+        """, params).fetchall()]
         conn.close()
         if not holdings:
             return {"note": "No holdings found."}
@@ -964,12 +994,14 @@ def _chat_tool_get_portfolio_sector_allocation() -> dict:
         return {"note": f"DB query failed: {exc}"}
 
 
-def _chat_tool_get_portfolio_risk_flags(ticker: str = "") -> dict:
+def _chat_tool_get_portfolio_risk_flags(ticker: str = "", owner: str | None = None) -> dict:
     try:
-        from portfolio_agent.tools.risk_flags_db import get_active_flags, get_flags_for_ticker
+        from portfolio_agent.tools.risk_flags_db import SHARED_OWNER, get_active_flags, get_flags_for_ticker
+
+        flags_owner = owner or SHARED_OWNER   # no owner -> shared technical rows only, never someone else's risk row
 
         if ticker:
-            flags = get_flags_for_ticker(ticker.upper())
+            flags = get_flags_for_ticker(ticker.upper(), flags_owner)
             if not flags:
                 return {"ticker": ticker.upper(),
                         "note": "No risk/technical flag data for this ticker yet."}
@@ -983,14 +1015,21 @@ def _chat_tool_get_portfolio_risk_flags(ticker: str = "") -> dict:
                 out[source] = row
             return {"ticker": ticker.upper(), "flags": out}
 
+        portfolio_id, scoped = _resolve_portfolio_id(owner)
+        if scoped and portfolio_id is None:
+            return {"as_of_date": None, "count": 0, "flags": [],
+                    "note": "No portfolio found for this account yet."}
         db_path = _ROOT / "data" / "portfolio.db"
         holding_tickers: set = set()
         if db_path.exists():
             conn = sqlite3.connect(str(db_path))
-            holding_tickers = {r[0] for r in conn.execute("SELECT DISTINCT ticker FROM holdings").fetchall()}
+            where = "WHERE portfolio_id = ?" if portfolio_id is not None else ""
+            params = [portfolio_id] if portfolio_id is not None else []
+            holding_tickers = {r[0] for r in conn.execute(
+                f"SELECT DISTINCT ticker FROM holdings {where}", params).fetchall()}
             conn.close()
 
-        active = [f for f in get_active_flags(None)
+        active = [f for f in get_active_flags(flags_owner, None)
                   if not holding_tickers or f["ticker"] in holding_tickers]
         for f in active:
             try:
@@ -1014,7 +1053,12 @@ def _chat_tool_get_portfolio_risk_flags(ticker: str = "") -> dict:
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
-def _execute_chat_tool(name: str, args: dict) -> str:
+def _execute_chat_tool(name: str, args: dict, owner: str | None = None) -> str:
+    """
+    owner: the logged-in user (current_context("web:chat").actor), threaded
+    through from web/chat/orchestration.py — every portfolio-reading tool
+    below scopes its read to this owner instead of the whole database.
+    """
     try:
         if name == "web_search":
             result = _chat_tool_web_search(args.get("query", ""), args.get("max_results", 5))
@@ -1053,18 +1097,19 @@ def _execute_chat_tool(name: str, args: dict) -> str:
                 limit=args.get("limit", 10),
             )
         elif name == "get_portfolio_summary":
-            result = _chat_tool_get_portfolio_summary()
+            result = _chat_tool_get_portfolio_summary(owner)
         elif name == "get_predictions_summary":
             result = _chat_tool_get_predictions_summary(
                 segment=args.get("segment", "all"),
                 recommendation=args.get("recommendation"),
+                owner=owner,
             )
         elif name == "get_technical_snapshot":
             result = _chat_tool_get_technical_snapshot(args.get("ticker", ""))
         elif name == "get_portfolio_sector_allocation":
-            result = _chat_tool_get_portfolio_sector_allocation()
+            result = _chat_tool_get_portfolio_sector_allocation(owner)
         elif name == "get_portfolio_risk_flags":
-            result = _chat_tool_get_portfolio_risk_flags(args.get("ticker", ""))
+            result = _chat_tool_get_portfolio_risk_flags(args.get("ticker", ""), owner)
         else:
             result = {"error": f"Unknown tool: {name}"}
         return json.dumps(result, default=str)

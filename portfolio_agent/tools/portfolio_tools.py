@@ -1,27 +1,49 @@
 """Portfolio tools — holdings reader, concentration analysis, and restricted-list check."""
 
 import json
+from typing import Optional
 
 import yfinance as yf
 
-
-def _load_portfolio() -> dict:
-    from portfolio_agent.tools.holdings_db import get_holdings
-    return {"holdings": [h.to_dict() for h in get_holdings()]}
+from google.adk.tools import ToolContext
 
 
-def get_portfolio_holdings() -> str:
+def _owner_from_tool_context(tool_context: Optional[ToolContext]) -> str | None:
+    """
+    The logged-in owner for this ADK run, if the session state carries one —
+    set server-side (see web/chat/orchestration.py's create_session(state=...)),
+    never something the model can set itself. None outside a chat run (batch
+    jobs, the Valuation page, etc.), where _load_portfolio() falls back to the
+    single-portfolio/system-wide read.
+    """
+    if tool_context is None:
+        return None
+    return tool_context.state.get("owner")
+
+
+def _load_portfolio(owner: str | None = None) -> dict:
+    from portfolio_agent.tools.holdings_db import get_holdings, get_portfolio_by_owner
+
+    if owner is None:
+        holdings = get_holdings()
+    else:
+        portfolio = get_portfolio_by_owner(owner)
+        holdings = get_holdings(portfolio_id=portfolio["portfolio_id"]) if portfolio else []
+    return {"holdings": [h.to_dict() for h in holdings]}
+
+
+def get_portfolio_holdings(tool_context: Optional[ToolContext] = None) -> str:
     """
     Return current portfolio holdings.
 
     Returns:
         JSON string with a list of holdings: ticker, shares, avg_cost, sector.
     """
-    data = _load_portfolio()
+    data = _load_portfolio(_owner_from_tool_context(tool_context))
     return json.dumps(data)
 
 
-def get_portfolio_concentration(ticker: str) -> str:
+def get_portfolio_concentration(ticker: str, tool_context: Optional[ToolContext] = None) -> str:
     """
     Compute how much of the current portfolio is in *ticker* and show sector exposure.
 
@@ -32,7 +54,7 @@ def get_portfolio_concentration(ticker: str) -> str:
         JSON string with portfolio_total_value, ticker_weight_pct,
         sector_exposure_pct, concentration_flag (>10 %), and holdings_count.
     """
-    data = _load_portfolio()
+    data = _load_portfolio(_owner_from_tool_context(tool_context))
     holdings = data.get("holdings", [])
 
     if not holdings:
@@ -89,9 +111,10 @@ def get_portfolio_concentration(ticker: str) -> str:
     })
 
 
-def check_restricted_list(ticker: str) -> str:
+def check_restricted_list(ticker: str, tool_context: Optional[ToolContext] = None) -> str:
     """
-    Check whether *ticker* appears on the compliance restricted list.
+    Check whether *ticker* appears on the caller's OWN compliance restricted
+    list (restricted_list is personal-only, no shared/global scope).
 
     Args:
         ticker: Stock ticker symbol to check.
@@ -102,7 +125,11 @@ def check_restricted_list(ticker: str) -> str:
     from portfolio_agent.tools.restricted_list_db import is_restricted
 
     ticker_upper = ticker.upper()
-    restricted, reason = is_restricted(ticker_upper)
+    owner = _owner_from_tool_context(tool_context)
+    if not owner:
+        return json.dumps({"ticker": ticker_upper, "is_restricted": None,
+                           "reason": "no owner to check the restricted list against"})
+    restricted, reason = is_restricted(ticker_upper, owner)
     return json.dumps({"ticker": ticker_upper, "is_restricted": restricted, "reason": reason})
 
 

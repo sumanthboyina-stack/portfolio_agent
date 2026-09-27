@@ -396,17 +396,20 @@ def change_instrument_ticker(ctx: RequestContext, instrument_id: int, new_ticker
 # ── Authorized reads ──────────────────────────────────────────────────────────
 #
 # Every read below checks resolve_portfolio(ctx) FIRST — before touching a
-# single holdings/account/cash/import/price row — so an unauthorized or
-# unverified caller never reaches private data, not even to get an empty
-# result back quietly. holdings_db's own read functions (get_holdings,
-# list_accounts, get_cash_balances, get_import_runs, get_price_history) stay
-# as they are: unscoped, single-portfolio, still what most of the web app
-# calls directly today. These are the authorized alternative going forward —
-# see the Phase 2 report's inventory of callers still on the unscoped path.
+# single holdings/account/cash/import/price row — and passes the resolved
+# portfolio_id into the repo call, so an unauthorized/unverified caller never
+# reaches private data AND a verified caller only ever sees their own
+# portfolio's rows, never every portfolio's. holdings_db's own read functions
+# (get_holdings, list_accounts, get_cash_balances, get_import_runs,
+# get_price_history) still default to unscoped when called with no filter —
+# that stays correct for system-wide batch jobs (nightly repricing across
+# every portfolio) — but every one of these *_for functions must pass
+# portfolio_id through, since this is the authorized boundary the rest of the
+# app is expected to call.
 
 def list_holdings_for(ctx: RequestContext) -> list:
-    resolve_portfolio(ctx)
-    return repo.get_holdings()
+    portfolio = resolve_portfolio(ctx)
+    return repo.get_holdings(portfolio_id=portfolio["portfolio_id"])
 
 
 def list_accounts_for(ctx: RequestContext, *, include_archived: bool = False) -> list[dict]:
@@ -415,8 +418,8 @@ def list_accounts_for(ctx: RequestContext, *, include_archived: bool = False) ->
 
 
 def get_cash_balances_for(ctx: RequestContext) -> list[dict]:
-    resolve_portfolio(ctx)
-    return repo.get_cash_balances()
+    portfolio = resolve_portfolio(ctx)
+    return repo.get_cash_balances(portfolio_id=portfolio["portfolio_id"])
 
 
 def list_import_runs_for(ctx: RequestContext, *, limit: int = 25) -> list[dict]:

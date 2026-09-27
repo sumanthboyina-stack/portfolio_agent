@@ -39,7 +39,7 @@ def _isolated_db(tmp_path, monkeypatch):
 
 def _no_restriction(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (False, None))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
 
 
 # ── is_in_blackout: legacy single-window helper ──────────────────────────────
@@ -138,7 +138,7 @@ def test_blackout_blocks_even_when_pre_clearance_is_disabled(monkeypatch):
     monkeypatch.setattr(bw, "list_active_blackout_windows",
                         lambda **kw: [_win(1, "global", "2026-10-01", "2026-10-15")])
     profile = UserProfile(pre_clearance_required=False)
-    decision = evaluate_clearance("AAPL", profile, today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", profile, owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.decision == DECISION_BLOCKED
     assert RC_BLACKOUT_ACTIVE in decision.evidence_refs["reason_codes"]
     assert decision.evidence_refs["pre_clearance_required"] is False   # recorded, but did not decide the outcome
@@ -147,10 +147,10 @@ def test_blackout_blocks_even_when_pre_clearance_is_disabled(monkeypatch):
 def test_restricted_list_blocks_even_when_pre_clearance_is_disabled_and_no_blackout(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
     import portfolio_agent.tools.blackout_windows_db as bw
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (True, "insider information risk"))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (True, "insider information risk"))
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
     profile = UserProfile(pre_clearance_required=False)
-    decision = evaluate_clearance("AAPL", profile, today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", profile, owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.decision == DECISION_BLOCKED
     assert RC_RESTRICTED_LIST_HIT in decision.evidence_refs["reason_codes"]
     assert "insider" in decision.evidence_refs["restricted_reason"]
@@ -159,10 +159,10 @@ def test_restricted_list_blocks_even_when_pre_clearance_is_disabled_and_no_black
 def test_both_restricted_and_blackout_apply_both_reason_codes_collected(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
     import portfolio_agent.tools.blackout_windows_db as bw
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (True, "M&A"))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (True, "M&A"))
     monkeypatch.setattr(bw, "list_active_blackout_windows",
                         lambda **kw: [_win(1, "global", "2026-10-01", "2026-10-15")])
-    decision = evaluate_clearance("AAPL", UserProfile(), today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", UserProfile(), owner_scope="user:alice", today=date(2026, 10, 8))
     codes = decision.evidence_refs["reason_codes"]
     assert RC_RESTRICTED_LIST_HIT in codes and RC_BLACKOUT_ACTIVE in codes
     assert decision.decision == DECISION_BLOCKED
@@ -173,7 +173,7 @@ def test_pre_clearance_disabled_with_no_blocks_is_allowed_by_rules(monkeypatch):
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
     profile = UserProfile(pre_clearance_required=False)
-    decision = evaluate_clearance("AAPL", profile, today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", profile, owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.decision == DECISION_ALLOWED
     assert RC_PRE_CLEARANCE_DISABLED in decision.evidence_refs["reason_codes"]
 
@@ -184,7 +184,7 @@ def test_allowed_by_rules_is_not_external_compliance_approval_by_construction(mo
     _no_restriction(monkeypatch)
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
-    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), owner_scope="user:alice", today=date(2026, 10, 8))
     assert "not" in decision.memo.lower() and "compliance" in decision.memo.lower()
 
 
@@ -263,14 +263,30 @@ def test_trade_approvals_db_refuses_an_llm_as_granted_by(tmp_path, monkeypatch):
 
 # ── Missing data is never "safe" ────────────────────────────────────────────
 
+def test_no_owner_scope_makes_the_restricted_list_check_unknown_not_skipped(monkeypatch):
+    """
+    restricted_list is personal-only, no shared/global scope (report finding
+    #4) -- there is no list left to check without knowing whose list it is.
+    A caller that supplies no owner_scope at all must get UNKNOWN for the
+    restricted-list check (never silently 'not restricted'), even though
+    is_restricted() itself is never called in that case.
+    """
+    import portfolio_agent.tools.restricted_list_db as rl
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (True, "should never be reached"))
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8))
+    assert decision.decision == DECISION_UNKNOWN
+    assert decision.evidence_refs["restricted_list_checked"] is False
+    assert "no owner" in decision.evidence_refs["restricted_list_error"].lower()
+
+
 def test_restricted_list_lookup_failure_is_unknown_not_allowed(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
 
-    def _boom(t):
+    def _boom(t, owner=None):
         raise RuntimeError("restricted_list table is locked")
 
     monkeypatch.setattr(rl, "is_restricted", _boom)
-    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.decision == DECISION_UNKNOWN
     assert decision.evidence_refs["restricted_list_checked"] is False
     assert "restricted_list_error" in decision.evidence_refs
@@ -284,7 +300,7 @@ def test_blackout_lookup_failure_is_unknown(monkeypatch):
         raise RuntimeError("blackout_windows table is locked")
 
     monkeypatch.setattr(bw, "list_active_blackout_windows", _boom)
-    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.decision == DECISION_UNKNOWN
 
 
@@ -293,7 +309,7 @@ def test_invalid_blackout_data_makes_the_whole_decision_unknown(monkeypatch):
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows",
                         lambda **kw: [_win(1, "global", "garbage", "also-garbage")])
-    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.decision == DECISION_UNKNOWN
     assert RC_BLACKOUT_DATA_INVALID in decision.evidence_refs["reason_codes"]
 
@@ -304,16 +320,16 @@ def test_holding_period_check_is_always_unknown_and_caps_an_otherwise_clean_deci
     _no_restriction(monkeypatch)
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
-    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8),
-                                  check_holding_period=True)
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), owner_scope="user:alice",
+                                  today=date(2026, 10, 8), check_holding_period=True)
     assert decision.decision == DECISION_UNKNOWN
     assert RC_HOLDING_PERIOD_UNAVAILABLE in decision.evidence_refs["reason_codes"]
 
 
 def test_holding_period_check_does_not_upgrade_an_already_blocked_decision(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (True, "reason"))
-    decision = evaluate_clearance("AAPL", UserProfile(), today=date(2026, 10, 8), check_holding_period=True)
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (True, "reason"))
+    decision = evaluate_clearance("AAPL", UserProfile(), owner_scope="user:alice", today=date(2026, 10, 8), check_holding_period=True)
     assert decision.decision == DECISION_BLOCKED   # BLOCKED stays BLOCKED, not somehow "more unknown"
 
 
@@ -324,7 +340,7 @@ def test_next_transition_at_matches_the_blackout_window_end(monkeypatch):
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows",
                         lambda **kw: [_win(1, "global", "2026-10-01", "2026-10-15", tz="America/Chicago")])
-    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.next_transition_at is not None
     assert decision.next_transition_at.startswith("2026-10-16")   # the day after the window ends
     assert decision.valid_until == decision.next_transition_at
@@ -334,7 +350,7 @@ def test_next_transition_at_defaults_to_start_of_tomorrow_when_nothing_else_know
     _no_restriction(monkeypatch)
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
-    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", UserProfile(pre_clearance_required=False), owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.next_transition_at.startswith("2026-10-09")
 
 
@@ -343,7 +359,7 @@ def test_next_transition_at_defaults_to_start_of_tomorrow_when_nothing_else_know
 def test_profile_gate_resolves_every_ticker_profile_combination_without_a_model_call(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
     import portfolio_agent.tools.blackout_windows_db as bw
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (False, None))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
 
     import litellm
@@ -372,7 +388,7 @@ def test_profile_gate_writes_state_and_never_falls_through_to_the_llm(monkeypatc
     import portfolio_agent.tools.restricted_list_db as rl
     import portfolio_agent.tools.blackout_windows_db as bw
     import portfolio_agent.tools.user_profile_db as updb
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (False, None))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
     monkeypatch.setattr(updb, "get_user_profile", lambda: UserProfile())
     from portfolio_agent.clearance import _profile_gate
@@ -394,6 +410,51 @@ def test_profile_gate_writes_state_and_never_falls_through_to_the_llm(monkeypatc
     assert written["clearance_status"] == DECISION_PENDING_APPROVAL
 
 
+def test_profile_gate_uses_the_state_owners_identity_not_the_local_operators(monkeypatch):
+    """
+    The fix for the report's finding #3: clearance.py:471-474 previously
+    always resolved to get_user_profile() (the LOCAL_OWNER singleton row) and
+    local_context(...).actor for owner_scope, regardless of who the ADK run
+    was actually for. state["owner"] (set server-side, e.g. from a logged-in
+    web identity threaded through orchestration.py -- never model output) must
+    now drive both: a different owner's decision is logged under THEIR
+    owner_scope, and must NOT silently reuse the local operator's real
+    profile/preferences (pre_clearance_required, blackout dates, etc).
+    user_profile is a hard CHECK(id=1) singleton, so a genuinely different
+    owner has no profile row at all -- the correct, safe behavior is falling
+    back to UserProfile()'s conservative defaults, not LOCAL_OWNER's real one.
+    """
+    import portfolio_agent.tools.restricted_list_db as rl
+    import portfolio_agent.tools.blackout_windows_db as bw
+    import portfolio_agent.tools.user_profile_db as updb
+    from portfolio_agent.domain import LOCAL_OWNER
+    from portfolio_agent.tools.policy_decisions_db import get_latest_policy_decision
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
+    monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
+    updb.update_user_profile(pre_clearance_required=False)   # LOCAL_OWNER opts out of pre-clearance
+
+    from portfolio_agent.clearance import _profile_gate
+
+    class _State(dict):
+        pass
+
+    class _Ctx:
+        def __init__(self, owner):
+            self.state = _State(current_ticker="AAPL", owner=owner)
+
+    # A stranger's run must NOT inherit LOCAL_OWNER's pre_clearance_required=False.
+    stranger_result = _profile_gate(_Ctx("stranger"))
+    stranger_decision = json.loads(stranger_result.parts[0].text)
+    assert stranger_decision["clearance_status"] == DECISION_PENDING_APPROVAL   # UserProfile() default: required
+    assert get_latest_policy_decision("user:stranger", "AAPL")["owner_scope"] == "user:stranger"
+    assert get_latest_policy_decision("user:" + LOCAL_OWNER, "AAPL") is None   # never logged under the local owner
+
+    # LOCAL_OWNER's own run still gets their real (opted-out) profile.
+    local_result = _profile_gate(_Ctx(LOCAL_OWNER))
+    local_decision = json.loads(local_result.parts[0].text)
+    assert local_decision["clearance_status"] == DECISION_ALLOWED
+
+
 def test_clearance_agent_instruction_never_lets_the_model_choose_status():
     from portfolio_agent.clearance import INSTRUCTION, clearance_agent
     assert clearance_agent.before_agent_callback is not None
@@ -405,7 +466,7 @@ def test_clearance_agent_instruction_never_lets_the_model_choose_status():
 def test_evaluate_and_record_persists_a_private_owner_scoped_action_tagged_decision(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
     import portfolio_agent.tools.blackout_windows_db as bw
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (False, None))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
     from portfolio_agent.tools.policy_decisions_db import (
         DECIDED_BY_DETERMINISTIC, get_latest_policy_decision, get_policy_decision_history,
@@ -447,13 +508,13 @@ def test_evaluate_clearance_self_migrates_and_enforces_a_pre_existing_legacy_bla
     dropped because the new table started out empty."""
     _no_restriction(monkeypatch)
     profile = UserProfile(pre_clearance_required=False, blackout_start="2026-10-01", blackout_end="2026-10-15")
-    decision = evaluate_clearance("AAPL", profile, today=date(2026, 10, 8))
+    decision = evaluate_clearance("AAPL", profile, owner_scope="user:alice", today=date(2026, 10, 8))
     assert decision.decision == DECISION_BLOCKED
     assert RC_BLACKOUT_ACTIVE in decision.evidence_refs["reason_codes"]
 
     # A second evaluation (migration already ran) still enforces it, without duplicating windows.
     from portfolio_agent.tools.blackout_windows_db import list_active_blackout_windows
-    decision2 = evaluate_clearance("AAPL", profile, today=date(2026, 10, 9))
+    decision2 = evaluate_clearance("AAPL", profile, owner_scope="user:alice", today=date(2026, 10, 9))
     assert decision2.decision == DECISION_BLOCKED
     assert len(list_active_blackout_windows(scope_in=("global",))) == 1
 

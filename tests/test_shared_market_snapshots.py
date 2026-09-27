@@ -196,7 +196,6 @@ def test_risk_technical_pipeline_stores_deterministic_features_without_breaking_
 
     from portfolio_agent.pipeline.daily import risk_technical as rt_mod
     import portfolio_agent.pipeline.runner as runner_mod
-    import portfolio_agent.tools.portfolio_tools as pt_mod
     import portfolio_agent.tools.technical_features as tf_mod
 
     async def _fake_run_analysis_with_failover(ticker, agent_name, query="", model_session=None, **kw):
@@ -205,7 +204,19 @@ def test_risk_technical_pipeline_stores_deterministic_features_without_breaking_
         return {"technical": _json.dumps({"technical_score": 7, "summary": "fine"}), "_model_used": "m"}
 
     monkeypatch.setattr(runner_mod, "run_analysis_with_failover", _fake_run_analysis_with_failover)
-    monkeypatch.setattr(pt_mod, "get_portfolio_holdings", lambda: '{"holdings": []}')
+
+    # The risk half is per-owner now (finding #7) — it only runs for tickers
+    # held by an ENABLED auth_users owner (never every row in `portfolios`;
+    # see risk_technical._owners_and_their_tickers), so seed both a holding
+    # via the account service and a matching auth_users row, rather than the
+    # old get_portfolio_holdings() monkeypatch this test no longer exercises.
+    from tests.helpers_holdings import seed_holding
+    from portfolio_agent.domain import LOCAL_OWNER
+    from portfolio_agent.tools.auth_users_db import invite_user
+    seed_holding({"ticker": "AAPL", "shares": 1, "avg_cost": 100.0, "cost_basis_total": 100.0,
+                 "account_name": "Individual", "account_number": "X1", "account_type": "TAXABLE"},
+                "fidelity", "2026-09-01")
+    invite_user("owner@test", LOCAL_OWNER)
 
     calls = []
     def _failing_fetch(ticker, **kw):
@@ -219,7 +230,7 @@ def test_risk_technical_pipeline_stores_deterministic_features_without_breaking_
     assert calls == ["AAPL"]
 
     from portfolio_agent.tools.risk_flags_db import get_flags_for_ticker
-    flags = get_flags_for_ticker("AAPL")
+    flags = get_flags_for_ticker("AAPL", LOCAL_OWNER)
     assert set(flags) == {"risk", "technical"}   # both specialist writes succeeded despite the side-write failing
 
 

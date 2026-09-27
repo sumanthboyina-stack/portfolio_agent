@@ -694,31 +694,55 @@ def delete_position(position_id: int, *, conn: sqlite3.Connection | None = None)
 # ── Holdings (read view) ──────────────────────────────────────────────────────
 
 def get_holdings(broker: Optional[str] = None, *, account_id: int | None = None,
+                 portfolio_id: int | None = None,
                  conn: sqlite3.Connection | None = None) -> list[Holding]:
-    """Positions of ACTIVE accounts in the legacy holdings row shape (id = position_id)."""
+    """
+    Positions of ACTIVE accounts in the legacy holdings row shape (id = position_id).
+
+    portfolio_id is the caller's authorization boundary in a multi-portfolio
+    deployment: omitting it returns every portfolio's holdings, which is only
+    ever correct for a system-wide batch job (nightly repricing) — every
+    per-request caller MUST pass the resolved portfolio_id (see
+    account_service.list_holdings_for / resolve_portfolio).
+    """
     clauses, params = [], []
     if broker:
         clauses.append("broker = ?"); params.append(broker)
     if account_id is not None:
         clauses.append("account_id = ?"); params.append(account_id)
+    if portfolio_id is not None:
+        clauses.append("portfolio_id = ?"); params.append(portfolio_id)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with _db(conn) as conn:
         rows = conn.execute(f"SELECT * FROM holdings {where} ORDER BY ticker", params).fetchall()
     return [Holding.from_db_row(dict(r)) for r in rows]
 
 
-def get_portfolio_tickers() -> list[str]:
-    """Unique uppercase tickers across all current holdings, sorted — the
-    one shared helper every pipeline/UI consumer uses instead of each
-    re-reading a holdings file of its own."""
+def get_portfolio_tickers(*, portfolio_id: int | None = None) -> list[str]:
+    """
+    Unique uppercase tickers across current holdings, sorted — the one shared
+    helper every pipeline/UI consumer uses instead of each re-reading a
+    holdings file of its own.
+
+    Default (portfolio_id=None) is a UNION ACROSS EVERY PORTFOLIO — deliberate
+    for the pipeline batch, which decides what the whole system analyzes.
+    A per-request caller answering "what's in MY portfolio" must pass the
+    resolved portfolio_id instead.
+    """
     with _db() as conn:
-        rows = conn.execute("SELECT DISTINCT ticker FROM holdings ORDER BY ticker").fetchall()
+        if portfolio_id is not None:
+            rows = conn.execute(
+                "SELECT DISTINCT ticker FROM holdings WHERE portfolio_id = ? ORDER BY ticker", [portfolio_id]
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT DISTINCT ticker FROM holdings ORDER BY ticker").fetchall()
     return [r["ticker"] for r in rows]
 
 
-def get_holdings_summary() -> dict:
-    """Portfolio-level totals over every stored holding and cash balance (see domain.summarize_holdings)."""
-    return summarize_holdings(get_holdings(), get_cash_balances())
+def get_holdings_summary(*, portfolio_id: int | None = None) -> dict:
+    """Portfolio-level totals over every stored holding and cash balance (see domain.summarize_holdings).
+    See get_holdings() for why portfolio_id should be passed by every per-request caller."""
+    return summarize_holdings(get_holdings(portfolio_id=portfolio_id), get_cash_balances(portfolio_id=portfolio_id))
 
 
 def get_holdings_version() -> str:
@@ -763,14 +787,18 @@ def clear_account_cash(account_id: int, *, conn: sqlite3.Connection | None = Non
         return conn.execute("DELETE FROM account_cash WHERE account_id = ?", [account_id]).rowcount
 
 
-def get_cash_balances(broker: Optional[str] = None, *, conn: sqlite3.Connection | None = None) -> list[dict]:
-    """Cash rows of ACTIVE accounts, with the account's broker / number / name attached."""
+def get_cash_balances(broker: Optional[str] = None, *, portfolio_id: int | None = None,
+                      conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Cash rows of ACTIVE accounts, with the account's broker / number / name attached.
+    See get_holdings() for why portfolio_id should be passed by every per-request caller."""
     sql = ("SELECT c.account_id, a.broker, a.account_number, a.display_name AS account_name, "
            "c.amount, c.as_of_date, c.detail, c.imported_at "
            "FROM account_cash c JOIN accounts a ON a.account_id = c.account_id WHERE a.status = ?")
     params: list = [ACCOUNT_ACTIVE]
     if broker:
         sql += " AND a.broker = ?"; params.append(broker)
+    if portfolio_id is not None:
+        sql += " AND a.portfolio_id = ?"; params.append(portfolio_id)
     with _db(conn) as conn:
         rows = conn.execute(sql + " ORDER BY a.broker, a.account_number", params).fetchall()
     return [dict(r) for r in rows]

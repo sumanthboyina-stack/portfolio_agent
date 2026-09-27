@@ -269,7 +269,7 @@ _init_state()
 
 def _new_chat():
     from portfolio_agent.tools.chat_db import new_session
-    sid = new_session("New conversation")
+    sid = new_session(current_context("web:chat"), "New conversation")
     st.session_state.session_id      = sid
     st.session_state.messages        = []
     st.session_state.current_tickers = []
@@ -282,7 +282,7 @@ def _new_chat():
 
 def _load_chat(session_id: str):
     from portfolio_agent.tools.chat_db import get_messages
-    msgs = get_messages(session_id)
+    msgs = get_messages(current_context("web:chat"), session_id)
     st.session_state.session_id = session_id
     st.session_state.messages   = [
         {"role": m["role"], "content": m["content"],
@@ -316,7 +316,7 @@ with st.sidebar:
 
     # Session history
     from portfolio_agent.tools.chat_db import list_sessions
-    sessions = list_sessions(limit=80)
+    sessions = list_sessions(current_context("web:chat"), limit=80)
     groups   = _group_sessions_by_date(sessions)
 
     from portfolio_agent.tools.chat_db import delete_session
@@ -350,7 +350,7 @@ with st.sidebar:
             with del_col, st.container(key=f"chat_del_wrap_{s['id']}"):
                 if st.button("", key=f"del_{s['id']}", help="Delete this conversation",
                              icon=material("delete")):
-                    delete_session(s["id"])
+                    delete_session(current_context("web:chat"), s["id"])
                     if st.session_state.get("session_id") == s["id"]:
                         _new_chat()
                     st.rerun()
@@ -434,7 +434,7 @@ if not st.session_state.session_id and not st.session_state.messages:
 
     # ── Attention Queue nudge -- same critical-tier logic as the dashboard ────
     from web.data.attention import get_critical_nudge_items
-    _nudges = get_critical_nudge_items(limit=3)
+    _nudges = get_critical_nudge_items(current_context("web:chat").actor, limit=3)
     if _nudges:
         _n = len(_nudges)
         st.markdown(
@@ -595,12 +595,12 @@ if user_input:
 
     # Persist to DB
     from portfolio_agent.tools.chat_db import add_message, rename_session
-    add_message(st.session_state.session_id, "user", user_input)
+    add_message(current_context("web:chat"), st.session_state.session_id, "user", user_input)
 
     # Auto-title from first user message
     if len(st.session_state.messages) == 1:
         title = user_input[:60]
-        rename_session(st.session_state.session_id, title)
+        rename_session(current_context("web:chat"), st.session_state.session_id, title)
 
     tickers = _extract_tickers(user_input)
     if tickers:
@@ -659,7 +659,8 @@ if _has_message and (_has_ticker or _no_ticker):
             q_chat: Queue = Queue()
             ct = Thread(
                 target=_run_chat_agent_thread,
-                args=(tickers, query, _build_chat_history(st.session_state.messages[:-1]), q_chat),
+                args=(tickers, query, _build_chat_history(st.session_state.messages[:-1]), q_chat,
+                     current_context("web:chat").actor),
                 daemon=True,
             )
             ct.start()
@@ -722,7 +723,7 @@ if _has_message and (_has_ticker or _no_ticker):
             # Persist to chat DB
             final_text = chat_text or "_No response._"
             from portfolio_agent.tools.chat_db import add_message as _add_msg
-            _add_msg(st.session_state.session_id, "assistant", final_text)
+            _add_msg(current_context("web:chat"), st.session_state.session_id, "assistant", final_text)
             st.session_state.messages.append({
                 "role": "assistant", "type": "text",
                 "content": final_text, "metadata": {},
@@ -777,7 +778,8 @@ if _has_message and (_has_ticker or _no_ticker):
 
             # ── Stream execution ──────────────────────────────────────────────
             q: Queue = Queue()
-            t = Thread(target=_run_apex_thread, args=(ticker, query, q), daemon=True)
+            t = Thread(target=_run_apex_thread,
+                      args=(ticker, query, q, current_context("web:chat").actor), daemon=True)
             t.start()
             start = time.time()
             deliberation   = ""
@@ -983,6 +985,7 @@ if _has_message and (_has_ticker or _no_ticker):
 
                 from portfolio_agent.tools.chat_db import touch_session
                 touch_session(
+                    current_context("web:chat"),
                     st.session_state.session_id,
                     tickers=tickers_so_far,
                     last_rec=pred_data.get("recommendation",""),
@@ -991,6 +994,7 @@ if _has_message and (_has_ticker or _no_ticker):
                 # Save to chat DB
                 from portfolio_agent.tools.chat_db import add_message
                 add_message(
+                    current_context("web:chat"),
                     st.session_state.session_id,
                     "assistant",
                     pred_data.get("reasoning", "Prediction generated."),
@@ -1007,7 +1011,7 @@ if _has_message and (_has_ticker or _no_ticker):
                 st.markdown(deliberation or raw_output or "_No output received._")
                 from portfolio_agent.tools.chat_db import add_message
                 content = deliberation or raw_output or "Analysis completed."
-                add_message(st.session_state.session_id, "assistant", content)
+                add_message(current_context("web:chat"), st.session_state.session_id, "assistant", content)
                 st.session_state.messages.append({
                     "role": "assistant", "type": "text",
                     "content": content, "metadata": {},

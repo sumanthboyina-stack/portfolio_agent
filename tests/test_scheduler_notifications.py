@@ -227,13 +227,20 @@ def test_notification_log_is_private_and_never_touches_shared_prediction_tables(
     assert pdb.get_prediction_history("AAPL", scopes=pdb.SHARED_SCOPES) == []   # a notification never writes a forecast
 
 
-def test_blocked_ticker_event_still_notifies_monitoring_is_not_disabled_by_blackout(monkeypatch):
-    """The core 'blackout must not disable monitoring' proof: a restricted-list
-    hit doesn't suppress the notification, it just annotates it."""
-    import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (True, "insider list"))
-    import portfolio_agent.tools.blackout_windows_db as bw
-    monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
+def test_unevaluatable_action_permission_still_notifies_monitoring_is_not_disabled(monkeypatch):
+    """
+    The core 'a non-ALLOWED action permission must not disable monitoring'
+    proof: the notification still fires, it's just annotated. events/
+    detector.py's _action_permission_note() calls evaluate_clearance() with
+    no owner_scope (it isn't threaded with a RequestContext — a separate,
+    deferred finding: notifications need a per-user scheduler loop, not just
+    a query filter). restricted_list is personal-only with no shared/global
+    scope now, so a restricted-list check with no owner can never be answered
+    and this caller always gets UNKNOWN here (never silently "not restricted"
+    — see test_no_owner_scope_makes_the_restricted_list_check_unknown_not_skipped
+    in test_clearance_gate.py) — proving the annotation doesn't gate delivery
+    holds regardless of which non-ALLOWED status it is.
+    """
     _enable_notifications(monkeypatch)
 
     import logging
@@ -250,8 +257,8 @@ def test_blocked_ticker_event_still_notifies_monitoring_is_not_disabled_by_black
     finally:
         logger.removeHandler(handler)
     logged = [r.getMessage() for r in records]
-    assert delivered is True   # NOT suppressed by the block
-    assert any("BLOCKED" in m for m in logged)   # but the block is noted
+    assert delivered is True   # NOT suppressed by the non-ALLOWED status
+    assert any("UNKNOWN" in m for m in logged)   # but it is noted
 
 
 # ── Missed-morning recovery is deduplicated ───────────────────────────────────
@@ -302,7 +309,7 @@ def test_one_shared_forecast_serves_multiple_private_contexts(monkeypatch):
 
     monkeypatch.setattr(risk, "compute_portfolio_risk_context", lambda *a, **k: {})
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (False, None))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
 

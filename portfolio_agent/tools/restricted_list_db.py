@@ -5,16 +5,23 @@ and this phase keeps them that way rather than scoping both the same way.
 
 Tables:
   restricted_list — tickers blocked from new recommendations (ticker, reason,
-                     added_at, owner). A PERSONAL restriction (e.g. an
-                     employer's insider-trading blocklist for THIS person) —
-                     read by clearance.py's PolicyDecision engine. Carries an
-                     `owner` column (backfilled to LOCAL_OWNER, idempotent) and
-                     an authorized read path, list_restricted_for(ctx); the
-                     existing global functions (list_restricted/is_restricted/
-                     add_restricted/remove_restricted) are UNCHANGED and still
-                     what clearance.py and the admin UI use — see the Phase 2
-                     report's inventory for what still needs migrating onto
-                     the scoped path.
+                     added_at, owner), UNIQUE(owner, ticker). A genuinely
+                     PERSONAL restriction (each member's own compliance
+                     blocklist) — read by clearance.py's PolicyDecision
+                     engine. There is deliberately no shared/global scope:
+                     one member's restriction never affects another's. Every
+                     function here (is_restricted/add_restricted/
+                     remove_restricted/list_restricted_for) takes an owner
+                     and only ever touches that owner's own rows.
+
+                     This used to be a single ticker-is-globally-unique table
+                     (PRIMARY KEY(ticker)) with a single owner-less read/write
+                     path — the bug that closes: one person's employer
+                     restriction blocked every other member too, and no one
+                     else could keep their own list. _migrate_owner_scoping()
+                     rebuilds a pre-existing table into the new shape once,
+                     carrying every row's owner forward (already backfilled
+                     to LOCAL_OWNER by an earlier migration).
   pipeline_skip    — tickers silently skipped in specific pipeline phases
                      (ticker, phases (JSON list), reason, added_at). ADMINISTRATOR
                      configuration for the shared, market-only generation path
@@ -54,10 +61,12 @@ def _db():
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS restricted_list (
-            ticker   TEXT PRIMARY KEY,
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker   TEXT NOT NULL,
             reason   TEXT,
             added_at TEXT NOT NULL,
-            owner    TEXT
+            owner    TEXT NOT NULL,
+            UNIQUE(owner, ticker)
         )
     """)
     conn.execute("""
@@ -68,6 +77,39 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             added_at TEXT NOT NULL
         )
     """)
+
+
+def _migrate_owner_scoping(conn: sqlite3.Connection) -> None:
+    """
+    Rebuild restricted_list from ticker-is-globally-unique (PRIMARY KEY
+    ticker) to UNIQUE(owner, ticker) — the bug this closes: one flat
+    PRIMARY KEY(ticker) meant every owner shared ONE restricted list
+    (add_restricted always wrote LOCAL_OWNER; is_restricted(ticker) ignored
+    who was asking), so one person's employer restriction blocked everyone
+    else too, and no one else could keep their own. Runs once; a no-op once
+    the new shape already exists. owner is already backfilled by the caller
+    (_migrate) before this runs, so every row carries one forward untouched.
+    """
+    cols = conn.execute("PRAGMA table_info(restricted_list)").fetchall()
+    ticker_is_pk = any(c[1] == "ticker" and c[5] == 1 for c in cols)   # column 5 = pk flag
+    if not cols or not ticker_is_pk:
+        return
+    conn.execute("ALTER TABLE restricted_list RENAME TO restricted_list_legacy_v1")
+    conn.execute("""
+        CREATE TABLE restricted_list (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker   TEXT NOT NULL,
+            reason   TEXT,
+            added_at TEXT NOT NULL,
+            owner    TEXT NOT NULL,
+            UNIQUE(owner, ticker)
+        )
+    """)
+    conn.execute("""
+        INSERT INTO restricted_list (ticker, reason, added_at, owner)
+        SELECT ticker, reason, added_at, COALESCE(owner, ?) FROM restricted_list_legacy_v1
+    """, (LOCAL_OWNER,))
+    conn.execute("DROP TABLE restricted_list_legacy_v1")
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -82,13 +124,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     Also backfills restricted_list.owner on any pre-existing row to
     LOCAL_OWNER — idempotent, a no-op once set, never touches pipeline_skip
-    (deliberately un-owned — see module docstring).
+    (deliberately un-owned — see module docstring). Then rebuilds the table
+    from the old PRIMARY KEY(ticker) shape to UNIQUE(owner, ticker) — see
+    _migrate_owner_scoping().
     """
     migrate_columns(conn, "restricted_list", [("owner", "TEXT")])
     conn.execute("UPDATE restricted_list SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
     # One-time rename: LOCAL_OWNER was "local" before this deployment's single
     # user was named "sumanth_b" ahead of registration/login. Idempotent.
     conn.execute("UPDATE restricted_list SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
+    _migrate_owner_scoping(conn)
     if not _LEGACY_YAML.exists():
         return
     try:
@@ -126,50 +171,65 @@ def _migrate(conn: sqlite3.Connection) -> None:
         pass  # migration itself already succeeded; a rename failure just means we re-check next time
 
 
-# ── Compliance restricted list ────────────────────────────────────────────────
+# ── Compliance restricted list — personal, no shared/global scope ───────────
 
-def list_restricted() -> list[dict]:
-    with _db() as conn:
-        rows = conn.execute(
-            "SELECT ticker, reason, added_at FROM restricted_list ORDER BY ticker"
-        ).fetchall()
-    return [dict(r) for r in rows]
+def _require_owner(owner: str) -> str:
+    if not owner:
+        raise ValueError("restricted_list: owner is required — there is no shared/global list")
+    return owner
 
 
-def is_restricted(ticker: str) -> tuple[bool, str | None]:
+def is_restricted(ticker: str, owner: str) -> tuple[bool, str | None]:
+    """Whether *owner*'s OWN restricted list blocks *ticker* — never anyone else's."""
+    _require_owner(owner)
     ticker_upper = ticker.upper()
     with _db() as conn:
         row = conn.execute(
-            "SELECT reason FROM restricted_list WHERE ticker = ?", (ticker_upper,)
+            "SELECT reason FROM restricted_list WHERE ticker = ? AND owner = ?", (ticker_upper, owner)
         ).fetchone()
     if row is None:
         return False, None
     return True, row[0] or "No reason specified"
 
 
-def add_restricted(ticker: str, reason: str | None) -> None:
+def add_restricted(ticker: str, reason: str | None, owner: str) -> None:
+    _require_owner(owner)
     now = datetime.now(timezone.utc).isoformat()
     with _db() as conn:
         conn.execute(
             "INSERT INTO restricted_list (ticker, reason, added_at, owner) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(ticker) DO UPDATE SET reason = excluded.reason",
-            (ticker.upper(), reason, now, LOCAL_OWNER),
+            "ON CONFLICT(owner, ticker) DO UPDATE SET reason = excluded.reason",
+            (ticker.upper(), reason, now, owner),
         )
         conn.commit()
 
 
-def remove_restricted(ticker: str) -> None:
+def remove_restricted(ticker: str, owner: str) -> None:
+    _require_owner(owner)
     with _db() as conn:
-        conn.execute("DELETE FROM restricted_list WHERE ticker = ?", (ticker.upper(),))
+        conn.execute("DELETE FROM restricted_list WHERE ticker = ? AND owner = ?", (ticker.upper(), owner))
         conn.commit()
 
 
 def list_restricted_for(ctx) -> list[dict]:
     """Authorized read: only the restrictions owned by ctx's verified identity."""
+    return list_restricted_by_owner(ctx.actor)
+
+
+def list_restricted_by_owner(owner: str) -> list[dict]:
+    """
+    Unauthenticated-by-design read by a raw owner string, mirroring
+    holdings_db.get_portfolio_by_owner() / user_profile_db.
+    get_user_profile_by_owner(). For server-side callers that already trust
+    *owner* but have no RequestContext to construct (e.g.
+    scenarios/prepare.py, which isn't threaded with one — a separate,
+    deferred finding).
+    """
+    _require_owner(owner)
     with _db() as conn:
         rows = conn.execute(
             "SELECT ticker, reason, added_at FROM restricted_list WHERE owner = ? ORDER BY ticker",
-            (ctx.actor,),
+            (owner,),
         ).fetchall()
     return [dict(r) for r in rows]
 

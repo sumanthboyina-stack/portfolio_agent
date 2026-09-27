@@ -45,9 +45,12 @@ from web.components.portfolio_charts import (
     build_portfolio_trend_chart, build_sector_pie, build_value_stack_chart, VIEW_CHANGE, VIEW_GAIN, VIEW_RETURN,
 )
 from portfolio_agent.tools.company_names import get_company_names, get_company_name, search_companies
-from portfolio_agent.services.account_service import set_position, remove_position, NotFound, VersionConflict
+from portfolio_agent.services.account_service import (
+    set_position, remove_position, NotFound, VersionConflict,
+    list_holdings_for, get_cash_balances_for,
+)
 from portfolio_agent.tools.holdings_db import (
-    get_holdings, get_cash_balances, get_holdings_version, get_price_history,
+    get_holdings_version, get_price_history,
     get_history_coverage, repair_legacy_history,
     HISTORY_SOURCE_LEGACY, HISTORY_SOURCE_RECONSTRUCTED, HISTORY_SOURCE_BACKFILL,
     HISTORY_SOURCE_SNAPSHOT, HISTORY_SOURCE_ATTRIBUTED,
@@ -528,7 +531,8 @@ def _render_rebalance(scoped: list, scope: str, scope_label: str) -> None:
             try:
                 from portfolio_agent.tools.portfolio_optimizer import recommend_allocation
                 st.write("Loading holdings, predictions and risk context…")
-                result = recommend_allocation(float(cash_amount), holdings=[dict(h.items()) for h in scoped])
+                result = recommend_allocation(float(cash_amount), holdings=[dict(h.items()) for h in scoped],
+                                              owner=current_context("web:portfolio").actor)
                 status.update(label="Scenario ready", state="complete", expanded=False)
                 st.session_state["rebal_scenario"] = {"key": key, "result": result, "error": None,
                                                       "computed_at": datetime.now().isoformat(timespec="minutes")}
@@ -680,8 +684,9 @@ def _render_holdings_tab() -> None:
     if flash := st.session_state.pop("holdings_flash", None):
         st.success(flash, icon=material("check_circle"))
 
-    all_holdings = get_holdings()
-    cash_rows = get_cash_balances()
+    ctx = current_context("web:portfolio")
+    all_holdings = list_holdings_for(ctx)
+    cash_rows = get_cash_balances_for(ctx)
     accounts = group_holdings_by_account(all_holdings)
 
     if not all_holdings:

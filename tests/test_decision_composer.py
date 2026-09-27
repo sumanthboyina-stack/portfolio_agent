@@ -92,7 +92,7 @@ def _seed_holding(ctx, ticker, shares, current_price, sector="Technology", broke
 
 def _no_restriction(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (False, None))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (False, None))
     import portfolio_agent.tools.blackout_windows_db as bw
     monkeypatch.setattr(bw, "list_active_blackout_windows", lambda **kw: [])
 
@@ -235,7 +235,7 @@ def test_composer_and_direct_clearance_evaluation_agree_on_the_same_permission(m
     function decides — proven here by calling both paths with matching
     inputs and requiring identical decisions, not just similar ones."""
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (True, "insider list"))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (True, "insider list"))
 
     from portfolio_agent.domain import UserProfile
     from portfolio_agent.clearance import evaluate_clearance
@@ -250,7 +250,7 @@ def test_composer_and_direct_clearance_evaluation_agree_on_the_same_permission(m
 
 def test_blocked_ticker_never_produces_an_actionable_recommendation(monkeypatch):
     import portfolio_agent.tools.restricted_list_db as rl
-    monkeypatch.setattr(rl, "is_restricted", lambda t: (True, "insider list"))
+    monkeypatch.setattr(rl, "is_restricted", lambda t, owner=None: (True, "insider list"))
     monkeypatch.setattr(risk, "compute_portfolio_risk_context", lambda *a, **k: {})
 
     _seed_shared_forecast(recommendation="STRONG_BUY")

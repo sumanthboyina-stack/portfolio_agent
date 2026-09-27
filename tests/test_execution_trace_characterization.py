@@ -316,7 +316,7 @@ def test_run_apex_thread_tries_each_chain_model_once_until_success(monkeypatch):
         attempts.append((provider, label))
         raise RuntimeError("529 overloaded")                  # transient -> advances to next chain entry
 
-    async def _fake_adk(ticker, query, model_id, label, provider, chain_pos, q):
+    async def _fake_adk(ticker, query, model_id, label, provider, chain_pos, q, owner=None):
         attempts.append((provider, label))
         q.put(("done", "ok"))
         return True
@@ -365,7 +365,7 @@ def test_chat_agent_thread_counts_one_model_call_per_round_until_final_text(monk
     import portfolio_agent._models as models_mod
 
     monkeypatch.setattr(models_mod, "FAILOVER_CHAINS", {"flash": [("m1", "google", "Flash")]})
-    monkeypatch.setattr(orch, "_execute_chat_tool", lambda name, args: '{"ok": true}')
+    monkeypatch.setattr(orch, "_execute_chat_tool", lambda name, args, owner=None: '{"ok": true}')
 
     class _ToolCall:
         def __init__(self, cid, name, args):
@@ -405,7 +405,7 @@ def test_chat_agent_thread_stops_at_eight_rounds_if_never_producing_final_text(m
     import portfolio_agent._models as models_mod
 
     monkeypatch.setattr(models_mod, "FAILOVER_CHAINS", {"flash": [("m1", "google", "Flash")]})
-    monkeypatch.setattr(orch, "_execute_chat_tool", lambda name, args: '{"ok": true}')
+    monkeypatch.setattr(orch, "_execute_chat_tool", lambda name, args, owner=None: '{"ok": true}')
 
     class _ToolCall:
         def __init__(self, cid, name, args):
@@ -434,23 +434,46 @@ def test_chat_agent_thread_stops_at_eight_rounds_if_never_producing_final_text(m
     assert any(kind == "text" and "did not produce a final answer" in payload for kind, payload in events)
 
 
-# ── risk_flags persistence: upsert is keyed (ticker, as_of_date, source) ──────
+# ── risk_flags persistence: upsert is keyed (ticker, as_of_date, source, owner) ──
 
 def test_risk_flag_upsert_is_idempotent_and_updates_in_place():
-    from portfolio_agent.tools.risk_flags_db import get_flags_for_ticker, needs_refresh, upsert_risk_flag
+    """
+    Risk finding #7 fix: 'technical' is shared (ticker-only, SHARED_OWNER
+    sentinel); 'risk' is per-owner (the daily batch computes concentration
+    against each owner's OWN holdings, not everyone's combined book).
+    """
+    from portfolio_agent.tools.risk_flags_db import (
+        get_flags_for_ticker, needs_risk_refresh, needs_technical_refresh, upsert_risk_flag,
+    )
 
-    assert needs_refresh("AAPL", "2026-09-21") is True
+    assert needs_risk_refresh("AAPL", "2026-09-21", "alice") is True
+    assert needs_technical_refresh("AAPL", "2026-09-21") is True
     upsert_risk_flag(ticker="aapl", as_of_date="2026-09-21", source="risk", flag=True,
-                     score=8.0, summary="concentrated", raw_json="{}", model_used="claude")
-    assert needs_refresh("AAPL", "2026-09-21") is True         # only 1 of 2 sources present
+                     score=8.0, summary="concentrated", raw_json="{}", model_used="claude", owner="alice")
+    assert needs_risk_refresh("AAPL", "2026-09-21", "alice") is False
+    assert needs_technical_refresh("AAPL", "2026-09-21") is True    # technical still missing
 
     upsert_risk_flag(ticker="AAPL", as_of_date="2026-09-21", source="technical", flag=False,
                      score=6.0, summary="neutral", raw_json="{}", model_used="claude")
-    assert needs_refresh("AAPL", "2026-09-21") is False        # both sources present now
+    assert needs_technical_refresh("AAPL", "2026-09-21") is False  # shared row now present
 
-    # Re-upsert 'risk' with different values -- same (ticker, date, source) key updates in place.
+    # A different owner holding the same ticker still needs their OWN risk row.
+    assert needs_risk_refresh("AAPL", "2026-09-21", "bob") is True
+
+    # Re-upsert 'risk' with different values -- same (ticker, date, source, owner) key updates in place.
     upsert_risk_flag(ticker="AAPL", as_of_date="2026-09-21", source="risk", flag=False,
-                     score=3.0, summary="resolved", raw_json="{}", model_used="gpt-4o")
-    flags = get_flags_for_ticker("AAPL", "2026-09-21")
-    assert set(flags) == {"risk", "technical"}                 # still exactly one row per source
+                     score=3.0, summary="resolved", raw_json="{}", model_used="gpt-4o", owner="alice")
+    flags = get_flags_for_ticker("AAPL", "alice", "2026-09-21")
+    assert set(flags) == {"risk", "technical"}                 # alice's risk row + the shared technical row
     assert flags["risk"]["score"] == 3.0 and flags["risk"]["flag"] == 0
+
+    # Bob never sees alice's risk row.
+    bob_flags = get_flags_for_ticker("AAPL", "bob", "2026-09-21")
+    assert set(bob_flags) == {"technical"}
+
+
+def test_upsert_risk_flag_rejects_a_risk_row_without_a_real_owner():
+    from portfolio_agent.tools.risk_flags_db import upsert_risk_flag
+    with pytest.raises(ValueError):
+        upsert_risk_flag(ticker="AAPL", as_of_date="2026-09-21", source="risk", flag=True,
+                         score=8.0, summary="x", raw_json="{}", model_used="claude")   # owner defaults to SHARED_OWNER

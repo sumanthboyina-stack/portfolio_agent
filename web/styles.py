@@ -210,19 +210,25 @@ def inject_global_css() -> None:
     }
     .nav-brand {
         font-weight: 800;
-        color: #111827;
-        font-size: 1.02rem;
+        color: #2563EB;
+        font-size: 20px;
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 10px;
         height: 58px;
         padding-right: 16px;
         border-right: 1px solid #E5E7EB;
-        letter-spacing: -0.025em;
+        letter-spacing: -0.01em;
         white-space: nowrap;
         overflow: visible;
     }
     .nav-underline { height: 1px; background: #F3F4F6; margin: -6px 0 18px; }
+    /* Streamlit sometimes measures a column's height before our custom icon
+       font/markdown has settled, then locks that (too-small) height with
+       overflow:auto — clipping content (seen on the active nav tab's
+       icon+label) to a sliver from then on. No column here needs its own
+       internal scrollbar, so let content overflow visibly instead. */
+    .stColumn { overflow: visible !important; }
     @media (max-width: 1450px) {
         /* tight row: labels only, icons dropped so nothing overlaps */
         [data-testid="stPageLink"] p, .nav-tab { font-size: 0.84rem !important; padding: 0 5px !important; }
@@ -257,7 +263,9 @@ def inject_global_css() -> None:
     .nav-tab.active {
         color: #2563EB;
         border-bottom-color: #2563EB;
-        font-weight: 600;
+        /* same weight as the inactive page_link (500) — bumping this to 600
+           made the label wider and shifted every tab after it on click */
+        font-weight: 500;
     }
 
     /* ── Sidebar ─────────────────────────────────────────────── */
@@ -910,6 +918,11 @@ def inject_global_css() -> None:
 
 # ── Top navigation bar ────────────────────────────────────────────────────────
 
+# Filled (not outline) icon for the active tab — a small icon like "home" reads
+# as a stray mark rather than a house at 16-17px in the default outline style;
+# solid fill also doubles as the active/current-page signal.
+_ACTIVE_ICON_FILL = "font-variation-settings:'FILL' 1,'wght' 500,'GRAD' 0,'opsz' 20"
+
 _NAV_PRIMARY = [
     ("dashboard",         "home",          "Today",             "app.py"),
     ("opportunity_engine", "rocket_launch", "Opportunity Engine", "pages/9_🎯_Opportunity_Engine.py"),
@@ -957,7 +970,7 @@ def top_nav(active: str = "dashboard") -> None:
 
     with cols[0]:
         st.markdown(
-            f'<div class="nav-brand"><span style="display:inline-flex;width:19px;height:19px;'
+            f'<div class="nav-brand"><span style="display:inline-flex;width:26px;height:26px;'
             f'vertical-align:middle">{brand_mark_svg()}</span> <span class="brand-text">APEX</span></div>',
             unsafe_allow_html=True,
         )
@@ -966,7 +979,9 @@ def top_nav(active: str = "dashboard") -> None:
         with cols[1 + i]:
             if key == active:
                 st.markdown(
-                    f'<div class="nav-tab active">{icon_html(icon, 17)} <span>{label}</span></div>',
+                    f'<div class="nav-tab active">'
+                    f'{icon_html(icon, 17, color=PRIMARY, extra_style=_ACTIVE_ICON_FILL)} '
+                    f'<span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
             else:
@@ -983,7 +998,8 @@ def top_nav(active: str = "dashboard") -> None:
             if key == active:
                 st.markdown(
                     f'<div class="nav-tab active" style="font-size:0.875rem">'
-                    f'{icon_html(icon, 16)} <span>{label}</span></div>',
+                    f'{icon_html(icon, 16, color=PRIMARY, extra_style=_ACTIVE_ICON_FILL)} '
+                    f'<span>{label}</span></div>',
                     unsafe_allow_html=True,
                 )
             else:

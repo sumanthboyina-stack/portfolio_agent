@@ -173,8 +173,8 @@ def compute_portfolio_exposures(ctx: RequestContext, *, holdings: list | None = 
     """
     portfolio = resolve_portfolio(ctx)
     owner_scope = f"user:{ctx.actor}"
-    raw_holdings = list(repo.get_holdings()) if holdings is None else list(holdings)
-    raw_cash = list(repo.get_cash_balances()) if cash is None else list(cash)
+    raw_holdings = list(repo.get_holdings(portfolio_id=portfolio["portfolio_id"])) if holdings is None else list(holdings)
+    raw_cash = list(repo.get_cash_balances(portfolio_id=portfolio["portfolio_id"])) if cash is None else list(cash)
     policy = policy or get_effective_policy(ctx)
     holdings_version = repo.get_holdings_version() if holdings is None else f"override:{len(raw_holdings)}"
 
