@@ -7,6 +7,8 @@ from portfolio_agent.domain import UserProfile
 from portfolio_agent.tools.user_profile_db import (
     _db,
     get_user_profile,
+    get_user_profile_by_owner,
+    list_all_profiles,
     update_user_profile,
 )
 
@@ -79,15 +81,23 @@ def test_seed_never_overwrites_existing_row(tmp_path, monkeypatch):
         assert c.execute("SELECT COUNT(*) FROM user_profile").fetchone()[0] == 1
 
 
-def test_single_row_is_enforced_by_schema(tmp_path, monkeypatch):
+def test_one_row_per_owner_is_enforced_by_schema(tmp_path, monkeypatch):
+    """user_profile is a real per-owner table now (UNIQUE(owner), not
+    CHECK(id = 1)) — a second row for the SAME owner is rejected, but a
+    different owner gets their own row. See test_trusted_context_scoping.py
+    for the authorized get_user_profile_for/update_user_profile_for path."""
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
 
-    get_user_profile()
+    get_user_profile()   # seeds LOCAL_OWNER's row
     with _db() as c:
         with pytest.raises(Exception):
             c.execute(
-                "INSERT INTO user_profile (id, created_at, updated_at) VALUES (2, 'x', 'x')"
+                "INSERT INTO user_profile (owner, created_at, updated_at) VALUES "
+                "((SELECT owner FROM user_profile WHERE id = 1), 'x', 'x')"
             )
+        c.execute("INSERT INTO user_profile (owner, created_at, updated_at) VALUES ('bob', 'x', 'x')")
+        c.commit()
+        assert c.execute("SELECT COUNT(*) FROM user_profile").fetchone()[0] == 2
 
 
 def test_update_user_profile_rejects_unknown_fields(tmp_path, monkeypatch):
@@ -191,6 +201,40 @@ def test_preferred_horizons_default_to_all_and_round_trip(tmp_path, monkeypatch)
     p = update_user_profile(preferred_horizons=["5d", "63d"])
     assert p.preferred_horizons == ["5d", "63d"]
     assert get_user_profile().preferred_horizons == ["5d", "63d"]
+
+
+# ── Per-owner rows (the "friends share your profile" fix) ─────────────────────
+
+def test_get_user_profile_by_owner_auto_provisions_a_distinct_row_per_owner(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+
+    update_user_profile(display_name="Sumanth", max_sector_pct=40.0)   # LOCAL_OWNER's row
+
+    bob = get_user_profile_by_owner("bob")
+    assert bob.display_name is None          # bob gets his OWN defaults, not Sumanth's row
+    assert bob.max_sector_pct == 25.0
+
+    # It's a real row now, not a view onto LOCAL_OWNER's — an update to one
+    # never touches the other.
+    from portfolio_agent.services.context import RequestContext, _mint_identity_for_tests
+    from portfolio_agent.tools.user_profile_db import update_user_profile_for
+    bob_ctx = RequestContext(identity=_mint_identity_for_tests("bob"), source="test")
+    update_user_profile_for(bob_ctx, display_name="Bob", max_sector_pct=10.0)
+
+    assert get_user_profile().display_name == "Sumanth"
+    assert get_user_profile().max_sector_pct == 40.0
+    assert get_user_profile_by_owner("bob").display_name == "Bob"
+    assert get_user_profile_by_owner("bob").max_sector_pct == 10.0
+
+
+def test_list_all_profiles_includes_every_owner_not_just_local(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+
+    update_user_profile(display_name="Sumanth", employer="Acme")
+    get_user_profile_by_owner("bob")   # auto-provisions bob's row
+
+    owners = {p.owner for p in list_all_profiles()}
+    assert owners == {get_user_profile().owner, "bob"}
 
 
 def test_migrate_adds_preferred_horizons_with_all_default(tmp_path, monkeypatch):

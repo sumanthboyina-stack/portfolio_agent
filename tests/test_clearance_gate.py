@@ -420,9 +420,11 @@ def test_profile_gate_uses_the_state_owners_identity_not_the_local_operators(mon
     now drive both: a different owner's decision is logged under THEIR
     owner_scope, and must NOT silently reuse the local operator's real
     profile/preferences (pre_clearance_required, blackout dates, etc).
-    user_profile is a hard CHECK(id=1) singleton, so a genuinely different
-    owner has no profile row at all -- the correct, safe behavior is falling
-    back to UserProfile()'s conservative defaults, not LOCAL_OWNER's real one.
+    user_profile is a real per-owner table now; a genuinely new owner like
+    "stranger" gets their own freshly auto-provisioned row, whose defaults
+    (pre_clearance_required=True, etc) happen to match UserProfile()'s -- the
+    same conservative outcome as before, just backed by a real row instead of
+    a `None` + fallback.
     """
     import portfolio_agent.tools.restricted_list_db as rl
     import portfolio_agent.tools.blackout_windows_db as bw

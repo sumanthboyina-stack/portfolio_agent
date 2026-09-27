@@ -498,10 +498,10 @@ def _research_version() -> str:
         return "n/a"
 
 
-def _constraints_version() -> str:
+def _constraints_version(owner: str) -> str:
     try:
-        from portfolio_agent.tools.user_profile_db import get_user_profile
-        p = get_user_profile()
+        from portfolio_agent.tools.user_profile_db import get_user_profile_by_owner
+        p = get_user_profile_by_owner(owner)
         return f"{p.max_sector_pct}|{p.max_issuer_pct}"
     except Exception:
         return "n/a"
@@ -515,10 +515,11 @@ def _render_rebalance(scoped: list, scope: str, scope_label: str) -> None:
         unsafe_allow_html=True,
     )
     cash_amount = st.number_input("Cash available to invest ($)", min_value=0, value=10000, step=500, key="rebal_cash")
+    owner = current_context("web:portfolio").actor
     key = {
         "scope": scope, "holdings": get_holdings_version(),
         "mutations": st.session_state.get("holdings_mutation_seq", 0),
-        "research": _research_version(), "constraints": _constraints_version(), "cash": float(cash_amount),
+        "research": _research_version(), "constraints": _constraints_version(owner), "cash": float(cash_amount),
     }
     stored = st.session_state.get("rebal_scenario")
     stale = bool(stored) and stored["key"] != key
@@ -532,7 +533,7 @@ def _render_rebalance(scoped: list, scope: str, scope_label: str) -> None:
                 from portfolio_agent.tools.portfolio_optimizer import recommend_allocation
                 st.write("Loading holdings, predictions and risk context…")
                 result = recommend_allocation(float(cash_amount), holdings=[dict(h.items()) for h in scoped],
-                                              owner=current_context("web:portfolio").actor)
+                                              owner=owner)
                 status.update(label="Scenario ready", state="complete", expanded=False)
                 st.session_state["rebal_scenario"] = {"key": key, "result": result, "error": None,
                                                       "computed_at": datetime.now().isoformat(timespec="minutes")}

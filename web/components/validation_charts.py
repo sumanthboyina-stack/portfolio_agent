@@ -141,8 +141,8 @@ _METRIC_CFG = {
     ),
 }
 
-_H_COLORS = {5: "#2563EB", 21: "#7C3AED", 63: "#059669"}
-_H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
+_H_COLORS = {5: "#2563EB", 21: "#7C3AED", 63: "#059669", 250: "#B45309"}
+_H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
 
 _TILE_CSS = """
 <style>
@@ -756,16 +756,26 @@ RECOMMENDATION_COLORS = {
 
 
 def build_outcome_breakdown_chart(breakdown: list[dict]) -> go.Figure:
-    """Bar of evaluated-prediction counts per outcome bucket, green (strong_correct) to red (wrong_significant)."""
+    """Bar of evaluated-prediction counts per outcome bucket, green (strong_correct) to red (wrong_significant).
+    Bar text shows both the raw count and the deduplicated unique-streak count
+    (breakdown[i]["streak_count"], when present) -- a ticker rated the same
+    way for 20 straight days is 20 correlated rows but one streak."""
     labels = [OUTCOME_LABELS[b["outcome"]] for b in breakdown]
     counts = [b["count"] for b in breakdown]
+    streak_counts = [b.get("streak_count") for b in breakdown]
     colors = [OUTCOME_COLORS[b["outcome"]] for b in breakdown]
     total = sum(counts) or 1
+
+    def _bar_text(c: int, sc) -> str:
+        if not c:
+            return "0"
+        pct = f"{c/total*100:.0f}%"
+        return f"{c} ({pct}, {sc} streaks)" if sc is not None else f"{c} ({pct})"
 
     fig = go.Figure(go.Bar(
         x=labels, y=counts,
         marker_color=colors,
-        text=[f"{c} ({c/total*100:.0f}%)" if c else "0" for c in counts],
+        text=[_bar_text(c, sc) for c, sc in zip(counts, streak_counts)],
         textposition="outside",
         hovertemplate="%{x}<br>%{y} predictions<extra></extra>",
     ))
@@ -780,14 +790,22 @@ def build_outcome_breakdown_chart(breakdown: list[dict]) -> go.Figure:
 
 
 def build_returns_by_recommendation_chart(data: list[dict]) -> go.Figure:
-    """Bar of average realized return per recommendation bucket — 'did following this call actually work.'"""
+    """Bar of average realized return per recommendation bucket — 'did following this call actually work.'
+    Bar text shows n (raw evaluated calls) and, when present, streak_n (unique
+    same-call runs) plus a low-sample warning below ~30 unique streaks."""
     labels = [d["recommendation"].replace("_", " ").title() for d in data]
     vals   = [d["avg_return"] * 100 if d["avg_return"] is not None else 0 for d in data]
     colors = [RECOMMENDATION_COLORS.get(d["recommendation"], "#94A3B8") for d in data]
-    texts  = [
-        f"{d['avg_return']*100:+.2f}% (n={d['n']})" if d["avg_return"] is not None else "no data"
-        for d in data
-    ]
+
+    def _bar_text(d: dict) -> str:
+        if d["avg_return"] is None:
+            return "no data"
+        sample_n = d.get("streak_n", d["n"])
+        n_part = f"n={d['n']}, streaks={d['streak_n']}" if "streak_n" in d else f"n={d['n']}"
+        warn = " ⚠ thin sample" if sample_n < 30 else ""
+        return f"{d['avg_return']*100:+.2f}% ({n_part}){warn}"
+
+    texts = [_bar_text(d) for d in data]
 
     fig = go.Figure(go.Bar(
         x=labels, y=vals,
@@ -860,7 +878,9 @@ def build_score_vs_returns_chart(report: dict, score_labels: dict) -> go.Figure:
 
 
 def build_horizon_reliability_chart(by_horizon: dict, all_horizons: list, horizon_labels: dict) -> go.Figure:
-    """Simplified 'which time horizon is more reliable' bar — directional accuracy per horizon, no segment breakdown."""
+    """Simplified 'which time horizon is more reliable' bar — directional accuracy per horizon, no segment breakdown.
+    Flags any bar backed by fewer than ~30 evaluated calls, so a short hot
+    streak doesn't read as a settled, reliable accuracy number."""
     labels = [horizon_labels.get(h, f"{h}d") for h in all_horizons]
     accs   = [by_horizon[h].get("directional_accuracy") for h in all_horizons]
     ns     = [by_horizon[h].get("num_predictions") or 0 for h in all_horizons]
@@ -869,10 +889,16 @@ def build_horizon_reliability_chart(by_horizon: dict, all_horizons: list, horizo
         for a in accs
     ]
 
+    def _bar_text(a, n) -> str:
+        if a is None:
+            return "no data"
+        warn = " ⚠ n<30" if n < 30 else ""
+        return f"{a*100:.2f}% (n={n}){warn}"
+
     fig = go.Figure(go.Bar(
         x=labels, y=[(a or 0) * 100 for a in accs],
         marker_color=colors,
-        text=[f"{(a or 0)*100:.2f}% (n={n})" if a is not None else "no data" for a, n in zip(accs, ns)],
+        text=[_bar_text(a, n) for a, n in zip(accs, ns)],
         textposition="outside",
     ))
     fig.add_hline(y=50, line_dash="dot", line_color="#94A3B8",

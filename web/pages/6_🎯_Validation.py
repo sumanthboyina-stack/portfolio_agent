@@ -51,8 +51,11 @@ from web.data.validation import (
     _get_model_names,
     _compute_filtered_metrics,
     _load_evaluated_predictions_df,
+    _add_streak_ids,
     _outcome_breakdown,
     _returns_by_recommendation,
+    _sell_call_outcomes,
+    _calibration_headline,
     _signal_equity_curve,
 )
 from web.components.validation_charts import (
@@ -164,9 +167,13 @@ with st.sidebar:
     if _seg_sel == "All":
         st.caption(f"{material('public')} Widened to the full shared universe.")
 
-# Load portfolio/watchlist tickers once (used by segment filter throughout)
-_portfolio_tickers = _load_portfolio_tickers()
-_watchlist_tickers = _load_watchlist_tickers()
+# Load portfolio/watchlist tickers once (used by segment filter throughout) —
+# scoped to the viewer's OWN holdings/watchlist, not the shared union across
+# every user (get_portfolio_tickers()'s default), so "My Tickers"/"Portfolio"/
+# "Watchlist" mean what they say once more than one person is logged in.
+_ctx = current_context("web:validation")
+_portfolio_tickers = _load_portfolio_tickers(_ctx)
+_watchlist_tickers = _load_watchlist_tickers(_ctx)
 
 # ── Page header ───────────────────────────────────────────────────────────────
 
@@ -193,6 +200,28 @@ if _active_filters:
         icon=material("search"),
     )
 
+# ── Calibration, in one line — the full reliability diagram lives on the
+# operator-only Validation QA page; a friend just needs the headline number ──
+
+from portfolio_agent.tools.validation_engine import get_calibration_data
+
+_cal_headline = _calibration_headline(
+    get_calibration_data(lookback_days=lookback, model_names=_model_filter).get("reliability", [])
+)
+if _cal_headline:
+    st.info(
+        f"When APEX says it's about **{_cal_headline['mean_stated']*100:.0f}% confident** a stock will rise, "
+        f"it's actually right **{_cal_headline['actual_hit_rate']*100:.0f}%** of the time "
+        f"(based on {_cal_headline['n']} evaluated calls in this confidence range). "
+        "Full reliability diagram: Validation QA.",
+        icon=material("track_changes"),
+    )
+else:
+    st.caption(
+        f"{material('hourglass_top')} Calibration line will appear once enough predictions with a "
+        "probability distribution have been evaluated."
+    )
+
 # ── Shared per-horizon metrics (used by both Scorecard and Heatmap tabs) ──────
 
 metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
@@ -202,9 +231,9 @@ for row in metrics:
     if h not in by_horizon:
         by_horizon[h] = row
 
-horizon_labels = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
-all_horizons = [h for h in [5, 21, 63] if h in by_horizon] + \
-               [h for h in sorted(by_horizon) if h not in [5, 21, 63]]
+horizon_labels = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
+all_horizons = [h for h in [5, 21, 63, 250] if h in by_horizon] + \
+               [h for h in sorted(by_horizon) if h not in [5, 21, 63, 250]]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
@@ -234,6 +263,16 @@ with tabs[0]:
                 eval_df = _load_evaluated_predictions_df(
                     lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers
                 )
+                if not eval_df.empty:
+                    _n_raw = len(eval_df)
+                    _streaked_df = _add_streak_ids(eval_df)
+                    _n_streaks = _streaked_df["streak_id"].nunique() if "streak_id" in _streaked_df.columns else _n_raw
+                    if _n_streaks < _n_raw:
+                        st.caption(
+                            f"{_n_raw} evaluated calls below, but only {_n_streaks} unique rating streaks — "
+                            "a ticker held at the same call for many days running counts once per streak, "
+                            "not once per day, in that count."
+                        )
 
                 oc1, oc2 = st.columns(2)
                 with oc1:
@@ -250,6 +289,30 @@ with tabs[0]:
                         st.plotly_chart(build_returns_by_recommendation_chart(rec_returns), use_container_width=True)
                     else:
                         st.info("No evaluated predictions yet.", icon=material("info"))
+
+                # ── Did SELL calls avoid losses? — a SELL call getting its own
+                # bar above isn't enough: "avoided a loss" and "beat the market
+                # you'd have rotated into" are the two questions that actually
+                # matter for a sell recommendation ─────────────────────────────
+                sell_stats = _sell_call_outcomes(eval_df)
+                if sell_stats["n"]:
+                    sc1, sc2, sc3 = st.columns(3)
+                    sc1.metric("SELL / STRONG_SELL calls evaluated", sell_stats["n"])
+                    sc2.metric(
+                        "% that actually fell",
+                        fmt_pct(sell_stats["pct_fell"] * 100) if sell_stats["pct_fell"] is not None else "—",
+                    )
+                    sc3.metric(
+                        "Avg return vs SPY",
+                        fmt_pct(sell_stats["avg_excess_return"] * 100, signed=True)
+                        if sell_stats["avg_excess_return"] is not None else "—",
+                        help="Negative = the ticker underperformed SPY over the same window, "
+                             "i.e. selling and rotating into the market would have been the better call.",
+                    )
+                    if sell_stats["n"] < 30:
+                        st.caption(f"{material('warning')} Only {sell_stats['n']} evaluated SELL calls — read with caution.")
+                else:
+                    st.caption("No evaluated SELL / STRONG_SELL calls yet.")
 
                 st.caption("If you'd mechanically followed every BUY / STRONG_BUY call, vs. SPY over the same windows")
                 curve_df = _signal_equity_curve(eval_df)
@@ -278,7 +341,7 @@ with tabs[0]:
                     n    = row.get("num_predictions") or 0
                     raw_rows.append({
                         "Horizon":           hlbl,
-                        "Evaluated Preds":   n,
+                        "Evaluated Preds":   f"{n} ⚠" if n < 30 else n,
                         "Dir Accuracy":   fmt_pct(row["directional_accuracy"]*100) if row.get("directional_accuracy") is not None else "—",
                         "In-Range %":     fmt_pct(row["in_range_pct"]*100)         if row.get("in_range_pct")          is not None else "—",
                         "Excess Return":  fmt_pct(row["mean_excess_return"]*100, signed=True)  if row.get("mean_excess_return")     is not None else "—",
@@ -293,7 +356,7 @@ with tabs[0]:
                     use_container_width=True,
                     column_config={
                         "Horizon":         st.column_config.Column(help="Prediction horizon — how many trading days ahead this call was for."),
-                        "Evaluated Preds": st.column_config.Column(help="Number of matured, scored predictions at this horizon over the selected lookback period."),
+                        "Evaluated Preds": st.column_config.Column(help="Number of matured, scored predictions at this horizon over the selected lookback period. ⚠ = fewer than 30 — every metric in this row is not yet statistically reliable."),
                         "Dir Accuracy":    st.column_config.Column(help=_METRIC_CFG["directional_accuracy"]["defn"]),
                         "In-Range %":      st.column_config.Column(help=_METRIC_CFG["in_range_pct"]["defn"]),
                         "Excess Return":   st.column_config.Column(help=_METRIC_CFG["mean_excess_return"]["defn"]),

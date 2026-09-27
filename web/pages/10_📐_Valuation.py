@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -57,10 +56,15 @@ def _cached_valuations_for_tickers(tickers: tuple[str, ...]) -> dict:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _cached_holdings_tickers() -> list[str]:
-    from portfolio_agent.tools.portfolio_tools import get_portfolio_holdings
+def _cached_holdings_tickers(owner: str) -> list[str]:
+    """owner is a cache-key argument, not just documentation — st.cache_data
+    keys on arguments, so scoping the read by owner without also taking it
+    as a parameter here would still return one owner's holdings to every
+    other owner's session once cached."""
+    from portfolio_agent.tools.holdings_db import get_portfolio_by_owner, get_holdings
     try:
-        holdings = json.loads(get_portfolio_holdings()).get("holdings", [])
+        portfolio = get_portfolio_by_owner(owner)
+        holdings = get_holdings(portfolio_id=portfolio["portfolio_id"]) if portfolio else []
     except Exception:
         holdings = []
     return sorted({str(h["ticker"]).upper() for h in holdings if h.get("ticker")})
@@ -73,7 +77,7 @@ def _cached_opportunity_tickers() -> list[str]:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _cached_watchlist_tickers() -> list[str]:
+def _cached_watchlist_tickers(owner: str) -> list[str]:
     """Watchlist tickers excluding portfolio holdings —
     matches the "Watchlist" segment definition used on the Validation page."""
     from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
@@ -81,7 +85,7 @@ def _cached_watchlist_tickers() -> list[str]:
         watchlist = set(load_watchlist_tickers())
     except Exception:
         return []
-    return sorted(watchlist - set(_cached_holdings_tickers()))
+    return sorted(watchlist - set(_cached_holdings_tickers(owner)))
 
 
 @st.cache_data(ttl=1800, show_spinner="Running DCF (EDGAR + market data, no LLM)…")
@@ -321,16 +325,18 @@ group_choice = st.radio(
     "Group", ["All", "Portfolio", "Watchlist", "New Opportunities"], horizontal=True, key="valuation_group",
 )
 
+_owner = current_context("web:valuation").actor
+
 if group_choice == "Portfolio":
-    group_tickers = _cached_holdings_tickers()
+    group_tickers = _cached_holdings_tickers(_owner)
 elif group_choice == "Watchlist":
-    group_tickers = _cached_watchlist_tickers()
+    group_tickers = _cached_watchlist_tickers(_owner)
 elif group_choice == "New Opportunities":
     group_tickers = _cached_opportunity_tickers()
 else:
     group_tickers = sorted(
-        set(_cached_holdings_tickers())
-        | set(_cached_watchlist_tickers())
+        set(_cached_holdings_tickers(_owner))
+        | set(_cached_watchlist_tickers(_owner))
         | set(_cached_opportunity_tickers())
     )
 

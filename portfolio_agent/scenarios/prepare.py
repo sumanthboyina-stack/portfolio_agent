@@ -44,9 +44,10 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
     from portfolio_agent.tools.portfolio_risk import (
         _expected_return, compute_portfolio_aggregate_metrics, compute_portfolio_risk_context,
     )
+    from portfolio_agent.domain import UserProfile
     from portfolio_agent.tools.prediction_db import get_all_latest_predictions
     from portfolio_agent.tools.restricted_list_db import list_restricted_by_owner
-    from portfolio_agent.tools.user_profile_db import get_user_profile
+    from portfolio_agent.tools.user_profile_db import get_user_profile, get_user_profile_by_owner
 
     warnings: list[str] = []
     rows = [dict(h) for h in holdings if h.get("ticker")]
@@ -74,8 +75,10 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
         warnings.append(f"starting cash unknown for {', '.join(unknown)} (no cash line in the last import); "
                         "set it in the assumptions to check the cash constraint")
 
-    # Profile → limits (fractions), exclusions, version.
-    profile = get_user_profile()
+    # Profile → limits (fractions), exclusions, version. owner known (web) →
+    # that owner's own profile, never whoever prepared the last scenario;
+    # no owner (CLI, no logged-in identity) → the local, single-operator one.
+    profile = (get_user_profile_by_owner(owner) if owner else get_user_profile()) or UserProfile()
     limits = Limits.from_profile(profile)
     excluded = frozenset(s for s in (profile.sector_exclusions or []) if s)
     restricted = (frozenset(str(r["ticker"]).upper() for r in list_restricted_by_owner(owner))

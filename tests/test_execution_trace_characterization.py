@@ -131,7 +131,10 @@ HISTORY / PREDICTION READERS — scope-relevant ones
 ═══════════════════════════════════════════════════════════════════════════
 PRIVATE-DATA INPUTS — everything privacy.collect_private_terms() knows about
 ═══════════════════════════════════════════════════════════════════════════
-  user_profile_db.get_user_profile(): display_name, employer
+  user_profile_db.list_all_profiles(): display_name, employer for EVERY owner
+    (fixed from get_user_profile() — LOCAL_OWNER-only was the "Profile page
+    uses your row" leak's privacy-side counterpart: another member's name/
+    employer wasn't in the redaction list at all)
   holdings_db.list_accounts(include_archived=True): display_name, account_number
     (skipped when it equals the account's own broker name)
 Additional PRIVATE surfaces that are NOT run through the privacy/scope

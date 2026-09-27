@@ -25,9 +25,9 @@ from web.styles import (
     PRIMARY, SUCCESS, WARNING, NEUTRAL, SUCCESS_LIGHT, WARNING_LIGHT,
 )
 from portfolio_agent.domain import ALL_HORIZON_LABELS, NOTIFICATION_CHANNELS
-from portfolio_agent.tools.user_profile_db import get_user_profile, update_user_profile
+from portfolio_agent.tools.user_profile_db import get_user_profile_for, update_user_profile_for
 from portfolio_agent.tools.user_notifications_db import (
-    get_user_notifications, update_user_notifications,
+    get_user_notifications_for, update_user_notifications_for,
 )
 
 from web.auth import current_context, current_user, require_login
@@ -55,8 +55,9 @@ page_header(
 if flash := st.session_state.pop("profile_flash", None):
     st.success(flash, icon=material("check_circle"))
 
-profile = get_user_profile()
-notif = get_user_notifications()
+_ctx = current_context("web:profile")
+profile = get_user_profile_for(_ctx)
+notif = get_user_notifications_for(_ctx)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -310,7 +311,8 @@ if submitted:
         else:
             disclaimer_at = None
 
-        update_user_profile(
+        update_user_profile_for(
+            _ctx,
             display_name=values["display_name"],
             base_currency=values["base_currency"],
             timezone=values["timezone"],
@@ -326,7 +328,8 @@ if submitted:
             disclaimer_accepted_at=disclaimer_at,
             preferred_horizons=values["preferred_horizons"],
         )
-        update_user_notifications(
+        update_user_notifications_for(
+            _ctx,
             channel=channel,
             min_severity_threshold=values["min_severity"],
             min_conviction_threshold=values["min_conviction"] if use_conviction else None,

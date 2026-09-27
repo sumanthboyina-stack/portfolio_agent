@@ -55,17 +55,19 @@ WHAT THIS PHASE BUILT
    once that identity's portfolio is gone, even though the cache entry is
    still sitting in memory. Nothing is wired to use it yet (see inventory).
 
-WHY user_profile/user_notifications STILL ENFORCE id = 1
-──────────────────────────────────────────────────────────
-This phase adds the SCOPE mechanism (owner column + authorized path) without
-lifting the CHECK(id = 1) constraint that makes each table a true singleton.
-Lifting it would itself start enabling multi-user storage ahead of the
-isolation gate the project instructions require staying closed — so today
-these tables can still only ever hold LOCAL_OWNER's row, by construction, no
-matter what identity a caller presents. The authorized functions are exercised
-here against that one real row plus a `_mint_identity_for_tests`-simulated
-second identity that intentionally has NO row, to prove the isolation logic
-holds even though only one owner can exist in production right now.
+UPDATE — user_profile/user_notifications are now real per-owner tables
+────────────────────────────────────────────────────────────────────────
+The CHECK(id = 1) singleton that used to make user_profile/user_notifications
+true one-row-ever tables has been lifted (see the "Profile page uses your
+row" review): every member sharing LOCAL_OWNER's mandate limits, notification
+prefs and compliance settings — and overwriting them on Save — was exactly
+the isolation gap this project's own instructions warn about, not a
+hypothetical to defer. Both tables were rebuilt to UNIQUE(owner) (mirroring
+restricted_list_db's identical rebuild), and get_user_profile_for/
+get_user_profile_by_owner (and the notifications equivalents) now
+auto-provision a default row for an owner they've never seen, rather than
+raising NotAuthorized on a missing row — a `_mint_identity_for_tests`
+"stranger" below gets their OWN row on first access, never LOCAL_OWNER's.
 
 INVENTORY — NOT migrated this phase (read this before enabling anything)
 ══════════════════════════════════════════════════════════════════════════
@@ -127,6 +129,29 @@ review): several items in the inventory above are now stale.
     profile/prefs reads, and risk_technical's batch risk_flags (no owner
     column, computed over the global ticker union by design) — these need a
     per-user scheduler/batch loop, not just a query filter.
+
+UPDATE — "Profile page uses your row" fix: user_profile/user_notifications
+are real per-owner tables now (see the UPDATE note near the top of this
+docstring for the schema rebuild). What changed as a result:
+  - web/pages/12_Profile.py now reads/writes through get_user_profile_for /
+    update_user_profile_for / get_user_notifications_for /
+    update_user_notifications_for(ctx, ...) (the last one newly added — the
+    earlier inventory's "write side was not added" is stale).
+  - scenarios/prepare.py:78 now uses get_user_profile_by_owner(owner) when an
+    owner is known (falling back to get_user_profile() only for the no-owner
+    CLI case), matching clearance.py's `get_user_profile_by_owner(owner) or
+    UserProfile()` pattern — no longer always "#5"'s deferred item.
+  - web/pages/5_Portfolio.py's _constraints_version() and privacy.py's
+    collect_private_terms() (now via the new list_all_profiles()) are
+    owner-aware too, so the rebalance cache key and the shared-forecast
+    redaction list are no longer scoped to LOCAL_OWNER alone.
+  - Still deferred, unchanged by this update: events/detector.py's
+    _action_permission_note, user_notifications_db.should_notify's fallback
+    profile/prefs reads, and risk_technical's batch risk_flags — these need a
+    per-owner scheduler/batch loop, not just a query filter, and get_user_
+    profile()/update_user_profile()/get_user_notifications()/
+    update_user_notifications() (no ctx) are kept for exactly those callers,
+    not deleted.
 
 EXISTING TEST STATUS: `pytest tests/ -q` → 243 passed, 0 failed, before this
 phase's additions — no pre-existing failures to report separately.
@@ -234,16 +259,19 @@ def test_cross_user_cannot_read_or_write_holdings():
 
 
 def test_cross_user_cannot_read_or_write_user_profile():
+    """user_profile is a real per-owner table now (UNIQUE(owner), not the old
+    CHECK(id = 1) singleton) — a stranger with no row yet gets their OWN
+    auto-provisioned default row, never local_context's, and writing to it
+    never touches local_context's row."""
     user_profile_db.update_user_profile_for(local_context("test"), display_name="Real Owner")
 
     stranger = RequestContext(identity=_mint_identity_for_tests("stranger"), source="test")
-    with pytest.raises(account_service.NotAuthorized):
-        user_profile_db.get_user_profile_for(stranger)
-    with pytest.raises(account_service.NotAuthorized):
-        user_profile_db.update_user_profile_for(stranger, display_name="Hijacked")
+    assert user_profile_db.get_user_profile_for(stranger).display_name is None
+    user_profile_db.update_user_profile_for(stranger, display_name="Hijacked")
 
-    # The legitimate owner's row is untouched by the failed cross-user attempt.
+    # The legitimate owner's row is untouched by the stranger's write.
     assert user_profile_db.get_user_profile_for(local_context("test")).display_name == "Real Owner"
+    assert user_profile_db.get_user_profile_for(stranger).display_name == "Hijacked"
 
 
 def test_list_holdings_for_never_mixes_two_owners_holdings():

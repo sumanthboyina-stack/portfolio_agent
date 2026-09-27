@@ -224,6 +224,7 @@ class UserProfile(_DictCompat):
     disclaimer_accepted_at: str | None = None
     # horizons the user wants generated/shown; default = all four (no filtering)
     preferred_horizons: list = field(default_factory=lambda: list(ALL_HORIZON_LABELS))
+    owner: str | None = None
 
     @classmethod
     def from_db_row(cls, row: dict) -> "UserProfile":
@@ -265,6 +266,7 @@ class UserProfile(_DictCompat):
                 if row.get("preferred_horizons") is None
                 else _parse_json_list(row.get("preferred_horizons"))
             ),
+            owner=row.get("owner"),
         )
 
     def to_dict(self) -> dict:
@@ -286,6 +288,7 @@ class UserProfile(_DictCompat):
             "blackout_end": self.blackout_end,
             "disclaimer_accepted_at": self.disclaimer_accepted_at,
             "preferred_horizons": self.preferred_horizons,
+            "owner": self.owner,
         }
 
 

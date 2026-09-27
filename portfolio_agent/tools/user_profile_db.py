@@ -1,10 +1,11 @@
 """
-User profile database — single-row store for the user's identity, mandate
+User profile database — per-owner store for each member's identity, mandate
 limits, and preferences.
 
-Table: user_profile — exactly one row (id = 1, enforced by CHECK). The row is
-seeded with defaults the first time the table is touched and never overwritten
-after that; edits go through update_user_profile().
+Table: user_profile — one row per owner, UNIQUE(owner). A row is auto-
+provisioned with defaults the first time that owner is looked up (via
+get_user_profile_for / get_user_profile_by_owner) and never overwritten after
+that except through an explicit update.
 
 Columns:
   display_name, base_currency (USD), timezone (America/Chicago),
@@ -18,23 +19,26 @@ Columns:
 
 Ownership / scoping
 --------------------
-The table's shape (id = 1, CHECK-enforced) still allows exactly one row — this
-phase does not lift that, since doing so would itself start enabling multi-user
-storage ahead of the isolation gate. What it adds is the `owner` column and an
-AUTHORIZED read/write path (get_user_profile_for / update_user_profile_for)
-that requires a RequestContext carrying a verified Identity and refuses to
-serve or mutate a row it does not own — laying the boundary a later phase can
-widen to more than one row without changing any caller of the *_for functions.
+This used to be a single-row table (id = 1, CHECK-enforced) — every member
+shared one profile, so opening the Profile page as anyone but the deployment's
+original owner showed (and could overwrite) that owner's name, employer and
+mandate limits. _migrate_owner_scoping() rebuilds a pre-existing table into a
+real per-owner shape once (mirroring restricted_list_db's identical rebuild
+for the same reason), carrying the one existing row's data forward under
+LOCAL_OWNER.
 
-A pre-existing row (from before this column existed) has owner backfilled to
-LOCAL_OWNER exactly once via an idempotent migration — the one, explicitly
-configured existing owner this deployment has always served, never "whoever
-logs in first." A fresh install's seeded row is owned by LOCAL_OWNER directly.
+get_user_profile_for(ctx) / update_user_profile_for(ctx, ...) are the
+AUTHORIZED path: they require a RequestContext carrying a verified Identity,
+auto-provision a default row for that identity on first access, and never
+serve or mutate a row belonging to a different owner.
+get_user_profile_by_owner(owner) is the same auto-provisioning lookup for
+server-side callers that already trust a raw owner string but have no
+RequestContext to construct (see its own docstring).
 
-get_user_profile() / update_user_profile() (no ctx) remain as the pre-existing
-unscoped convenience path — every current caller in the app still uses them.
-They are not removed in this phase; see the Phase 2 report's inventory of
-callers still on the unscoped path.
+get_user_profile() / update_user_profile() (no ctx, no owner) remain as an
+unscoped convenience path that always resolves to LOCAL_OWNER's row (id = 1,
+preserved across the rebuild) — used by CLI/batch callers that have no
+logged-in identity at all.
 """
 
 from __future__ import annotations
@@ -102,7 +106,8 @@ def _db():
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute(f"""
         CREATE TABLE IF NOT EXISTS user_profile (
-            id                            INTEGER PRIMARY KEY CHECK (id = 1),
+            id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner                         TEXT NOT NULL UNIQUE,
             display_name                  TEXT,
             base_currency                 TEXT NOT NULL DEFAULT 'USD',
             timezone                      TEXT NOT NULL DEFAULT 'America/Chicago',
@@ -118,31 +123,75 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             blackout_start                TEXT,
             blackout_end                  TEXT,
             disclaimer_accepted_at        TEXT,
-            preferred_horizons            TEXT NOT NULL DEFAULT '{_DEFAULT_HORIZONS_JSON}',
-            owner                         TEXT
+            preferred_horizons            TEXT NOT NULL DEFAULT '{_DEFAULT_HORIZONS_JSON}'
         )
     """)
 
 
+_LEGACY_COLUMNS = [
+    "id", "display_name", "base_currency", "timezone", "max_sector_pct", "max_issuer_pct",
+    "max_per_candidate_pct_of_cash", "max_post_trade_position_pct", "sector_exclusions",
+    "created_at", "updated_at", "employer", "pre_clearance_required", "blackout_start",
+    "blackout_end", "disclaimer_accepted_at", "preferred_horizons", "owner",
+]
+
+
+def _migrate_owner_scoping(conn: sqlite3.Connection) -> None:
+    """
+    Rebuild user_profile from the CHECK(id = 1) singleton shape to a real
+    per-owner table (UNIQUE(owner)) — the bug this closes: every member
+    shared ONE profile row, so opening the Profile page as anyone but
+    LOCAL_OWNER showed (and could overwrite) their name, employer and
+    mandate limits. Mirrors restricted_list_db._migrate_owner_scoping's
+    identical rebuild. Runs once; a no-op once the new shape already exists.
+    owner is already backfilled by the caller (_migrate) before this runs, so
+    the one existing row carries it forward untouched, keeping its original
+    id (1) so get_user_profile()'s WHERE id = 1 still resolves to it.
+    """
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_profile'"
+    ).fetchone()
+    if not ddl or "CHECK" not in (ddl[0] or ""):
+        return
+    conn.execute("ALTER TABLE user_profile RENAME TO user_profile_legacy_v1")
+    _create_schema(conn)
+    cols = ", ".join(_LEGACY_COLUMNS)
+    conn.execute(f"INSERT INTO user_profile ({cols}) SELECT {cols} FROM user_profile_legacy_v1")
+    conn.execute("DROP TABLE user_profile_legacy_v1")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns introduced after the first release to an existing table,
-    then backfill ownership on any pre-existing row (idempotent: a no-op once
-    owner is set, never touches id or any other column)."""
+    backfill ownership on any pre-existing row (idempotent: a no-op once
+    owner is set), then rebuild the table from the old CHECK(id = 1) shape to
+    a real per-owner one — see _migrate_owner_scoping()."""
     migrate_columns(conn, "user_profile", _MIGRATED_COLUMNS)
     conn.execute("UPDATE user_profile SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
     # One-time rename: LOCAL_OWNER was the placeholder "local" before this
     # deployment's single user was named "sumanth_b" ahead of registration/
     # login. Idempotent -- a no-op once no row still says "local".
     conn.execute("UPDATE user_profile SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
+    _migrate_owner_scoping(conn)
 
 
 def _seed(conn: sqlite3.Connection) -> None:
-    """Insert the singleton row with column defaults if — and only if — it is
+    """Insert LOCAL_OWNER's row with column defaults if — and only if — it is
     missing. INSERT OR IGNORE means an existing row is never touched."""
     now = _now()
     conn.execute(
         "INSERT OR IGNORE INTO user_profile (id, owner, created_at, updated_at) VALUES (1, ?, ?, ?)",
         (LOCAL_OWNER, now, now),
+    )
+
+
+def _seed_owner(conn: sqlite3.Connection, owner: str) -> None:
+    """Auto-provision a default row for *owner* if it doesn't already have
+    one. INSERT OR IGNORE + UNIQUE(owner) means a race just loses to the
+    unique constraint and is silently ignored, same idiom as _seed()."""
+    now = _now()
+    conn.execute(
+        "INSERT OR IGNORE INTO user_profile (owner, created_at, updated_at) VALUES (?, ?, ?)",
+        (owner, now, now),
     )
 
 
@@ -197,25 +246,7 @@ def update_user_profile(**fields) -> UserProfile:
 
 # ── Authorized (ctx-scoped) path ──────────────────────────────────────────────
 
-def get_user_profile_for(ctx) -> UserProfile:
-    """
-    Authorized read: the profile owned by ctx's verified identity.
-
-    Raises account_service.NotAuthorized if no profile is owned by that
-    identity — never falls back to serving a different owner's row.
-    """
-    from portfolio_agent.services.account_service import NotAuthorized
-    from portfolio_agent.services.context import require_context
-
-    require_context(ctx)
-    with _db() as conn:
-        row = conn.execute("SELECT * FROM user_profile WHERE owner = ?", (ctx.actor,)).fetchone()
-    if row is None:
-        raise NotAuthorized(f"{ctx.actor!r} has no profile here")
-    return UserProfile.from_db_row(dict(row))
-
-
-def get_user_profile_by_owner(owner: str) -> UserProfile | None:
+def get_user_profile_by_owner(owner: str) -> UserProfile:
     """
     Unauthenticated-by-design lookup by a raw owner string, mirroring
     holdings_db.get_portfolio_by_owner(). For server-side callers that
@@ -223,30 +254,55 @@ def get_user_profile_by_owner(owner: str) -> UserProfile | None:
     set by the web layer from a verified login — never from model output) but
     have no RequestContext/Identity to construct, since only
     identity_from_verified_login() (web/auth.py) or a real login can mint one.
-    Returns None rather than falling back to a different owner's row.
+
+    Auto-provisions a default row for *owner* on first access (mirrors
+    get_user_profile()'s seed-on-first-touch for LOCAL_OWNER) — a newly
+    invited member gets their own mandate limits/notification prefs the
+    moment anything reads them, never a different owner's row.
     """
+    if not owner:
+        raise ValueError("user_profile: owner is required")
     with _db() as conn:
+        _seed_owner(conn, owner)
+        conn.commit()
         row = conn.execute("SELECT * FROM user_profile WHERE owner = ?", (owner,)).fetchone()
-    return UserProfile.from_db_row(dict(row)) if row else None
+    return UserProfile.from_db_row(dict(row))
+
+
+def get_user_profile_for(ctx) -> UserProfile:
+    """Authorized read: the profile owned by ctx's verified identity,
+    auto-provisioned on first access — never falls back to serving a
+    different owner's row."""
+    from portfolio_agent.services.context import require_context
+
+    require_context(ctx)
+    return get_user_profile_by_owner(ctx.actor)
 
 
 def update_user_profile_for(ctx, **fields) -> UserProfile:
-    """Authorized write: only updates the row owned by ctx's verified identity.
-    Raises NotAuthorized if that identity owns no row — see get_user_profile_for."""
-    from portfolio_agent.services.account_service import NotAuthorized
-
-    get_user_profile_for(ctx)   # authorization check before any write, same as a bare read
+    """Authorized write: only updates the row owned by ctx's verified
+    identity (auto-provisioned by get_user_profile_for if this is that
+    identity's first write)."""
+    get_user_profile_for(ctx)   # authorization check + auto-provision before any write
     if not fields:
         return get_user_profile_for(ctx)
     values = _normalize_fields(fields)
     assignments = ", ".join(f"{col} = ?" for col in values)
     with _db() as conn:
-        n = conn.execute(
+        conn.execute(
             f"UPDATE user_profile SET {assignments} WHERE owner = ?",
             [*values.values(), ctx.actor],
-        ).rowcount
+        )
         conn.commit()
-        if n == 0:
-            raise NotAuthorized(f"{ctx.actor!r} has no profile here")
         row = conn.execute("SELECT * FROM user_profile WHERE owner = ?", (ctx.actor,)).fetchone()
     return UserProfile.from_db_row(dict(row))
+
+
+def list_all_profiles() -> list[UserProfile]:
+    """Every owner's profile row — for callers that must consider every
+    member (e.g. privacy.collect_private_terms(), which must not leak any
+    member's name/employer into a shared/market-only artifact, not just
+    LOCAL_OWNER's). Read-only: never auto-provisions."""
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM user_profile").fetchall()
+    return [UserProfile.from_db_row(dict(r)) for r in rows]

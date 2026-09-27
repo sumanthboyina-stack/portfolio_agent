@@ -30,18 +30,18 @@ def _clean(value) -> str | None:
 
 def collect_private_terms() -> frozenset[str]:
     """
-    Private phrases known to this deployment: profile name/employer, account
-    nicknames and numbers. An account nickname equal to its broker's name
-    (e.g. "Vanguard") is not private and is skipped.
+    Private phrases known to this deployment: every member's profile
+    name/employer, account nicknames and numbers. An account nickname equal
+    to its broker's name (e.g. "Vanguard") is not private and is skipped.
     """
     terms: set[str] = set()
     try:
-        from portfolio_agent.tools.user_profile_db import get_user_profile
-        p = get_user_profile()
-        for v in (p.display_name, p.employer):
-            t = _clean(v)
-            if t:
-                terms.add(t)
+        from portfolio_agent.tools.user_profile_db import list_all_profiles
+        for p in list_all_profiles():
+            for v in (p.display_name, p.employer):
+                t = _clean(v)
+                if t:
+                    terms.add(t)
     except Exception:
         pass
     try:

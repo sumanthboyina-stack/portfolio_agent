@@ -3,15 +3,24 @@ Validation dashboard data functions.
 
 Contains:
   - _load_metric_series          : per-prediction brier/log-loss series
-  - _load_portfolio_tickers      : ticker symbols from the holdings DB
+  - _load_portfolio_tickers      : ticker symbols from the CALLER's own holdings
+  - _load_watchlist_tickers      : ticker symbols from the CALLER's own watchlist
   - _get_model_names             : distinct model_name values from predictions
   - _compute_filtered_metrics    : rolling metrics recomputed from predictions table
   - _load_rolling_metrics_series : historical rows from metrics_rolling table
   - _directional_correct         : outcome -> bool correctness helper
   - _load_evaluated_predictions_df : broad evaluated-prediction rows (no brier requirement)
-  - _outcome_breakdown           : outcome bucket counts
-  - _returns_by_recommendation   : avg realized return per recommendation bucket
+  - _add_streak_ids              : tag consecutive same-ticker-same-horizon-same-call runs
+  - _outcome_breakdown           : outcome bucket counts (raw + unique-streak)
+  - _returns_by_recommendation   : avg realized return per recommendation bucket (raw + unique-streak)
+  - _sell_call_outcomes          : did SELL/STRONG_SELL calls avoid losses
   - _signal_equity_curve         : cumulative "followed the BUY calls" vs SPY curve
+
+Every query against `predictions` below is restricted to LEGACY_REVIEW_SCOPES
+(shared_market + legacy_unclassified, never private) — the same scope
+validation_engine.py uses for historical evaluation/dashboards. Without it, a
+private chat forecast (yours or, now that logins are per-owner, someone
+else's) would get folded into what reads as the shared track record.
 """
 
 from __future__ import annotations
@@ -24,6 +33,8 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
+
+from portfolio_agent.tools.prediction_db import LEGACY_REVIEW_SCOPES, scope_clause
 
 _DB = _ROOT / "data" / "portfolio.db"
 
@@ -56,6 +67,7 @@ def _load_metric_series(
     elif segment == "New Opportunities":
         seg_clause = "AND trigger_type = 'trending_opportunity'"
 
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
     with sqlite3.connect(str(_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(f"""
@@ -69,9 +81,10 @@ def _load_metric_series(
             FROM predictions
             WHERE evaluation_status = 'evaluated'
               AND brier_score IS NOT NULL
+              AND {_sc}
               {seg_clause}
             ORDER BY as_of_date ASC
-        """, seg_params).fetchall()
+        """, [*_sp, *seg_params]).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
         df["prediction_date"] = pd.to_datetime(df["prediction_date"])
@@ -81,21 +94,24 @@ def _load_metric_series(
     return df
 
 
-def _load_portfolio_tickers() -> list[str]:
-    """Return unique portfolio ticker symbols from the holdings DB."""
+def _load_portfolio_tickers(ctx) -> list[str]:
+    """Return unique ticker symbols from ctx's OWN holdings — not
+    get_portfolio_tickers()'s default union across every portfolio, which
+    would make "My Portfolio" mean "everyone's portfolio" once more than one
+    owner exists."""
     try:
-        from portfolio_agent.tools.holdings_db import get_portfolio_tickers
-        return get_portfolio_tickers()
+        from portfolio_agent.services.account_service import list_holdings_for
+        return sorted({str(h["ticker"]).upper() for h in list_holdings_for(ctx) if h.get("ticker")})
     except Exception:
         return []
 
 
-def _load_watchlist_tickers() -> list[str]:
-    """Return unique watchlist ticker symbols (excludes holdings)."""
-    from portfolio_agent.tools.watchlist_db import load_watchlist_tickers
+def _load_watchlist_tickers(ctx) -> list[str]:
+    """Return unique watchlist ticker symbols owned by ctx (excludes holdings)."""
+    from portfolio_agent.tools.watchlist_db import load_watchlist_tickers_for
     try:
-        watchlist = set(load_watchlist_tickers())
-        return list(watchlist - set(_load_portfolio_tickers()))
+        watchlist = set(load_watchlist_tickers_for(ctx))
+        return list(watchlist - set(_load_portfolio_tickers(ctx)))
     except Exception:
         return []
 
@@ -104,11 +120,14 @@ def _get_model_names() -> list[str]:
     """Return distinct model_name values from predictions table, sorted by count desc."""
     if not _DB.exists():
         return []
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
     with sqlite3.connect(str(_DB)) as conn:
         rows = conn.execute(
-            """SELECT model_name, COUNT(*) as cnt FROM predictions
+            f"""SELECT model_name, COUNT(*) as cnt FROM predictions
                WHERE model_name IS NOT NULL
-               GROUP BY model_name ORDER BY cnt DESC"""
+                 AND {_sc}
+               GROUP BY model_name ORDER BY cnt DESC""",
+            _sp,
         ).fetchall()
     return [r[0] for r in rows]
 
@@ -153,7 +172,8 @@ def _compute_filtered_metrics(
     elif segment == "New Opportunities":
         seg_clause = "AND trigger_type = 'trending_opportunity'"
 
-    params: list = [lookback] + model_params + seg_params
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    params: list = [lookback] + list(_sp) + model_params + seg_params
 
     sql = f"""
         SELECT
@@ -180,6 +200,7 @@ def _compute_filtered_metrics(
         FROM predictions
         WHERE evaluation_status = 'evaluated'
           AND as_of_date >= DATE('now', '-' || ? || ' days')
+          AND {_sc}
           {model_clause}
           {seg_clause}
         GROUP BY horizon_days
@@ -256,8 +277,9 @@ def _load_evaluated_predictions_df(
 
     my_tickers = sorted(set(portfolio_tickers or []) | set(watchlist_tickers or []))
 
-    clauses = ["evaluation_status = 'evaluated'"]
-    params: list = []
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    clauses = ["evaluation_status = 'evaluated'", _sc]
+    params: list = list(_sp)
     if lookback_days:
         clauses.append("as_of_date >= DATE('now', '-' || ? || ' days')")
         params.append(lookback_days)
@@ -299,28 +321,107 @@ def _load_evaluated_predictions_df(
     return df
 
 
+def _add_streak_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tag each row with a streak id: consecutive predictions for the same
+    (ticker, horizon_days), ordered by event_date, that share the same
+    recommendation. A ticker rated BUY for 20 straight days is one streak of
+    20 highly-correlated rows, not 20 independent calls -- exposed so callers
+    can report both the raw row count and the deduplicated "how many distinct
+    calls" count.
+    """
+    if df.empty or "recommendation" not in df.columns:
+        return df
+    d = df.sort_values(["ticker", "horizon_days", "event_date"]).reset_index(drop=True).copy()
+    grp_key = d["ticker"].astype(str) + "|" + d["horizon_days"].astype(str)
+    new_streak = (grp_key != grp_key.shift()) | (d["recommendation"] != d["recommendation"].shift())
+    d["streak_id"] = new_streak.cumsum()
+    return d
+
+
 def _outcome_breakdown(df: pd.DataFrame) -> list[dict]:
-    """Count of evaluated predictions per outcome bucket, in fixed strong->wrong order."""
+    """
+    Count of evaluated predictions per outcome bucket, in fixed
+    strong->wrong order -- both the raw row count and the unique-streak
+    count (one representative row -- the last -- per consecutive same-call
+    run), so a ticker rated BUY for 20 straight days doesn't read as 20
+    independent data points.
+    """
     if df.empty or "outcome" not in df.columns:
         return []
     counts = df["outcome"].value_counts().to_dict()
-    return [{"outcome": o, "count": int(counts.get(o, 0))} for o in OUTCOME_ORDER]
+    streaked = _add_streak_ids(df)
+    streak_reps = streaked.groupby("streak_id").tail(1) if "streak_id" in streaked.columns else df
+    streak_counts = streak_reps["outcome"].value_counts().to_dict()
+    return [
+        {"outcome": o, "count": int(counts.get(o, 0)), "streak_count": int(streak_counts.get(o, 0))}
+        for o in OUTCOME_ORDER
+    ]
 
 
 def _returns_by_recommendation(df: pd.DataFrame) -> list[dict]:
-    """Average realized return per recommendation bucket, in STRONG_BUY->STRONG_SELL order."""
+    """
+    Average realized return per recommendation bucket, in
+    STRONG_BUY->STRONG_SELL order -- both the raw call count (n) and the
+    unique-streak count (streak_n): a ticker rated the same way for many
+    days running is one streak, not one independent call per day.
+    """
     if df.empty:
         return []
     sub = df.dropna(subset=["actual_return", "recommendation"])
+    streaked = _add_streak_ids(sub)
     out = []
     for rec in RECOMMENDATION_ORDER:
         rows = sub[sub["recommendation"].str.upper() == rec]
+        streak_n = (
+            streaked.loc[streaked["recommendation"].str.upper() == rec, "streak_id"].nunique()
+            if "streak_id" in streaked.columns else len(rows)
+        )
         out.append({
             "recommendation": rec,
             "avg_return": float(rows["actual_return"].mean()) if len(rows) else None,
             "n": int(len(rows)),
+            "streak_n": int(streak_n),
         })
     return out
+
+
+def _sell_call_outcomes(df: pd.DataFrame, sell_recs: tuple[str, ...] = ("SELL", "STRONG_SELL")) -> dict:
+    """
+    "Did SELL calls avoid losses?" -- the % of evaluated SELL/STRONG_SELL
+    calls whose ticker actually fell, and the average return vs SPY
+    (excess_return) for those calls. Answers the question a single
+    returns-by-recommendation bar can't: a SELL call isn't "wrong" just
+    because the price still rose, it's wrong if it rose faster than the
+    market it was implicitly telling you to rotate into.
+    """
+    if df.empty or "recommendation" not in df.columns:
+        return {"n": 0, "pct_fell": None, "avg_excess_return": None}
+    sub = df[df["recommendation"].str.upper().isin(sell_recs)].dropna(subset=["actual_return"])
+    if sub.empty:
+        return {"n": 0, "pct_fell": None, "avg_excess_return": None}
+    excess = sub["excess_return"].dropna()
+    return {
+        "n": int(len(sub)),
+        "pct_fell": float((sub["actual_return"] < 0).mean()),
+        "avg_excess_return": float(excess.mean()) if not excess.empty else None,
+    }
+
+
+def _calibration_headline(reliability: list[dict], min_n: int = 20) -> dict | None:
+    """
+    Pick the reliability bucket (from validation_engine.get_calibration_data's
+    "reliability" list) closest to a round, headline-worthy stated confidence
+    (~70%) with enough samples to be worth quoting; falls back to whichever
+    bucket has the most samples if none clears min_n. Returns None if there's
+    no reliability data at all -- the page then shows "not enough data yet"
+    instead of fabricating a number.
+    """
+    if not reliability:
+        return None
+    candidates = [b for b in reliability if b["n"] >= min_n]
+    pool = candidates or reliability
+    return min(pool, key=lambda b: (abs(b["center"] - 0.70), -b["n"]))
 
 
 def _signal_equity_curve(df: pd.DataFrame, buy_recs: tuple[str, ...] = ("STRONG_BUY", "BUY")) -> pd.DataFrame:

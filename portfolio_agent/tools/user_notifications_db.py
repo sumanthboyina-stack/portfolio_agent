@@ -1,9 +1,11 @@
 """
-User notification preferences — single-row store for the personal filter that
+User notification preferences — per-owner store for the personal filter that
 sits on top of the pipeline-wide event trigger.
 
-Table: user_notifications — exactly one row (id = 1, enforced by CHECK), seeded
-with defaults on first access and never overwritten after that.
+Table: user_notifications — one row per owner, UNIQUE(owner), auto-provisioned
+with defaults on first access and never overwritten after that except through
+an explicit update. Rebuilt from a former CHECK(id = 1) singleton shape by
+_migrate_owner_scoping() — see user_profile_db's identical rebuild for why.
 
 Columns:
   channel                  'none' | 'email' | 'slack'   (default 'none' = no notifications)
@@ -58,22 +60,45 @@ def _db():
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_notifications (
-            id                       INTEGER PRIMARY KEY CHECK (id = 1),
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner                    TEXT NOT NULL UNIQUE,
             channel                  TEXT NOT NULL DEFAULT 'none',
             min_severity_threshold   INTEGER NOT NULL DEFAULT 3,
             min_conviction_threshold INTEGER,
             quiet_hours_start        TEXT,
             quiet_hours_end          TEXT,
             created_at               TEXT NOT NULL,
-            updated_at               TEXT NOT NULL,
-            owner                    TEXT
+            updated_at               TEXT NOT NULL
         )
     """)
 
 
+_LEGACY_COLUMNS = [
+    "id", "channel", "min_severity_threshold", "min_conviction_threshold",
+    "quiet_hours_start", "quiet_hours_end", "created_at", "updated_at", "owner",
+]
+
+
+def _migrate_owner_scoping(conn: sqlite3.Connection) -> None:
+    """Rebuild user_notifications from the CHECK(id = 1) singleton shape to a
+    real per-owner table (UNIQUE(owner)) — see user_profile_db's identical
+    rebuild. Runs once; a no-op once the new shape already exists."""
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_notifications'"
+    ).fetchone()
+    if not ddl or "CHECK" not in (ddl[0] or ""):
+        return
+    conn.execute("ALTER TABLE user_notifications RENAME TO user_notifications_legacy_v1")
+    _create_schema(conn)
+    cols = ", ".join(_LEGACY_COLUMNS)
+    conn.execute(f"INSERT INTO user_notifications ({cols}) SELECT {cols} FROM user_notifications_legacy_v1")
+    conn.execute("DROP TABLE user_notifications_legacy_v1")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after the first release, then backfill ownership
-    on any pre-existing row to LOCAL_OWNER (idempotent — a no-op once set)."""
+    """Add columns introduced after the first release, backfill ownership on
+    any pre-existing row to LOCAL_OWNER (idempotent — a no-op once set), then
+    rebuild to a real per-owner shape — see _migrate_owner_scoping()."""
     migrate_columns(conn, "user_notifications", [
         ("min_conviction_threshold", "INTEGER"),
         ("quiet_hours_start",        "TEXT"),
@@ -81,6 +106,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("owner",                    "TEXT"),
     ])
     conn.execute("UPDATE user_notifications SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
+    _migrate_owner_scoping(conn)
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -88,6 +114,16 @@ def _seed(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO user_notifications (id, owner, created_at, updated_at) VALUES (1, ?, ?, ?)",
         (LOCAL_OWNER, now, now),
+    )
+
+
+def _seed_owner(conn: sqlite3.Connection, owner: str) -> None:
+    """Auto-provision a default row for *owner* if it doesn't already have
+    one — same idiom as user_profile_db._seed_owner."""
+    now = _now()
+    conn.execute(
+        "INSERT OR IGNORE INTO user_notifications (owner, created_at, updated_at) VALUES (?, ?, ?)",
+        (owner, now, now),
     )
 
 
@@ -99,15 +135,26 @@ def get_user_notifications() -> UserNotificationPrefs:
     return UserNotificationPrefs.from_db_row(dict(row))
 
 
-def get_user_notifications_for(ctx) -> UserNotificationPrefs:
-    """Authorized read: the notification prefs owned by ctx's verified identity."""
-    from portfolio_agent.services.account_service import NotAuthorized
-
+def get_user_notifications_by_owner(owner: str) -> UserNotificationPrefs:
+    """Unauthenticated-by-design lookup by a raw owner string, mirroring
+    user_profile_db.get_user_profile_by_owner(). Auto-provisions a default
+    row for *owner* on first access."""
+    if not owner:
+        raise ValueError("user_notifications: owner is required")
     with _db() as conn:
-        row = conn.execute("SELECT * FROM user_notifications WHERE owner = ?", (ctx.actor,)).fetchone()
-    if row is None:
-        raise NotAuthorized(f"{ctx.actor!r} has no notification preferences here")
+        _seed_owner(conn, owner)
+        conn.commit()
+        row = conn.execute("SELECT * FROM user_notifications WHERE owner = ?", (owner,)).fetchone()
     return UserNotificationPrefs.from_db_row(dict(row))
+
+
+def get_user_notifications_for(ctx) -> UserNotificationPrefs:
+    """Authorized read: the notification prefs owned by ctx's verified
+    identity, auto-provisioned on first access."""
+    from portfolio_agent.services.context import require_context
+
+    require_context(ctx)
+    return get_user_notifications_by_owner(ctx.actor)
 
 
 def _parse_hhmm(raw: Optional[str]) -> Optional[time]:
@@ -120,22 +167,13 @@ def _parse_hhmm(raw: Optional[str]) -> Optional[time]:
         return None
 
 
-def update_user_notifications(**fields) -> UserNotificationPrefs:
-    """
-    Update one or more preference fields and return the refreshed row.
-
-    Raises ValueError for unknown field names, an unknown channel, or a
-    quiet-hours value that is not "HH:MM". updated_at is bumped automatically.
-    """
+def _validate_and_normalize(fields: dict) -> dict:
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
         raise ValueError(
             f"Unknown user_notifications field(s): {', '.join(sorted(unknown))}. "
             f"Allowed: {', '.join(sorted(_UPDATABLE_FIELDS))}"
         )
-    if not fields:
-        return get_user_notifications()
-
     if "channel" in fields and fields["channel"] not in NOTIFICATION_CHANNELS:
         raise ValueError(
             f"Unknown channel {fields['channel']!r}. Allowed: {', '.join(NOTIFICATION_CHANNELS)}"
@@ -149,7 +187,21 @@ def update_user_notifications(**fields) -> UserNotificationPrefs:
         if key in values and values[key] == "":
             values[key] = None
     values["updated_at"] = _now()
+    return values
 
+
+def update_user_notifications(**fields) -> UserNotificationPrefs:
+    """
+    Update one or more preference fields and return the refreshed row.
+
+    Raises ValueError for unknown field names, an unknown channel, or a
+    quiet-hours value that is not "HH:MM". updated_at is bumped automatically.
+    Unscoped: always LOCAL_OWNER's row — see update_user_notifications_for
+    for the authorized path.
+    """
+    if not fields:
+        return get_user_notifications()
+    values = _validate_and_normalize(fields)
     assignments = ", ".join(f"{col} = ?" for col in values)
     with _db() as conn:
         conn.execute(
@@ -158,6 +210,25 @@ def update_user_notifications(**fields) -> UserNotificationPrefs:
         )
         conn.commit()
         row = conn.execute("SELECT * FROM user_notifications WHERE id = 1").fetchone()
+    return UserNotificationPrefs.from_db_row(dict(row))
+
+
+def update_user_notifications_for(ctx, **fields) -> UserNotificationPrefs:
+    """Authorized write: only updates the row owned by ctx's verified
+    identity (auto-provisioned by get_user_notifications_for if this is that
+    identity's first write). Same validation as update_user_notifications."""
+    get_user_notifications_for(ctx)   # authorization check + auto-provision before any write
+    if not fields:
+        return get_user_notifications_for(ctx)
+    values = _validate_and_normalize(fields)
+    assignments = ", ".join(f"{col} = ?" for col in values)
+    with _db() as conn:
+        conn.execute(
+            f"UPDATE user_notifications SET {assignments} WHERE owner = ?",
+            [*values.values(), ctx.actor],
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM user_notifications WHERE owner = ?", (ctx.actor,)).fetchone()
     return UserNotificationPrefs.from_db_row(dict(row))
 
 
