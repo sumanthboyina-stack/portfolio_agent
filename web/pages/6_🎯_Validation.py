@@ -71,7 +71,9 @@ from web.components.validation_charts import (
     _METRIC_CFG,
     OUTCOME_LABELS,
 )
-from web.components.validation_cards import _render_scorecard_tiles, render_baselines_section
+from web.components.validation_cards import (
+    _render_scorecard_tiles, render_baselines_section, render_ranking_section,
+)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -202,8 +204,12 @@ if metrics:
             help=f"Momentum and SPY-prior-window baselines need price history for each of the {_n_tickers} "
                  "tickers in this scope (cached for 30 min). Off = those two baselines show as unavailable.",
         )
+    @st.cache_data(ttl=600, show_spinner="Computing ranking metrics and baselines…")
+    def _cached_reports(df: pd.DataFrame, use_prices: bool) -> dict:
+        return build_horizon_reports(df, use_prices=use_prices)
+
     try:
-        _reports = build_horizon_reports(_base_df, use_prices=_use_prices)
+        _reports = _cached_reports(_base_df, _use_prices)
     except Exception as _exc:   # never let the yardstick take the page down
         st.warning(f"Baselines unavailable: {_exc}", icon=material("warning"))
         _reports = {}
@@ -318,14 +324,19 @@ with tabs[0]:
 
 
                 # ── Metric tiles ──────────────────────────────────────────────────────
-        _tile_2 = section_tile("All Metrics by Horizon", expanded=False, key="validation_2")
+        _tile_2 = section_tile("Ranking Skill & All Metrics by Horizon", expanded=True, key="validation_2")
         if _tile_2:
             with _tile_2:
-                st.caption("Hover any tile for the full definition, performance tiers, and reference values.")
+                st.caption(
+                    "Headline row per horizon: does a higher score go with beating SPY, and do UP-labelled names beat "
+                    "FLAT-labelled ones? Intervals resample whole dates. The row below it (3-class accuracy, calibration) "
+                    "is secondary. Hover any tile for the definition and how to read it.")
                 _render_scorecard_tiles(
                     by_horizon, all_horizons, horizon_labels, reports=_reports,
-                    after_horizon=lambda h: render_baselines_section(
-                        _reports.get(h), horizon_labels.get(h, f"{h}d")),
+                    after_horizon=lambda h: (
+                        render_ranking_section(_reports.get(h), horizon_labels.get(h, f"{h}d")),
+                        render_baselines_section(_reports.get(h), horizon_labels.get(h, f"{h}d")),
+                    ),
                 )
 
 

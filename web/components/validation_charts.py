@@ -61,7 +61,7 @@ _SKILL_TIERS = [
 # `relative` = "accuracy" | "skill": tier comes from baseline context, not fixed thresholds.
 _METRIC_CFG = {
     "directional_accuracy": dict(
-        label="Directional Accuracy",
+        label="3-class Accuracy",
         higher=True, bar_max=1.0, bar_min=0.0,
         fmt=lambda v: f"{v*100:.2f}%",
         defn="% of predictions where the model's UP / DOWN / FLAT direction matched the actual market move "
@@ -224,6 +224,19 @@ def relative_accuracy_tier(acc: float, best_baseline: float | None) -> tuple[str
     if gap >= -ACC_NEAR_PTS:
         return _REL_ACC_TIERS[1][2], _REL_ACC_TIERS[1][1]
     return _REL_ACC_TIERS[2][2], _REL_ACC_TIERS[2][1]
+
+
+def interval_tier(lo: float | None, hi: float | None, null: float) -> tuple[str, str]:
+    """(label, color) for a metric with a bootstrap interval, judged against its no-skill value
+    (`null`: 0.5 for AUC, 0 for rank IC and excess return). Wide intervals read as 'not distinguishable',
+    which is the honest answer, not as a weak positive."""
+    if lo is None or hi is None:
+        return "No interval", "#64748B"
+    if lo > null:
+        return "Above chance (CI excludes null)", "#059669"
+    if hi < null:
+        return "Below chance (CI excludes null)", "#EF4444"
+    return "Not distinguishable from chance", "#EAB308"
 
 
 def skill_tier(skill: float | None) -> tuple[str, str]:

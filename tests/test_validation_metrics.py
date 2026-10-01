@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -296,3 +297,168 @@ def test_wilson_ci_known_values():
 def test_wilson_ci_narrows_with_n():
     w_small = vm.wilson_ci(6, 10); w_big = vm.wilson_ci(600, 1000)
     assert (w_big[1] - w_big[0]) < (w_small[1] - w_small[0])
+
+
+# ── date-aware ranking metrics ────────────────────────────────────────────────
+
+def _r(ticker, date, pred, excess, p_up=0.5, composite=5.0, model="m1", ret=None, p_flat=None):
+    """One evaluated row; p_up is placed on moderate_up, the rest on flat/moderate_down."""
+    pf = (1 - p_up) / 2 if p_flat is None else p_flat
+    pd_ = 1 - p_up - pf
+    return {"ticker": ticker, "horizon_days": 5, "as_of_date": date, "evaluation_date": date,
+            "predicted_direction": pred, "actual_return": excess if ret is None else ret,
+            "benchmark_return": 0.0, "excess_return": excess, "composite_score": composite, "model_name": model,
+            "p_strong_down": 0.0, "p_moderate_down": pd_ * 100, "p_flat": pf * 100,
+            "p_moderate_up": p_up * 100, "p_strong_up": 0.0}
+
+
+def test_auc_hand_computed_and_edges():
+    assert vm.auc_score([1, 2, 3, 4], [0, 1, 0, 1]) == pytest.approx(3 / 4)
+    assert vm.auc_score([1, 2, 3, 4], [0, 0, 1, 1]) == pytest.approx(1.0)
+    assert vm.auc_score([1, 2, 3, 4], [1, 1, 0, 0]) == pytest.approx(0.0)
+    assert vm.auc_score([5, 5, 5, 5], [1, 0, 1, 0]) == pytest.approx(0.5)          # all tied
+    assert vm.auc_score([1, 2], [1, 1]) is None                                    # one class only
+
+
+def test_spearman_known_and_degenerate():
+    assert vm.spearman([1, 2, 3, 4], [10, 20, 30, 40]) == pytest.approx(1.0)
+    assert vm.spearman([1, 2, 3, 4], [4, 3, 2, 1]) == pytest.approx(-1.0)
+    assert vm.spearman([1, 1, 1, 1], [1, 2, 3, 4]) is None
+    assert vm.spearman([1, 2], [1, 2]) is None
+
+
+def _cross_section(date, n, sign=+1):
+    """n tickers on `date`; score rises with excess when sign=+1, falls when -1."""
+    return [_r(f"T{date[-2:]}{i}", date, "UP", 0.001 * i * sign, p_up=0.05 + 0.9 * i / (n - 1), composite=float(i))
+            for i in range(n)]
+
+
+def test_rank_ic_is_averaged_over_dates_and_short_dates_are_dropped():
+    rows = _cross_section("2026-01-05", 12) + _cross_section("2026-01-06", 12) + _cross_section("2026-01-07", 12, -1) \
+        + _cross_section("2026-01-08", 5)                                         # < MIN_CS_ROWS: dropped
+    rep = vm.ranking_report(pd.DataFrame(rows), n_boot=200, by_model=False)
+    ic = rep["rank_ic"]["p_up"]
+    assert ic["mean"] == pytest.approx((1 + 1 - 1) / 3)
+    assert ic["n_dates"] == 3 and ic["n_dates_dropped"] == 1 and ic["share_positive"] == pytest.approx(2 / 3)
+    assert ic["ci_low"] <= ic["mean"] <= ic["ci_high"]
+    assert rep["n_dates"] == 4
+
+
+def test_auc_vs_beat_spy_pooled_and_within_date():
+    rows = _cross_section("2026-01-05", 12) + _cross_section("2026-01-06", 12)
+    for r in rows:                                   # excess > 0 only for the top half of each date
+        r["excess_return"] = 0.01 if r["composite_score"] >= 6 else -0.01
+    rep = vm.ranking_report(pd.DataFrame(rows), n_boot=200, by_model=False)
+    a = rep["auc"]["p_up"]
+    assert a["auc"] == pytest.approx(1.0) and a["within_date"]["mean"] == pytest.approx(1.0)
+    assert a["n"] == 24 and a["n_pos"] == 12 and a["n_dates"] == 2
+
+
+def test_label_excess_means_ns_dates_and_diffs():
+    rows = [
+        _r("A", "2026-01-05", "UP", 0.02), _r("B", "2026-01-05", "UP", 0.04), _r("C", "2026-01-05", "FLAT", -0.02),
+        _r("D", "2026-01-06", "UP", 0.00), _r("E", "2026-01-06", "FLAT", -0.04), _r("F", "2026-01-06", "DOWN", -0.06),
+    ]
+    le = vm.ranking_report(pd.DataFrame(rows), n_boot=300, by_model=False)["label_excess"]
+    assert le["n_dates"] == 2
+    assert le["labels"]["UP"]["mean"] == pytest.approx(0.02) and le["labels"]["UP"]["n"] == 3
+    assert le["labels"]["FLAT"]["mean"] == pytest.approx(-0.03) and le["labels"]["FLAT"]["n_dates"] == 2
+    assert le["labels"]["DOWN"]["n"] == 1 and le["labels"]["DOWN"]["n_dates"] == 1
+    assert le["diffs"]["UP-FLAT"]["diff"] == pytest.approx(0.05)
+    for lab in ("UP", "FLAT"):
+        x = le["labels"][lab]
+        assert x["ci_low"] <= x["mean"] <= x["ci_high"]
+
+
+def test_bootstrap_is_date_blocked_not_row_level():
+    # 4 dates x 50 rows; each date has its own constant excess (a "market" day effect). A row-level
+    # bootstrap would give a near-zero-width CI; resampling whole dates must be wide.
+    rows = [_r(f"T{d}{i}", f"2026-01-0{d}", "UP", e) for d, e in ((1, 0.05), (2, -0.05), (3, 0.03), (4, -0.03)) for i in range(50)]
+    x = vm.ranking_report(pd.DataFrame(rows), n_boot=500, by_model=False)["label_excess"]["labels"]["UP"]
+    assert x["n"] == 200 and x["n_dates"] == 4 and (x["ci_high"] - x["ci_low"]) > 0.03
+
+
+def test_single_date_ci_collapses_and_is_flagged_low_dates():
+    rows = [_r(f"T{i}", "2026-01-05", "UP", 0.01 * (i % 3)) for i in range(15)]
+    rep = vm.ranking_report(pd.DataFrame(rows), n_boot=100, by_model=False)
+    x = rep["label_excess"]["labels"]["UP"]
+    assert x["ci_low"] == pytest.approx(x["mean"]) and x["ci_high"] == pytest.approx(x["mean"])
+    assert rep["low_dates"] is True and rep["n_dates"] == 1
+
+
+def test_within_ticker_up_vs_flat_removes_composition():
+    rows = [
+        _r("A", "2026-01-05", "UP", 0.02), _r("A", "2026-01-06", "FLAT", -0.01),     # diff +0.03
+        _r("C", "2026-01-05", "UP", 0.05), _r("C", "2026-01-07", "FLAT", 0.01),      # diff +0.04
+        _r("B", "2026-01-05", "UP", 0.09),                                           # no FLAT -> excluded
+        _r("Z", "2026-01-06", "FLAT", -0.20),                                        # no UP -> excluded
+    ]
+    wt = vm.ranking_report(pd.DataFrame(rows), n_boot=200, by_model=False)["within_ticker"]
+    assert wt["n_tickers"] == 2 and wt["n_obs"] == 4
+    assert wt["mean_diff"] == pytest.approx(0.035)
+
+
+def test_within_ticker_without_overlap_is_empty_not_an_error():
+    rows = [_r("A", "2026-01-05", "UP", 0.02), _r("B", "2026-01-06", "FLAT", -0.01)]
+    wt = vm.ranking_report(pd.DataFrame(rows), n_boot=50, by_model=False)["within_ticker"]
+    assert wt["mean_diff"] is None and wt["n_tickers"] == 0
+
+
+def test_ranking_report_splits_by_model_and_is_seeded():
+    rows = [_r(f"A{i}", "2026-01-05", "UP", 0.01 * i, model="gpt") for i in range(12)] \
+        + [_r(f"B{i}", "2026-01-05", "FLAT", -0.01 * i, model="claude") for i in range(12)]
+    df = pd.DataFrame(rows)
+    rep = vm.ranking_report(df, n_boot=150)
+    assert set(rep["by_model"]) == {"gpt", "claude"}
+    assert rep["by_model"]["gpt"]["n_rows"] == 12
+    assert rep["by_model"]["gpt"]["label_excess"]["labels"]["UP"]["n"] == 12
+    assert rep["by_model"]["claude"]["label_excess"]["labels"]["UP"]["n"] == 0
+    assert vm.ranking_report(df, n_boot=150)["label_excess"] == rep["label_excess"]      # same seed -> same result
+
+
+def test_ranking_report_degrades_on_empty_and_missing_columns():
+    assert vm.ranking_report(pd.DataFrame())["n_rows"] == 0
+    bare = pd.DataFrame([{"ticker": "A", "horizon_days": 5, "as_of_date": "2026-01-05", "predicted_direction": "UP",
+                          "actual_return": 0.01, "excess_return": 0.01}])
+    rep = vm.ranking_report(bare, n_boot=50)           # no p_*, no composite_score, no model_name
+    assert rep["auc"]["p_up"]["auc"] is None and rep["rank_ic"]["composite"]["mean"] is None
+
+
+def test_p_up_series_normalises_and_flags_missing():
+    df = pd.DataFrame([_r("A", "2026-01-05", "UP", 0.0, p_up=0.6), _r("B", "2026-01-05", "UP", 0.0, p_up=0.2)])
+    df.loc[1, "p_flat"] = None
+    s = vm.p_up_series(df)
+    assert s[0] == pytest.approx(0.6) and np.isnan(s[1])
+
+
+# ── FLAT diagnostic ───────────────────────────────────────────────────────────
+
+def _dist(pred, sd, md, fl, mu, su, ret=0.0):
+    return {"ticker": "X", "horizon_days": 5, "as_of_date": "2026-01-05", "predicted_direction": pred,
+            "actual_return": ret, "excess_return": ret, "p_strong_down": sd, "p_moderate_down": md,
+            "p_flat": fl, "p_moderate_up": mu, "p_strong_up": su}
+
+
+def test_flat_diagnostic_hand_computed():
+    rows = [
+        _dist("FLAT", 5, 15, 40, 25, 15),      # p_flat strict max (40); mass3: flat 40 vs up 40 vs down 20 -> tie
+        _dist("FLAT", 10, 20, 25, 35, 10),     # flat NOT max (35 is); mass3: up 45 > flat 25
+        _dist("UP", 0, 10, 20, 50, 20),        # derived UP, label UP agrees; actual +3% = UP
+        _dist("FLAT", 10, 10, 30, 30, 20),     # flat tied with moderate_up? 30 vs 30 -> tied max; mass3 up 50
+    ]
+    rows[2]["actual_return"] = 0.03
+    out = vm.flat_diagnostic(pd.DataFrame(rows))
+    fc = out["flat_calls"]
+    assert fc["n"] == 3 and fc["p_flat_strict_max"] == 1 and fc["p_flat_tied_max"] == 1 and fc["p_flat_not_max"] == 1
+    assert fc["mean_p_flat"] == pytest.approx((0.40 + 0.25 + 0.30) / 3)
+    a5 = out["derived_rules"]["argmax5"]
+    assert a5["n_ambiguous"] == 1 and a5["n"] == 3                # the tied row is excluded
+    assert a5["agrees_with_label"] == pytest.approx(2 / 3)        # row2 derives UP != FLAT
+    assert out["calibration"]["mean_p_flat_all_rows"] == pytest.approx((0.40 + 0.25 + 0.20 + 0.30) / 4)
+    assert out["calibration"]["actual_flat_rate"] == pytest.approx(3 / 4)
+
+
+def test_flat_diagnostic_empty_or_no_distribution():
+    assert vm.flat_diagnostic(pd.DataFrame())["n_rows"] == 0
+    no_p = pd.DataFrame([{"ticker": "A", "horizon_days": 5, "as_of_date": "2026-01-05", "predicted_direction": "FLAT", "actual_return": 0.0}])
+    assert vm.flat_diagnostic(no_p)["n_rows"] == 0

@@ -21,6 +21,7 @@ from bisect import bisect_right
 from datetime import date, timedelta
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from portfolio_agent.tools.validation_engine import (
@@ -60,6 +61,11 @@ BASELINE_LABELS = {
 }
 # Excluded from "best baseline": it peeks at the outcome window's own market move.
 LOOKAHEAD_BASELINES = {"spy_same_window"}
+
+
+MIN_CS_ROWS = 10               # a date needs this many rows to give a cross-sectional rank correlation
+MIN_DATES_WARN = 10            # a date-block bootstrap over fewer distinct dates is not trustworthy
+N_BOOT = 1000
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -438,6 +444,305 @@ def effective_sample(df: pd.DataFrame, streak_n: Optional[int] = None) -> dict:
     }
 
 
+# ── date-aware ranking metrics ────────────────────────────────────────────────
+#
+# 3-class accuracy answers "did the label match", which depends on the class
+# mix and on how often APEX says FLAT. The questions that matter for use are
+# ranking questions: does a higher p_up / composite go with beating SPY, and
+# do UP-labelled names beat FLAT-labelled ones? Predictions made on the same
+# date share one market move, so every interval here is a DATE-BLOCK
+# bootstrap: whole as_of_dates are resampled with replacement, never rows.
+
+def _rank(a) -> np.ndarray:
+    return pd.Series(np.asarray(a, dtype=float)).rank(method="average").to_numpy()
+
+
+def auc_score(scores, positives) -> Optional[float]:
+    """P(score of a random positive > score of a random negative), ties = 1/2
+    (Mann-Whitney). None if either class is empty."""
+    y = np.asarray(positives, dtype=bool)
+    n_pos, n_neg = int(y.sum()), int((~y).sum())
+    if n_pos == 0 or n_neg == 0:
+        return None
+    r = _rank(scores)
+    return float((r[y].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def spearman(a, b) -> Optional[float]:
+    """Spearman rank correlation (ties averaged). None if either side is constant or n < 3."""
+    if len(a) < 3:
+        return None
+    ra, rb = _rank(a), _rank(b)
+    if ra.std() == 0 or rb.std() == 0:
+        return None
+    return float(np.corrcoef(ra, rb)[0, 1])
+
+
+def p_up_series(df: pd.DataFrame) -> pd.Series:
+    """P(UP) = (p_moderate_up + p_strong_up) / total, NaN where any p_* is missing or total <= 0."""
+    if not set(P_COLUMNS) <= set(df.columns):
+        return pd.Series(np.nan, index=df.index)
+    p = df[P_COLUMNS].astype(float)
+    total = p.sum(axis=1).where(lambda t: t > 0)
+    out = (p["p_moderate_up"] + p["p_strong_up"]) / total
+    return out.where(p.notna().all(axis=1))
+
+
+def _ci(draws: np.ndarray) -> tuple[Optional[float], Optional[float]]:
+    draws = draws[~np.isnan(draws)]
+    if len(draws) == 0:
+        return None, None
+    lo, hi = np.percentile(draws, [2.5, 97.5])
+    return float(lo), float(hi)
+
+
+def _date_keys(d: pd.DataFrame) -> pd.Series:
+    return d["as_of_date"].astype(str).str[:10]
+
+
+def _per_date_stat(d: pd.DataFrame, fn, min_rows: int, keys: Optional[pd.Series] = None) -> dict[str, float]:
+    """{date: fn(group)} for dates with >= min_rows rows where fn is defined."""
+    out = {}
+    for k, g in d.groupby(_date_keys(d) if keys is None else keys):
+        if len(g) >= min_rows:
+            v = fn(g)
+            if v is not None and not math.isnan(v):
+                out[k] = v
+    return out
+
+
+def _mean_over_dates(per_date: dict[str, float], n_boot: int, rng) -> dict:
+    """Equal-weight mean of per-date values + date-block bootstrap CI."""
+    vals = np.array(list(per_date.values()), dtype=float)
+    if len(vals) == 0:
+        return {"mean": None, "ci_low": None, "ci_high": None, "n_dates": 0, "share_positive": None}
+    draws = vals[rng.integers(0, len(vals), size=(n_boot, len(vals)))].mean(axis=1)
+    lo, hi = _ci(draws)
+    return {"mean": float(vals.mean()), "ci_low": lo, "ci_high": hi, "n_dates": len(vals),
+            "share_positive": float((vals > 0).mean())}
+
+
+def auc_vs_beat_spy(d: pd.DataFrame, score: pd.Series, n_boot: int, rng, min_rows: int = MIN_CS_ROWS) -> dict:
+    """
+    AUC of `score` against "beat SPY" (excess_return > 0), two ways:
+      auc         pooled over all rows (date-block bootstrap CI)
+      within_date mean over dates of the per-date AUC (dates with >= min_rows
+                  rows and both outcomes), CI from resampling those dates --
+                  immune to dates differing in how many names beat SPY.
+    """
+    x = pd.DataFrame({"s": score, "y": d["excess_return"] > 0, "k": _date_keys(d)})
+    x = x[score.notna() & d["excess_return"].notna()]
+    out = {"auc": None, "ci_low": None, "ci_high": None, "n": len(x), "n_pos": int(x["y"].sum()) if len(x) else 0,
+           "n_dates": int(x["k"].nunique()) if len(x) else 0, "within_date": None}
+    if not len(x):
+        return out
+    s, y = x["s"].to_numpy(), x["y"].to_numpy()
+    out["auc"] = auc_score(s, y)
+    if out["auc"] is None:
+        return out
+    groups = [np.flatnonzero((x["k"] == k).to_numpy()) for k in x["k"].unique()]
+    draws = np.empty(n_boot)
+    for b in range(n_boot):
+        idx = np.concatenate([groups[i] for i in rng.integers(0, len(groups), len(groups))])
+        a = auc_score(s[idx], y[idx])
+        draws[b] = np.nan if a is None else a
+    out["ci_low"], out["ci_high"] = _ci(draws)
+    per_date = _per_date_stat(x, lambda g: auc_score(g["s"].to_numpy(), g["y"].to_numpy()), min_rows, keys=x["k"])
+    out["within_date"] = _mean_over_dates(per_date, n_boot, rng)
+    return out
+
+
+def rank_ic(d: pd.DataFrame, score: pd.Series, n_boot: int, rng, min_rows: int = MIN_CS_ROWS) -> dict:
+    """Daily cross-sectional Spearman correlation between `score` and
+    excess_return, averaged over dates (equal weight; dates with fewer than
+    min_rows rows are dropped and counted)."""
+    x = d.assign(_s=score)
+    x = x[x["_s"].notna() & x["excess_return"].notna()]
+    n_dates_all = int(_date_keys(x).nunique()) if len(x) else 0
+    per_date = _per_date_stat(x, lambda g: spearman(g["_s"].to_numpy(), g["excess_return"].to_numpy()), min_rows)
+    out = _mean_over_dates(per_date, n_boot, rng)
+    out["n_dates_dropped"] = n_dates_all - out["n_dates"]
+    out["n_rows"] = int(sum(len(g) for k, g in x.groupby(_date_keys(x)) if k in per_date))
+    return out
+
+
+def label_excess(d: pd.DataFrame, n_boot: int, rng) -> dict:
+    """
+    Mean excess_return (vs SPY) by predicted label with date-block bootstrap CIs, the number of
+    distinct dates behind each, and the pairwise differences UP-FLAT, UP-DOWN, FLAT-DOWN. All
+    labels and differences share the same bootstrap draws, so the intervals are comparable.
+    """
+    x = d[d["excess_return"].notna()]
+    keys = sorted(_date_keys(x).unique()) if len(x) else []
+    out: dict = {"n_dates": len(keys), "labels": {}, "diffs": {}}
+    if not keys:
+        return out
+    kidx = {k: i for i, k in enumerate(keys)}
+    di = _date_keys(x).map(kidx).to_numpy()
+    ex = x["excess_return"].to_numpy(dtype=float)
+    w = rng.multinomial(len(keys), [1 / len(keys)] * len(keys), size=n_boot).astype(float)   # B x D
+    sums, cnts, means = {}, {}, {}
+    for lab in DIRECTIONS:
+        m = (x["pred_dir"] == lab).to_numpy()
+        sums[lab] = np.bincount(di[m], weights=ex[m], minlength=len(keys))
+        cnts[lab] = np.bincount(di[m], minlength=len(keys)).astype(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            means[lab] = (w @ sums[lab]) / (w @ cnts[lab])
+        n = int(m.sum())
+        lo, hi = _ci(means[lab])
+        out["labels"][lab] = {"n": n, "n_dates": int((cnts[lab] > 0).sum()),
+                              "mean": float(ex[m].mean()) if n else None, "ci_low": lo, "ci_high": hi}
+    for a, b in (("UP", "FLAT"), ("UP", "DOWN"), ("FLAT", "DOWN")):
+        ma, mb = out["labels"][a]["mean"], out["labels"][b]["mean"]
+        lo, hi = _ci(means[a] - means[b])
+        out["diffs"][f"{a}-{b}"] = {"diff": None if ma is None or mb is None else ma - mb, "ci_low": lo, "ci_high": hi}
+    return out
+
+
+def within_ticker_contrast(d: pd.DataFrame, n_boot: int, rng, a: str = "UP", b: str = "FLAT") -> dict:
+    """
+    Composition-free version of the label comparison: for every ticker that
+    has BOTH an `a` call and a `b` call, mean excess under `a` minus mean
+    excess under `b` (so a stock that is simply always a good or bad
+    performer cancels out); then the equal-weight mean across such tickers.
+    Date-block bootstrap CI (tickers are re-evaluated per draw).
+    """
+    x = d[d["excess_return"].notna() & d["pred_dir"].isin([a, b])]
+    empty = {"pair": f"{a}-{b}", "mean_diff": None, "ci_low": None, "ci_high": None,
+             "n_tickers": 0, "n_obs": 0, "n_dates": 0}
+    if x.empty:
+        return empty
+    keys = sorted(_date_keys(x).unique())
+    tick = x["ticker"].astype(str).str.upper()
+    tk = {t: i for i, t in enumerate(sorted(tick.unique()))}
+    kidx = {k: i for i, k in enumerate(keys)}
+    ti, di = tick.map(tk).to_numpy(), _date_keys(x).map(kidx).to_numpy()
+    ex = x["excess_return"].to_numpy(dtype=float)
+    mats = {}
+    for lab in (a, b):
+        m = (x["pred_dir"] == lab).to_numpy()
+        S = np.zeros((len(tk), len(keys))); C = np.zeros_like(S)
+        np.add.at(S, (ti[m], di[m]), ex[m]); np.add.at(C, (ti[m], di[m]), 1.0)
+        mats[lab] = (S, C)
+    def _contrast(wv):                     # wv: date weights (D, B); returns mean diff per draw
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ma = (mats[a][0] @ wv) / (mats[a][1] @ wv)
+            mb = (mats[b][0] @ wv) / (mats[b][1] @ wv)
+        diff = ma - mb                      # (T, B), NaN where a ticker lacks a side in that draw
+        return np.nanmean(diff, axis=0) if np.isfinite(diff).any() else np.full(diff.shape[1], np.nan)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        point = _contrast(np.ones((len(keys), 1)))[0]
+        if np.isnan(point):
+            return {**empty, "n_dates": len(keys)}
+        w = rng.multinomial(len(keys), [1 / len(keys)] * len(keys), size=n_boot).T.astype(float)
+        draws = _contrast(w)
+    both = (mats[a][1].sum(axis=1) > 0) & (mats[b][1].sum(axis=1) > 0)
+    lo, hi = _ci(draws)
+    return {"pair": f"{a}-{b}", "mean_diff": float(point), "ci_low": lo, "ci_high": hi, "n_tickers": int(both.sum()),
+            "n_obs": int(both @ (mats[a][1].sum(axis=1) + mats[b][1].sum(axis=1))), "n_dates": len(keys)}
+
+
+def _core_ranking(d: pd.DataFrame, n_boot: int, seed: int) -> dict:
+    rng = np.random.default_rng(seed)
+    p_up = p_up_series(d)
+    comp = d["composite_score"].astype(float) if "composite_score" in d.columns else pd.Series(np.nan, index=d.index)
+    n_dates = int(_date_keys(d).nunique()) if len(d) else 0
+    return {
+        "n_rows": len(d), "n_dates": n_dates, "low_dates": n_dates < MIN_DATES_WARN,
+        "auc": {"p_up": auc_vs_beat_spy(d, p_up, n_boot, rng), "composite": auc_vs_beat_spy(d, comp, n_boot, rng)},
+        "rank_ic": {"p_up": rank_ic(d, p_up, n_boot, rng), "composite": rank_ic(d, comp, n_boot, rng)},
+        "label_excess": label_excess(d, n_boot, rng),
+        "within_ticker": within_ticker_contrast(d, n_boot, rng),
+    }
+
+
+def ranking_report(df: pd.DataFrame, n_boot: int = N_BOOT, seed: int = 0, by_model: bool = True) -> dict:
+    """
+    Date-aware ranking metrics for ONE horizon (see the block comment above):
+    AUC of p_up / composite vs beating SPY, daily cross-sectional rank IC,
+    mean excess by predicted label, the within-ticker UP-vs-FLAT contrast,
+    and (by_model=True) the same per model_name. Seeded, so reruns agree.
+    """
+    d = prepare_rows(df)
+    _require_single_horizon(d)
+    if d.empty:
+        return {"n_rows": 0, "n_dates": 0, "low_dates": True, "auc": {}, "rank_ic": {}, "label_excess": {"labels": {}, "diffs": {}},
+                "within_ticker": {}, "by_model": {}}
+    out = _core_ranking(d, n_boot, seed)
+    out["by_model"] = {}
+    if by_model:
+        models = d["model_name"].fillna("unknown") if "model_name" in d.columns else pd.Series("unknown", index=d.index)
+        for name, g in d.groupby(models):
+            out["by_model"][str(name)] = _core_ranking(g, max(200, n_boot // 3), seed)
+    return out
+
+
+# ── FLAT-label diagnostic ─────────────────────────────────────────────────────
+
+_BUCKET_CLASS = {"p_strong_down": "DOWN", "p_moderate_down": "DOWN", "p_flat": "FLAT",
+                 "p_moderate_up": "UP", "p_strong_up": "UP"}
+
+
+def flat_diagnostic(df: pd.DataFrame) -> dict:
+    """
+    Does APEX's FLAT label agree with APEX's own distribution?
+
+    For FLAT calls: how often is p_flat the largest of the five buckets (strictly / tied), and the
+    mean p_flat vs the up and down mass. Then two rules that DERIVE a direction from the
+    probabilities -- argmax5 (class of the largest bucket) and mass3 (largest of
+    p_down, p_flat, p_up masses) -- scored against actual direction on the same rows (ties
+    excluded), next to APEX's own labels. Finally, mean p_flat vs the realised FLAT rate.
+    """
+    d = prepare_rows(df)
+    _require_single_horizon(d)
+    out: dict = {"n_rows": 0}
+    if d.empty or not set(P_COLUMNS) <= set(d.columns):
+        return out
+    d = d[d[P_COLUMNS].notna().all(axis=1)]
+    p = d[P_COLUMNS].astype(float)
+    p = p.div(p.sum(axis=1).where(lambda t: t > 0), axis=0).dropna()
+    d = d.loc[p.index]
+    out["n_rows"] = len(d)
+    if d.empty:
+        return out
+    mx = p.max(axis=1)
+    n_at_max = p.eq(mx, axis=0).sum(axis=1)
+    mass = pd.DataFrame({"DOWN": p["p_strong_down"] + p["p_moderate_down"], "FLAT": p["p_flat"],
+                         "UP": p["p_moderate_up"] + p["p_strong_up"]})
+    mmx = mass.max(axis=1)
+    m_at_max = mass.eq(mmx, axis=0).sum(axis=1)
+
+    f = d["pred_dir"] == "FLAT"
+    out["flat_calls"] = {
+        "n": int(f.sum()),
+        "p_flat_strict_max": int((f & (p["p_flat"] == mx) & (n_at_max == 1)).sum()),
+        "p_flat_tied_max": int((f & (p["p_flat"] == mx) & (n_at_max > 1)).sum()),
+        "p_flat_not_max": int((f & (p["p_flat"] < mx)).sum()),
+        "mass3_flat_plurality": int((f & (mass["FLAT"] == mmx) & (m_at_max == 1)).sum()),
+        "mean_p_flat": float(p.loc[f, "p_flat"].mean()) if f.any() else None,
+        "mean_p_up": float(mass.loc[f, "UP"].mean()) if f.any() else None,
+        "mean_p_down": float(mass.loc[f, "DOWN"].mean()) if f.any() else None,
+    }
+    arg5 = p.idxmax(axis=1).map(_BUCKET_CLASS).where(n_at_max == 1)
+    arg3 = mass.idxmax(axis=1).where(m_at_max == 1)
+    rules = {}
+    for name, derived in (("argmax5", arg5), ("mass3", arg3)):
+        ok = derived.notna()
+        rules[name] = {
+            "n": int(ok.sum()), "n_ambiguous": int((~ok).sum()),
+            "agrees_with_label": float((derived[ok] == d.loc[ok, "pred_dir"]).mean()) if ok.any() else None,
+            "derived_accuracy": float((derived[ok] == d.loc[ok, "actual_dir"]).mean()) if ok.any() else None,
+            "apex_accuracy_same_rows": float((d.loc[ok, "pred_dir"] == d.loc[ok, "actual_dir"]).mean()) if ok.any() else None,
+            "derived_mix": {c: float((derived[ok] == c).mean()) for c in DIRECTIONS} if ok.any() else None,
+        }
+    out["derived_rules"] = rules
+    out["calibration"] = {"mean_p_flat_all_rows": float(p["p_flat"].mean()),
+                          "actual_flat_rate": float((d["actual_dir"] == "FLAT").mean())}
+    return out
+
+
 def horizon_report(df: pd.DataFrame, closes_by_symbol: Optional[dict[str, dict[str, float]]] = None,
                    streak_n: Optional[int] = None) -> dict:
     """Everything the Validation page shows for one horizon, in one call."""
@@ -450,5 +755,7 @@ def horizon_report(df: pd.DataFrame, closes_by_symbol: Optional[dict[str, dict[s
         "confusion": confusion_matrix(d),
         "beat_market": beat_market(d),
         "probability": probability_baselines(d),
+        "ranking": ranking_report(d),
+        "flat_diagnostic": flat_diagnostic(d),
         "effective_sample": {k: v for k, v in eff.items() if k != "kept"},
     }

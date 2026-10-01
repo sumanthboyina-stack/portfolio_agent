@@ -454,3 +454,57 @@ def test_horizon_reliability_chart_uses_baselines_and_has_no_random_line():
     assert not any("random" in (getattr(a, "text", "") or "").lower() for a in fig.layout.annotations)
     assert len(fig.data) == 2
     assert build_horizon_reliability_chart(by_h, [5], {5: "5-Day"}).data[0].marker.color[0] == "#94A3B8"
+
+
+# ── headline ranking tiles ────────────────────────────────────────────────────
+
+def _ranking_report(lo=0.52, hi=0.62, n_dates=12):
+    ci = lambda m: {"mean": m, "ci_low": m - 0.05, "ci_high": m + 0.05}
+    return {"ranking": {
+        "n_rows": 200, "n_dates": n_dates, "low_dates": n_dates < 10,
+        "auc": {"p_up": {"auc": 0.57, "ci_low": lo, "ci_high": hi, "n": 200, "n_pos": 80, "n_dates": n_dates,
+                         "within_date": {"mean": 0.55, "ci_low": 0.5, "ci_high": 0.6, "n_dates": n_dates}},
+                "composite": {"auc": None, "ci_low": None, "ci_high": None, "n": 0, "n_pos": 0, "n_dates": 0, "within_date": None}},
+        "rank_ic": {"p_up": {**ci(0.10), "n_dates": n_dates, "n_dates_dropped": 0, "n_rows": 200, "share_positive": 0.8},
+                    "composite": {"mean": None}},
+        "label_excess": {"n_dates": n_dates,
+                         "labels": {"UP": {"n": 100, "n_dates": n_dates, **ci(-0.001)},
+                                    "FLAT": {"n": 90, "n_dates": n_dates, "mean": -0.024, "ci_low": -0.03, "ci_high": -0.015},
+                                    "DOWN": {"n": 0, "n_dates": 0, "mean": None, "ci_low": None, "ci_high": None}},
+                         "diffs": {"UP-FLAT": {"diff": 0.023, "ci_low": 0.012, "ci_high": 0.03}}},
+        "within_ticker": {"mean_diff": 0.04, "ci_low": 0.01, "ci_high": 0.07, "n_tickers": 6, "n_obs": 20, "n_dates": n_dates},
+        "by_model": {},
+    }}
+
+
+def test_headline_tiles_cover_the_requested_metrics_and_judge_by_interval():
+    from web.components.validation_cards import _headline_tiles_html
+    out = _headline_tiles_html(_ranking_report(), "5-Day", "#2563EB")
+    for needle in ("AUC · p_up", "Rank IC · p_up", "Excess · UP calls", "Excess · FLAT calls", "Excess · DOWN calls",
+                   "UP − FLAT excess", "UP − FLAT, same ticker", "date-block bootstrap", "12 dates"):
+        assert needle in out
+    assert "Above chance" in out and "Not distinguishable from chance" in out        # AUC CI excludes .5; UP-excess CI spans 0
+    assert "distinct prediction dates" not in out                                                         # 12 dates -> no low-dates warning
+
+
+def test_headline_tiles_warn_on_few_dates_and_survive_empty():
+    from web.components.validation_cards import _headline_tiles_html
+    assert "Only 4 distinct prediction dates" in _headline_tiles_html(_ranking_report(n_dates=4), "5-Day", "#000")
+    assert "No evaluated predictions" in _headline_tiles_html(None, "5-Day", "#000")
+    assert "No evaluated predictions" in _headline_tiles_html({"ranking": {"n_rows": 0}}, "5-Day", "#000")
+
+
+def test_interval_tier_uses_the_null_value():
+    from web.components.validation_charts import interval_tier
+    assert interval_tier(0.52, 0.60, 0.5)[0].startswith("Above")
+    assert interval_tier(0.40, 0.48, 0.5)[0].startswith("Below")
+    assert interval_tier(0.45, 0.55, 0.5)[0].startswith("Not distinguishable")
+    assert interval_tier(-0.01, 0.05, 0.0)[0].startswith("Not distinguishable")
+    assert interval_tier(None, None, 0.0)[0] == "No interval"
+
+
+def test_build_horizon_reports_includes_ranking_and_flat_diagnostic():
+    from web.data.validation import build_horizon_reports
+    rep = build_horizon_reports(_eval_df(6, 5), use_prices=False)[5]
+    assert rep["ranking"]["n_rows"] == 6 and "p_up" in rep["ranking"]["auc"]
+    assert rep["flat_diagnostic"]["n_rows"] == 6
