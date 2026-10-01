@@ -316,73 +316,77 @@ def _comparison_block(title: str, comp: dict) -> None:
     st.caption(note)
 
 
+def render_baselines_body(report: Optional[dict]) -> None:
+    """Comparison table, confusion matrix, beat-the-market table and effective sample for one horizon (no expander)."""
+    if not report or not report.get("comparison", {}).get("n_total"):
+        st.caption("No evaluated predictions with a usable direction and return at this horizon yet.")
+        return
+
+    eff = report["effective_sample"]
+    streak = "—" if eff.get("streak_n") is None else eff["streak_n"]
+    line = (f"**Effective sample:** raw N = {eff['raw_n']} / streak N = {streak} / "
+            f"non-overlapping N = {eff['nonoverlap_n']}")
+    if eff["nonoverlap_accuracy"] is not None:
+        line += (f" — directional accuracy on the non-overlapping rows {_pct(eff['nonoverlap_accuracy'])} "
+                 f"(Wilson 95% CI {_pct(eff['ci_low'])} – {_pct(eff['ci_high'])})")
+    st.markdown(line)
+    if eff["low_sample"]:
+        st.warning(
+            f"Only {eff['nonoverlap_n']} non-overlapping predictions (< 30): treat every number here as "
+            "anecdotal. Overlapping windows on the same ticker are one observation counted many times, and "
+            "different tickers still share market moves.",
+            icon=":material/warning:",
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        _comparison_block("All evaluated rows", report["comparison"])
+    with c2:
+        _comparison_block("Non-overlapping rows only", report["nonoverlap_comparison"])
+    st.caption(
+        "Baselines are scored on exactly the rows shown in n. Majority class is an in-sample oracle (it peeks "
+        "at the most common actual class). SPY same window is a look-ahead diagnostic of how much the market "
+        "explains — not tradable and excluded from the 'best baseline' used for tile tiers. SPY prior window "
+        "and ticker momentum use the return over the prior horizon-length of trading days."
+    )
+
+    cm = report["confusion"]
+    st.markdown("**Predicted vs actual direction** (rows = predicted, columns = actual)")
+    cm_df = pd.DataFrame(cm["matrix"]).T[cm["labels"]]
+    cm_df.index = [f"Pred {c}" for c in cm_df.index]
+    cm_df.columns = [f"Actual {c}" for c in cm_df.columns]
+    mix = pd.DataFrame({
+        "Predicted mix": {c: _pct(cm["predicted_mix"][c]) for c in cm["labels"]},
+        "Actual mix": {c: _pct(cm["actual_mix"][c]) for c in cm["labels"]},
+    })
+    m1, m2 = st.columns([3, 2])
+    m1.dataframe(cm_df, use_container_width=True)
+    m2.dataframe(mix, use_container_width=True)
+
+    bm = report["beat_market"]
+    st.markdown("**Direction vs SPY** — did the call's sign match excess return over SPY?")
+    if not bm["n_rows"]:
+        st.caption("No rows with an excess return.")
+    else:
+        def _row(name, n, hit, mean_exc):
+            return {"Calls": name, "n": n, "Beat-market hit rate": _pct(hit),
+                    "Mean excess return": "—" if mean_exc is None else f"{mean_exc * 100:+.2f}%"}
+        bm_rows = [
+            _row("UP calls (excess > 0)", bm["up"]["n"], bm["up"]["hit_rate"], bm["up"]["mean_excess"]),
+            _row("DOWN calls (excess < 0)", bm["down"]["n"], bm["down"]["hit_rate"], bm["down"]["mean_excess"]),
+            _row("UP + DOWN calls", bm["n_calls"], bm["hit_rate"], None),
+            _row("Baseline: always UP (all rows)", bm["n_rows"], bm["always_up_hit_rate"], None),
+        ]
+        st.dataframe(pd.DataFrame(bm_rows), hide_index=True, use_container_width=True)
+        if bm["flat"]["n"]:
+            st.caption(f"FLAT calls (not scored): n = {bm['flat']['n']}, mean excess "
+                       f"{bm['flat']['mean_excess'] * 100:+.2f}%.")
+
+
 def render_baselines_section(report: Optional[dict], horizon_label: str) -> None:
     """Body of the per-horizon "Baselines & sample size" expander."""
     with st.expander(f"Baselines & sample size — {horizon_label}", expanded=False):
-        if not report or not report.get("comparison", {}).get("n_total"):
-            st.caption("No evaluated predictions with a usable direction and return at this horizon yet.")
-            return
-
-        eff = report["effective_sample"]
-        streak = "—" if eff.get("streak_n") is None else eff["streak_n"]
-        line = (f"**Effective sample:** raw N = {eff['raw_n']} / streak N = {streak} / "
-                f"non-overlapping N = {eff['nonoverlap_n']}")
-        if eff["nonoverlap_accuracy"] is not None:
-            line += (f" — directional accuracy on the non-overlapping rows {_pct(eff['nonoverlap_accuracy'])} "
-                     f"(Wilson 95% CI {_pct(eff['ci_low'])} – {_pct(eff['ci_high'])})")
-        st.markdown(line)
-        if eff["low_sample"]:
-            st.warning(
-                f"Only {eff['nonoverlap_n']} non-overlapping predictions (< 30): treat every number here as "
-                "anecdotal. Overlapping windows on the same ticker are one observation counted many times, and "
-                "different tickers still share market moves.",
-                icon=":material/warning:",
-            )
-
-        c1, c2 = st.columns(2)
-        with c1:
-            _comparison_block("All evaluated rows", report["comparison"])
-        with c2:
-            _comparison_block("Non-overlapping rows only", report["nonoverlap_comparison"])
-        st.caption(
-            "Baselines are scored on exactly the rows shown in n. Majority class is an in-sample oracle (it peeks "
-            "at the most common actual class). SPY same window is a look-ahead diagnostic of how much the market "
-            "explains — not tradable and excluded from the 'best baseline' used for tile tiers. SPY prior window "
-            "and ticker momentum use the return over the prior horizon-length of trading days."
-        )
-
-        cm = report["confusion"]
-        st.markdown("**Predicted vs actual direction** (rows = predicted, columns = actual)")
-        cm_df = pd.DataFrame(cm["matrix"]).T[cm["labels"]]
-        cm_df.index = [f"Pred {c}" for c in cm_df.index]
-        cm_df.columns = [f"Actual {c}" for c in cm_df.columns]
-        mix = pd.DataFrame({
-            "Predicted mix": {c: _pct(cm["predicted_mix"][c]) for c in cm["labels"]},
-            "Actual mix": {c: _pct(cm["actual_mix"][c]) for c in cm["labels"]},
-        })
-        m1, m2 = st.columns([3, 2])
-        m1.dataframe(cm_df, use_container_width=True)
-        m2.dataframe(mix, use_container_width=True)
-
-        bm = report["beat_market"]
-        st.markdown("**Direction vs SPY** — did the call's sign match excess return over SPY?")
-        if not bm["n_rows"]:
-            st.caption("No rows with an excess return.")
-        else:
-            def _row(name, n, hit, mean_exc):
-                return {"Calls": name, "n": n, "Beat-market hit rate": _pct(hit),
-                        "Mean excess return": "—" if mean_exc is None else f"{mean_exc * 100:+.2f}%"}
-            bm_rows = [
-                _row("UP calls (excess > 0)", bm["up"]["n"], bm["up"]["hit_rate"], bm["up"]["mean_excess"]),
-                _row("DOWN calls (excess < 0)", bm["down"]["n"], bm["down"]["hit_rate"], bm["down"]["mean_excess"]),
-                _row("UP + DOWN calls", bm["n_calls"], bm["hit_rate"], None),
-                _row("Baseline: always UP (all rows)", bm["n_rows"], bm["always_up_hit_rate"], None),
-            ]
-            st.dataframe(pd.DataFrame(bm_rows), hide_index=True, use_container_width=True)
-            if bm["flat"]["n"]:
-                st.caption(f"FLAT calls (not scored): n = {bm['flat']['n']}, mean excess "
-                           f"{bm['flat']['mean_excess'] * 100:+.2f}%.")
-
+        render_baselines_body(report)
 
 # ── Ranking detail & model split ──────────────────────────────────────────────
 
@@ -390,83 +394,95 @@ def _fmt3(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:.3f}"
 
 
+def render_ranking_tables(report: Optional[dict]) -> None:
+    """Ranking metrics table, mean excess by label and the within-ticker contrast (no expander)."""
+    rk = (report or {}).get("ranking") or {}
+    if not rk.get("n_rows"):
+        st.caption("No evaluated predictions with an excess return at this horizon yet.")
+        return
+    if rk.get("low_dates"):
+        st.warning(f"Only {rk['n_dates']} distinct prediction dates behind these numbers. Intervals resample whole dates, "
+                   "so with this few they are crude.", icon=":material/warning:")
+
+    def _line(name, m, fmt):
+        return {"Metric": name, "Value": fmt(m.get("mean", m.get("auc"))),
+                "95% CI": "—" if m.get("ci_low") is None else f"{fmt(m['ci_low'])} to {fmt(m['ci_high'])}",
+                "Dates": m.get("n_dates", "—")}
+    rows = []
+    for key in ("p_up", "composite"):
+        a = rk["auc"].get(key) or {}
+        if a.get("auc") is not None:
+            rows.append(_line(f"AUC {key} vs beat SPY (pooled)", {"auc": a["auc"], "ci_low": a["ci_low"], "ci_high": a["ci_high"], "n_dates": a["n_dates"]}, _fmt3))
+            if (a.get("within_date") or {}).get("mean") is not None:
+                rows.append(_line(f"AUC {key}, within-date mean", a["within_date"], _fmt3))
+        ic = rk["rank_ic"].get(key) or {}
+        if ic.get("mean") is not None:
+            rows.append(_line(f"Rank IC {key} (daily, averaged)", ic, lambda v: f"{v:+.3f}"))
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    le = rk["label_excess"]
+    lab_rows = [{"Label": lab, "n": x["n"], "Dates": x["n_dates"], "Mean excess vs SPY": _sgn(x["mean"]),
+                 "95% CI": "—" if x["ci_low"] is None else f"{_sgn(x['ci_low'])} to {_sgn(x['ci_high'])}"}
+                for lab, x in le["labels"].items()]
+    lab_rows += [{"Label": k.replace("-", " − "), "n": None, "Dates": le["n_dates"], "Mean excess vs SPY": _sgn(v["diff"]),
+                  "95% CI": "—" if v["ci_low"] is None else f"{_sgn(v['ci_low'])} to {_sgn(v['ci_high'])}"}
+                 for k, v in le["diffs"].items()]
+    st.markdown("**Mean excess return by APEX label** (date-block bootstrap)")
+    st.dataframe(pd.DataFrame(lab_rows), hide_index=True, use_container_width=True)
+
+    wt = rk.get("within_ticker") or {}
+    if wt.get("mean_diff") is not None:
+        st.caption(f"Within ticker, UP − FLAT: {_sgn(wt['mean_diff'])} ({_ci_txt(wt['ci_low'], wt['ci_high'], _sgn)}) "
+                   f"across {wt['n_tickers']} tickers that had both calls ({wt['n_obs']} calls).")
+    else:
+        st.caption("Within-ticker UP − FLAT: no ticker has both an UP and a FLAT call yet.")
+
+
+def render_model_split(report: Optional[dict]) -> None:
+    """Per-model ranking summary (no expander)."""
+    rk = (report or {}).get("ranking") or {}
+    bm = rk.get("by_model") or {}
+    if bm:
+        st.markdown("**By model**")
+        mrows = []
+        for name, m in sorted(bm.items(), key=lambda kv: -kv[1]["n_rows"]):
+            ex = m["label_excess"]["labels"]
+            mrows.append({
+                "Model": name, "n": m["n_rows"], "Dates": m["n_dates"],
+                "AUC p_up": _fmt3(m["auc"]["p_up"].get("auc")),
+                "Rank IC p_up": "—" if m["rank_ic"]["p_up"].get("mean") is None else f"{m['rank_ic']['p_up']['mean']:+.3f}",
+                "Rank IC composite": "—" if m["rank_ic"]["composite"].get("mean") is None else f"{m['rank_ic']['composite']['mean']:+.3f}",
+                "UP excess": _sgn(ex["UP"]["mean"]), "FLAT excess": _sgn(ex["FLAT"]["mean"]), "DOWN excess": _sgn(ex["DOWN"]["mean"]),
+            })
+        st.dataframe(pd.DataFrame(mrows), hide_index=True, use_container_width=True)
+        st.caption("Models with a handful of rows (or a single date) cannot support a rank correlation — their cells are empty or noisy by construction.")
+
+
+def render_flat_diagnostic(report: Optional[dict]) -> None:
+    """Does the FLAT label agree with APEX's own distribution? (no expander)"""
+    fd = (report or {}).get("flat_diagnostic") or {}
+    fc = fd.get("flat_calls")
+    if fc and fc["n"]:
+        st.markdown("**FLAT diagnostic — does the FLAT label agree with APEX's own distribution?**")
+        st.markdown(
+            f"Of {fc['n']} FLAT calls, p_flat is the largest of the five buckets in {fc['p_flat_strict_max']} "
+            f"({fc['p_flat_strict_max'] / fc['n'] * 100:.0f}%), tied for largest in {fc['p_flat_tied_max']}, and not the largest in "
+            f"{fc['p_flat_not_max']}. Mean p_flat on those calls is {_pct(fc['mean_p_flat'])} against {_pct(fc['mean_p_up'])} up mass "
+            f"and {_pct(fc['mean_p_down'])} down mass.")
+        rr = [{"Direction derived from the probabilities": {"argmax5": "Largest of the 5 buckets", "mass3": "Largest of down / flat / up mass"}[k],
+               "Rows (ties excluded)": v["n"], "Agrees with APEX label": _pct(v["agrees_with_label"]),
+               "Derived accuracy": _pct(v["derived_accuracy"]), "APEX accuracy, same rows": _pct(v["apex_accuracy_same_rows"])}
+              for k, v in fd["derived_rules"].items() if v["n"]]
+        st.dataframe(pd.DataFrame(rr), hide_index=True, use_container_width=True)
+        cal = fd["calibration"]
+        st.caption(f"Calibration of the FLAT bucket: APEX puts a mean {_pct(cal['mean_p_flat_all_rows'])} on p_flat across all rows; "
+                   f"{_pct(cal['actual_flat_rate'])} of outcomes actually landed within ±1%.")
+
+
 def render_ranking_section(report: Optional[dict], horizon_label: str) -> None:
-    """Body of the per-horizon "Ranking detail & model split" expander."""
+    """Body of the per-horizon "Ranking detail, model split & FLAT diagnostic" expander."""
     with st.expander(f"Ranking detail, model split & FLAT diagnostic — {horizon_label}", expanded=False):
-        rk = (report or {}).get("ranking") or {}
-        if not rk.get("n_rows"):
-            st.caption("No evaluated predictions with an excess return at this horizon yet.")
-            return
-        if rk.get("low_dates"):
-            st.warning(f"Only {rk['n_dates']} distinct prediction dates behind these numbers. Intervals resample whole dates, "
-                       "so with this few they are crude.", icon=":material/warning:")
-
-        def _line(name, m, fmt):
-            return {"Metric": name, "Value": fmt(m.get("mean", m.get("auc"))),
-                    "95% CI": "—" if m.get("ci_low") is None else f"{fmt(m['ci_low'])} to {fmt(m['ci_high'])}",
-                    "Dates": m.get("n_dates", "—")}
-        rows = []
-        for key in ("p_up", "composite"):
-            a = rk["auc"].get(key) or {}
-            if a.get("auc") is not None:
-                rows.append(_line(f"AUC {key} vs beat SPY (pooled)", {"auc": a["auc"], "ci_low": a["ci_low"], "ci_high": a["ci_high"], "n_dates": a["n_dates"]}, _fmt3))
-                if (a.get("within_date") or {}).get("mean") is not None:
-                    rows.append(_line(f"AUC {key}, within-date mean", a["within_date"], _fmt3))
-            ic = rk["rank_ic"].get(key) or {}
-            if ic.get("mean") is not None:
-                rows.append(_line(f"Rank IC {key} (daily, averaged)", ic, lambda v: f"{v:+.3f}"))
-        if rows:
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-        le = rk["label_excess"]
-        lab_rows = [{"Label": lab, "n": x["n"], "Dates": x["n_dates"], "Mean excess vs SPY": _sgn(x["mean"]),
-                     "95% CI": "—" if x["ci_low"] is None else f"{_sgn(x['ci_low'])} to {_sgn(x['ci_high'])}"}
-                    for lab, x in le["labels"].items()]
-        lab_rows += [{"Label": k.replace("-", " − "), "n": None, "Dates": le["n_dates"], "Mean excess vs SPY": _sgn(v["diff"]),
-                      "95% CI": "—" if v["ci_low"] is None else f"{_sgn(v['ci_low'])} to {_sgn(v['ci_high'])}"}
-                     for k, v in le["diffs"].items()]
-        st.markdown("**Mean excess return by APEX label** (date-block bootstrap)")
-        st.dataframe(pd.DataFrame(lab_rows), hide_index=True, use_container_width=True)
-
-        wt = rk.get("within_ticker") or {}
-        if wt.get("mean_diff") is not None:
-            st.caption(f"Within ticker, UP − FLAT: {_sgn(wt['mean_diff'])} ({_ci_txt(wt['ci_low'], wt['ci_high'], _sgn)}) "
-                       f"across {wt['n_tickers']} tickers that had both calls ({wt['n_obs']} calls).")
-        else:
-            st.caption("Within-ticker UP − FLAT: no ticker has both an UP and a FLAT call yet.")
-
-        bm = rk.get("by_model") or {}
-        if bm:
-            st.markdown("**By model**")
-            mrows = []
-            for name, m in sorted(bm.items(), key=lambda kv: -kv[1]["n_rows"]):
-                ex = m["label_excess"]["labels"]
-                mrows.append({
-                    "Model": name, "n": m["n_rows"], "Dates": m["n_dates"],
-                    "AUC p_up": _fmt3(m["auc"]["p_up"].get("auc")),
-                    "Rank IC p_up": "—" if m["rank_ic"]["p_up"].get("mean") is None else f"{m['rank_ic']['p_up']['mean']:+.3f}",
-                    "Rank IC composite": "—" if m["rank_ic"]["composite"].get("mean") is None else f"{m['rank_ic']['composite']['mean']:+.3f}",
-                    "UP excess": _sgn(ex["UP"]["mean"]), "FLAT excess": _sgn(ex["FLAT"]["mean"]), "DOWN excess": _sgn(ex["DOWN"]["mean"]),
-                })
-            st.dataframe(pd.DataFrame(mrows), hide_index=True, use_container_width=True)
-            st.caption("Models with a handful of rows (or a single date) cannot support a rank correlation — their cells are empty or noisy by construction.")
-
-        fd = (report or {}).get("flat_diagnostic") or {}
-        fc = fd.get("flat_calls")
-        if fc and fc["n"]:
-            st.markdown("**FLAT diagnostic — does the FLAT label agree with APEX's own distribution?**")
-            st.markdown(
-                f"Of {fc['n']} FLAT calls, p_flat is the largest of the five buckets in {fc['p_flat_strict_max']} "
-                f"({fc['p_flat_strict_max'] / fc['n'] * 100:.0f}%), tied for largest in {fc['p_flat_tied_max']}, and not the largest in "
-                f"{fc['p_flat_not_max']}. Mean p_flat on those calls is {_pct(fc['mean_p_flat'])} against {_pct(fc['mean_p_up'])} up mass "
-                f"and {_pct(fc['mean_p_down'])} down mass.")
-            rr = [{"Direction derived from the probabilities": {"argmax5": "Largest of the 5 buckets", "mass3": "Largest of down / flat / up mass"}[k],
-                   "Rows (ties excluded)": v["n"], "Agrees with APEX label": _pct(v["agrees_with_label"]),
-                   "Derived accuracy": _pct(v["derived_accuracy"]), "APEX accuracy, same rows": _pct(v["apex_accuracy_same_rows"])}
-                  for k, v in fd["derived_rules"].items() if v["n"]]
-            st.dataframe(pd.DataFrame(rr), hide_index=True, use_container_width=True)
-            cal = fd["calibration"]
-            st.caption(f"Calibration of the FLAT bucket: APEX puts a mean {_pct(cal['mean_p_flat_all_rows'])} on p_flat across all rows; "
-                       f"{_pct(cal['actual_flat_rate'])} of outcomes actually landed within ±1%.")
-
-
+        render_ranking_tables(report)
+        render_model_split(report)
+        render_flat_diagnostic(report)

@@ -9,6 +9,10 @@ analysis), and Versions (system-version A/B comparison). All four are
 engineering QA tools for tuning the shared prediction engine, not something a
 friend deciding whether to trust a BUY call needs to see — hence living behind
 the admin drawer instead of on the main Validation page.
+
+It also hosts everything that used to sit on the user-facing Validation page before that page was reduced to
+four score cards: Baselines, Ranking detail, Calibration, Models, FLAT diagnostic, the legacy metric tiles &
+outcome breakdown, the compounded call-return index, and the scoring-snapshot tables.
 """
 from __future__ import annotations
 
@@ -50,6 +54,22 @@ from web.data.validation import (
     _load_watchlist_tickers,
     _get_model_names,
     _load_rolling_metrics_series,
+    _load_evaluated_predictions_df,
+    _compute_filtered_metrics,
+    build_horizon_reports,
+)
+from web.components.validation_cards import (
+    render_baselines_body,
+    render_ranking_tables,
+    render_model_split,
+    render_flat_diagnostic,
+)
+from web.components.validation_legacy import (
+    render_calibration_headline,
+    render_outcome_breakdown,
+    render_legacy_tiles,
+    render_equity_curve,
+    render_scoring_snapshots,
 )
 from web.components.validation_charts import (
     build_brier_trend_chart,
@@ -138,8 +158,58 @@ with st.sidebar:
         ),
     )
 
-_portfolio_tickers = _load_portfolio_tickers()
-_watchlist_tickers = _load_watchlist_tickers()
+# The loaders are scoped to the caller's own holdings/watchlist and need the caller's context
+# (this page used to call them with no argument, which raised a TypeError on load).
+_ctx = current_context("web:validation_qa")
+_portfolio_tickers = _load_portfolio_tickers(_ctx)
+_watchlist_tickers = _load_watchlist_tickers(_ctx)
+
+# ── Shared data for the detail tabs (same filters as the sidebar) ─────────────
+
+_H_LABELS_ALL = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
+_qa_df = _load_evaluated_predictions_df(lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+_qa_horizons = sorted(int(h) for h in _qa_df["horizon_days"].dropna().unique()) if not _qa_df.empty else []
+
+_PRICE_AUTO_MAX_TICKERS = 60
+_qa_n_tickers = int(_qa_df["ticker"].nunique()) if not _qa_df.empty else 0
+_qa_use_prices = _qa_n_tickers <= _PRICE_AUTO_MAX_TICKERS
+with st.sidebar:
+    st.divider()
+    st.markdown(
+        '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 8px">'
+        'Detail tabs</p>',
+        unsafe_allow_html=True,
+    )
+    if _qa_horizons:
+        _qa_h = st.radio("Horizon", _qa_horizons, index=0, horizontal=True, key="valqa_detail_horizon",
+                         format_func=lambda h: _H_LABELS_ALL.get(h, f"{h}d"),
+                         help="Used by the Baselines, Ranking detail, Models and FLAT diagnostic tabs. Horizons are never mixed.")
+    else:
+        _qa_h = None
+    if not _qa_use_prices:
+        _qa_use_prices = st.toggle(
+            "Price-based baselines", value=False, key="valqa_price_baselines",
+            help=f"Momentum / SPY-prior-window baselines need price history for each of the {_qa_n_tickers} tickers "
+                 "in this scope (cached 30 min).",
+        )
+
+
+@st.cache_data(ttl=600, show_spinner="Computing baselines and ranking metrics…")
+def _cached_reports(df: pd.DataFrame, use_prices: bool) -> dict:
+    return build_horizon_reports(df, use_prices=use_prices)
+
+
+_reports: dict = {}
+if _qa_horizons:
+    try:
+        _reports = _cached_reports(_qa_df, _qa_use_prices)
+    except Exception as _exc:
+        st.warning(f"Baselines unavailable: {_exc}", icon=material("warning"))
+_report = _reports.get(_qa_h) if _qa_h is not None else None
+_horizon_baselines = {
+    h: r["comparison"]["best_baseline"]["accuracy"]
+    for h, r in _reports.items() if r["comparison"].get("best_baseline")
+}
 
 # ── Page header ───────────────────────────────────────────────────────────────
 
@@ -154,6 +224,14 @@ tabs = st.tabs([
     f"{material('track_changes')} Confidence Calibration",
     f"{material('science')} Post-mortems",
     f"{material('history')} Versions",
+    f"{material('compare_arrows')} Baselines",
+    f"{material('leaderboard')} Ranking detail",
+    f"{material('tune')} Calibration",
+    f"{material('model_training')} Models",
+    f"{material('flag')} FLAT diagnostic",
+    f"{material('grid_view')} Legacy tiles & outcomes",
+    f"{material('show_chart')} Equity curve",
+    f"{material('calculate')} Scoring snapshots",
 ])
 
 # ── Tab 1: Metric Trends ──────────────────────────────────────────────────────
@@ -248,7 +326,7 @@ with tabs[0]:
                 st.divider()
 
                 st.subheader("Directional Accuracy — Rolling Average")
-                st.caption("Rolling % of predictions where predicted direction matched actual direction (3 classes: UP / DOWN / FLAT). Compare against the naive baselines on the Validation page's “Baselines & sample size” section — there is no fixed random line.")
+                st.caption("Rolling % of predictions where predicted direction matched actual direction (3 classes: UP / DOWN / FLAT). Compare against the naive baselines on the Baselines tab — there is no fixed random line.")
                 fig_dir = build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
                                                              H_COLORS, H_LABELS, show_aggregate=show_aggregate)
                 st.plotly_chart(fig_dir, use_container_width=True)
@@ -490,3 +568,93 @@ with tabs[3]:
             "Mean Excess Return": fmt_pct(r["mean_excess"]*100) if r.get("mean_excess") is not None else "—",
         } for r in ver_data]
         st.dataframe(pd.DataFrame(rows_ver), use_container_width=True, hide_index=True)
+
+# ── Tab 5: Baselines ──────────────────────────────────────────────────────────
+
+_NO_REPORT = "No evaluated predictions at this horizon yet (check the sidebar filters)."
+
+with tabs[4]:
+    st.caption(f"Horizon: **{_H_LABELS_ALL.get(_qa_h, '—')}** (sidebar). APEX against naive baselines scored on the same rows, "
+               "the confusion matrix, the beat-the-market table and raw / streak / non-overlapping N.")
+    if _report is None:
+        st.info(_NO_REPORT, icon=material("info"))
+    else:
+        render_baselines_body(_report)
+
+# ── Tab 6: Ranking detail ─────────────────────────────────────────────────────
+
+with tabs[5]:
+    st.caption(f"Horizon: **{_H_LABELS_ALL.get(_qa_h, '—')}** (sidebar). The numbers behind the Validation page's first card, "
+               "with every interval resampling whole prediction dates.")
+    if _report is None:
+        st.info(_NO_REPORT, icon=material("info"))
+    else:
+        render_ranking_tables(_report)
+
+# ── Tab 7: Calibration (probability skill vs sample baselines) ────────────────
+
+with tabs[6]:
+    render_calibration_headline(lookback, _model_filter)
+    st.caption("The reliability diagram and conviction calibration are on the Confidence Calibration tab.")
+    _cal_rows = []
+    for _h, _rep in sorted(_reports.items()):
+        _prob = _rep.get("probability") or {}
+        for _kind, _label in (("binary", "UP vs not-UP"), ("five", "5-bucket")):
+            _b = _prob.get(_kind)
+            if not _b:
+                continue
+            _cal_rows.append({
+                "Horizon": _H_LABELS_ALL.get(_h, f"{_h}d"), "Event": _label, "n": _prob["n"],
+                "Brier": f"{_b['brier']:.3f}", "Baseline Brier": f"{_b['baseline_brier']:.3f}",
+                "Brier skill": "—" if _b["brier_skill"] is None else f"{_b['brier_skill']:+.1%}",
+                "Log-loss": f"{_b['log_loss']:.3f}", "Baseline log-loss": f"{_b['baseline_log_loss']:.3f}",
+                "Log-loss skill": "—" if _b["log_loss_skill"] is None else f"{_b['log_loss_skill']:+.1%}",
+            })
+    if _cal_rows:
+        st.markdown("**Probability scores against the sample's own base-rate forecast**")
+        st.dataframe(pd.DataFrame(_cal_rows), hide_index=True, use_container_width=True)
+        st.caption("Baseline = always forecasting this sample's own base rates (binary: UP rate; 5-bucket: bucket frequencies). "
+                   "Skill = 1 − score / baseline; above 0 beats the base rate.")
+    else:
+        st.info("No evaluated predictions with a full probability distribution yet.", icon=material("info"))
+
+# ── Tab 8: Models ─────────────────────────────────────────────────────────────
+
+with tabs[7]:
+    st.caption(f"Horizon: **{_H_LABELS_ALL.get(_qa_h, '—')}** (sidebar). Ranking numbers split by model_name.")
+    if _report is None:
+        st.info(_NO_REPORT, icon=material("info"))
+    else:
+        render_model_split(_report)
+
+# ── Tab 9: FLAT diagnostic ────────────────────────────────────────────────────
+
+with tabs[8]:
+    st.caption(f"Horizon: **{_H_LABELS_ALL.get(_qa_h, '—')}** (sidebar).")
+    if _report is None:
+        st.info(_NO_REPORT, icon=material("info"))
+    else:
+        render_flat_diagnostic(_report)
+
+# ── Tab 10: Legacy tiles & outcome breakdown ──────────────────────────────────
+
+with tabs[9]:
+    _qa_metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+    _qa_by_h: dict[int, dict] = {}
+    for _row in _qa_metrics:
+        _qa_by_h.setdefault(_row["horizon_days"], _row)
+    _qa_all_h = [h for h in [5, 21, 63, 250] if h in _qa_by_h] + [h for h in sorted(_qa_by_h) if h not in [5, 21, 63, 250]]
+    render_legacy_tiles(_qa_by_h, _qa_all_h, _H_LABELS_ALL, _reports, _horizon_baselines)
+    st.divider()
+    st.markdown("**Outcome breakdown & returns by recommendation**")
+    render_outcome_breakdown(_qa_df)
+
+# ── Tab 11: Equity curve ──────────────────────────────────────────────────────
+
+with tabs[10]:
+    render_equity_curve(_qa_df)
+
+# ── Tab 12: Scoring snapshots ─────────────────────────────────────────────────
+
+with tabs[11]:
+    render_scoring_snapshots()
