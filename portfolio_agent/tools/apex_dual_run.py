@@ -2,8 +2,10 @@
 APEX single-run prediction module.
 
 Architecture:
-  1. Randomly select Claude-Sonnet or GPT-4o for the prediction.
-  2. If the selected model times out (90 s) or errors, retry with the other model.
+  1. Randomly select two models from APEX_MODELS for the prediction
+     (Claude-Sonnet, GPT-4o, GPT-5, o3).
+  2. If the first-picked model times out (90 s) or errors, retry with the
+     second-picked model.
   3. Both-fail → return None; caller skips, never writes a placeholder.
 """
 from __future__ import annotations
@@ -20,17 +22,22 @@ import litellm
 
 from portfolio_agent.log import get_logger as _get_logger
 from portfolio_agent._models import (
-    _SONNET, _GPT_4O,
+    _SONNET, _GPT_4O, _GPT_5, _O3,
     _is_failover_error,
 )
 
 _log = _get_logger("apex")
 
 # ── Model list ─────────────────────────────────────────────────────────────────
+# Each run randomly picks 2 of these 4 as (primary, fallback) — see run_apex().
+# litellm.drop_params is set True at import time in portfolio_agent._models, so
+# o3's temperature != 1 restriction is silently dropped rather than raising.
 
 APEX_MODELS: list[tuple[str, str, str]] = [
     (_SONNET, "anthropic", "Claude-Sonnet"),
     (_GPT_4O, "openai",    "GPT-4o"),
+    (_GPT_5,  "openai",    "GPT-5"),
+    (_O3,     "openai",    "o3"),
 ]
 
 APEX_TIMEOUT: float = 90.0   # seconds before abandoning and retrying with the other model
@@ -64,10 +71,11 @@ class ModelResult:
 
 async def run_apex(ticker: str, prompt: str) -> ModelResult | None:
     """
-    Run a single randomly-selected model (Sonnet or GPT-4o) for *ticker*.
+    Run a single randomly-selected model from APEX_MODELS for *ticker*.
 
-    If the chosen model times out or fails, retries with the other model.
-    Returns None if both models fail — caller skips, no placeholder written.
+    If the chosen model times out or fails, retries with a second,
+    also-randomly-selected model from APEX_MODELS. Returns None if both fail —
+    caller skips, no placeholder written.
     """
     models = list(APEX_MODELS)
     random.shuffle(models)

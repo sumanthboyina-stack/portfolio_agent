@@ -110,6 +110,56 @@ def _score_color(score: float | None) -> str:
     return DANGER
 
 
+def _personal_badges_html(row: dict, *, include_own_private: bool = True) -> str:
+    """
+    Read-only per-viewer badges (held/weight, restricted, blackout, needs
+    pre-clearance, your own chat forecast) — never changes the recommendation
+    label itself. Fields are populated by _load_predictions(owner=...) and
+    web.data.predictions._personal_overlay(); absent entirely for callers
+    that don't merge them in (drill-down history, other pages), so this
+    degrades to an empty string rather than erroring.
+
+    include_own_private=False for a ticker-level summary (render_multi_horizon_card)
+    built from just one representative row -- whether THIS ticker is private is a
+    per-horizon fact there, shown per-line instead, not something one row can speak for.
+    """
+    badges: list[str] = []
+
+    if include_own_private and row.get("is_own_private"):
+        badges.append(
+            f'<span style="background:{PURPLE_LIGHT};color:{PURPLE};padding:1px 8px;'
+            f'border-radius:4px;font-size:0.68rem;font-weight:700">{icon_html("chat_bubble", 11)} your chat forecast</span>'
+        )
+    if row.get("held"):
+        w = row.get("weight_pct")
+        w_str = f" · {w:.1f}% weight" if w is not None else ""
+        badges.append(
+            f'<span style="background:{PRIMARY_LIGHT};color:{PRIMARY};padding:1px 8px;'
+            f'border-radius:4px;font-size:0.68rem;font-weight:700">{icon_html("account_balance_wallet", 11)} held{w_str}</span>'
+        )
+    if row.get("restricted"):
+        reason = row.get("restricted_reason")
+        title = f' title="{reason}"' if reason else ""
+        badges.append(
+            f'<span{title} style="background:{DANGER_LIGHT};color:{DANGER};padding:1px 8px;'
+            f'border-radius:4px;font-size:0.68rem;font-weight:700;cursor:help">{icon_html("block", 11)} restricted</span>'
+        )
+    if row.get("blackout"):
+        badges.append(
+            f'<span style="background:{DANGER_LIGHT};color:{DANGER};padding:1px 8px;'
+            f'border-radius:4px;font-size:0.68rem;font-weight:700">{icon_html("event_busy", 11)} blackout</span>'
+        )
+    if row.get("needs_pre_clearance"):
+        badges.append(
+            f'<span style="background:{WARNING_LIGHT};color:{WARNING};padding:1px 8px;'
+            f'border-radius:4px;font-size:0.68rem;font-weight:700">{icon_html("gavel", 11)} needs pre-clearance</span>'
+        )
+
+    if not badges:
+        return ""
+    return f'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">{"".join(badges)}</div>'
+
+
 # ── Section renderers ─────────────────────────────────────────────────────────
 
 def render_system_strip(df_all: pd.DataFrame, selected_date: date) -> None:
@@ -212,6 +262,9 @@ def render_action_item_card(row: dict, card_key: str) -> None:
                 f'border-radius:4px;font-size:0.75rem;font-weight:700">{rec_label}</span>',
                 unsafe_allow_html=True,
             )
+            badges_html = _personal_badges_html(row)
+            if badges_html:
+                st.markdown(badges_html, unsafe_allow_html=True)
         with c2:
             if st.button("View Details", key=card_key, use_container_width=True):
                 st.session_state["drill_ticker"] = ticker
@@ -354,6 +407,10 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
             if has_prob:
                 st.markdown(_prob_strip_html(row), unsafe_allow_html=True)
 
+            badges_html = _personal_badges_html(row)
+            if badges_html:
+                st.markdown(badges_html, unsafe_allow_html=True)
+
             driver_parts = []
             for label, score in [("Fundamentals", f_score), ("Valuation", v_score), ("Research", r_score), ("Macro", m_score), ("News", n_score)]:
                 arrow = _score_arrow(score)
@@ -398,6 +455,9 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
                 f'</div>',
                 unsafe_allow_html=True,
             )
+            badges_html = _personal_badges_html(first, include_own_private=False)
+            if badges_html:
+                st.markdown(badges_html, unsafe_allow_html=True)
             for row in horizon_rows:
                 h_days = row.get("horizon_days")
                 h_str = f"{h_days}d" if h_days else "—"
@@ -410,6 +470,11 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
                 hi = row.get("predicted_return_high")
                 ret_str = f"{lo:+.2f}% / {hi:+.2f}%" if lo is not None and hi is not None else "—"
                 meter = _conviction_meter(c)
+                own_tag = (
+                    f'<span style="background:{PURPLE_LIGHT};color:{PURPLE};padding:1px 6px;'
+                    f'border-radius:4px;font-size:0.65rem;font-weight:700">{icon_html("chat_bubble", 10)} yours</span>'
+                    if row.get("is_own_private") else ""
+                )
                 st.markdown(
                     f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0;'
                     f'padding:3px 6px;background:#F8FAFC;border-radius:5px">'
@@ -420,6 +485,7 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
                     f'<span style="font-size:0.7rem;color:#64748B">Confidence <b>{c_str}</b></span>'
                     f'<span style="font-size:0.7rem;color:#475569">{ret_str}</span>'
                     f'<span style="font-family:monospace;font-size:0.68rem;color:#94A3B8">{meter}</span>'
+                    f'{own_tag}'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
@@ -492,20 +558,34 @@ def render_all_predictions(df: pd.DataFrame, title: str = "All Predictions by Re
 
 # ── Drill-down ────────────────────────────────────────────────────────────────
 
-def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
-    """Piece 5: Per-ticker drill-down panel."""
+def render_drill_down(drill_ticker: str, drill_date: str | None, owner: str | None = None) -> None:
+    """Piece 5: Per-ticker drill-down panel.
+
+    Scoped the same way _load_predictions() is: SHARED_SCOPES, plus owner's
+    own private chat forecasts on this ticker when owner is given — a private
+    forecast someone else made on this ticker must never surface here.
+    """
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
+
     st.markdown("---")
     _drill_name = _cname(drill_ticker)
     _drill_label = f"{drill_ticker} — {_drill_name}" if _drill_name else drill_ticker
     section_title(f"Drill-down: {_drill_label}", badge_text="Detail View", badge_color=PURPLE)
 
+    _sc, _sp = scope_clause(SHARED_SCOPES)
+    where = _sc
+    params: list = list(_sp)
+    if owner:
+        where = f"({_sc} OR (scope = 'private' AND owner_scope = ?))"
+        params = [*_sp, f"user:{owner}"]
+
     # Load all rows for this ticker on this date (all horizons)
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT * FROM predictions
-               WHERE ticker = ? AND (as_of_date = ? OR ? IS NULL)
+            f"""SELECT * FROM predictions
+               WHERE ticker = ? AND (as_of_date = ? OR ? IS NULL) AND {where}
                ORDER BY horizon_days ASC, created_at DESC""",
-            (drill_ticker, drill_date, drill_date),
+            (drill_ticker, drill_date, drill_date, *params),
         ).fetchall()
 
     if not rows:
@@ -516,15 +596,30 @@ def render_drill_down(drill_ticker: str, drill_date: str | None) -> None:
             st.rerun()
         return
 
-    # De-duplicate to latest per horizon
+    # De-duplicate to latest per horizon — SHARED rows only, so the viewer's
+    # own private chat forecast (however recent) can never silently take the
+    # "primary" slot for a horizon out from under the shared call everyone
+    # else sees. Its existence is still surfaced, just not as a silent swap.
+    all_rows = [dict(r) for r in rows]
+    shared_source = [d for d in all_rows if d.get("scope") != "private"]
+    own_private_horizons = sorted({
+        d.get("horizon_days") for d in all_rows if d.get("scope") == "private"
+    } - {None})
+
     seen: dict[Any, dict] = {}
-    for r in rows:
-        d = dict(r)
+    for d in shared_source or all_rows:   # all_rows fallback: nothing shared exists for this ticker/date at all
         h = d.get("horizon_days")
         if h not in seen:
             seen[h] = d
     drill_rows = list(seen.values())
     row = drill_rows[0]  # primary row for single-horizon fields
+
+    if own_private_horizons:
+        st.caption(
+            f"{icon_html('chat_bubble', 12)} You also have your own chat forecast on {drill_ticker} for "
+            f"{', '.join(f'{h}d' for h in own_private_horizons)} — not shown here, since this view is the "
+            "shared call everyone sees; ask about it in chat to see your own."
+        )
 
     # ── Header ────────────────────────────────────────────────────────────────
     rec = row.get("recommendation", "")

@@ -86,14 +86,21 @@ with ctrl6:
 _HORIZON_MAP = {"All": None, "5d": 5, "21d": 21, "63d": 63}
 horizon_days_filter = _HORIZON_MAP[horizon_choice]
 
+_ctx = current_context("web:predictions")
+_owner = _ctx.actor
+
 # ── Load data ─────────────────────────────────────────────────────────────────
+# owner=_owner: also surfaces the viewer's OWN private chat forecasts
+# (labeled "your chat forecast"), never anyone else's — see _load_predictions().
 df_today = _load_predictions(
     selected_date=selected_date,
     horizon_days=horizon_days_filter,
     min_conviction=min_conv,
+    owner=_owner,
 )
 
-# Load all-date data for the system strip denominator
+# Load all-date data for the system strip denominator — shared only, no
+# owner override: a system-wide stat shouldn't include one viewer's private rows.
 df_all = _load_predictions(selected_date=None)
 
 # Apply trigger filter
@@ -134,14 +141,37 @@ else:
     df_portfolio = df_today
     df_opps      = pd.DataFrame()
 
+# "Portfolio" used to mean "everything not tagged trending_opportunity" --
+# not actually your holdings. Scope it to your own holdings + watchlist (your
+# own private chat forecasts stay in, on whatever ticker they're on, since
+# they're yours regardless of whether you hold the name).
+if not df_portfolio.empty:
+    from portfolio_agent.services.account_service import list_holdings_for
+    from portfolio_agent.tools.watchlist_db import load_watchlist_tickers_for
+    from web.data.predictions import _personal_overlay
+
+    _my_tickers = {str(h["ticker"]).upper() for h in list_holdings_for(_ctx)} | {
+        t.upper() for t in load_watchlist_tickers_for(_ctx)
+    }
+    _mine_mask = df_portfolio["ticker"].str.upper().isin(_my_tickers) | df_portfolio["is_own_private"]
+    df_portfolio = df_portfolio[_mine_mask].reset_index(drop=True)
+
+    if not df_portfolio.empty:
+        overlay = _personal_overlay(_ctx, df_portfolio["ticker"].unique().tolist())
+        for field in ("held", "weight_pct", "restricted", "restricted_reason", "blackout", "needs_pre_clearance"):
+            df_portfolio[field] = df_portfolio["ticker"].str.upper().map(lambda t: overlay.get(t, {}).get(field))
+
 # ── Section 1: Action Items (portfolio) ───────────────────────────────────────
-_tile_actions = section_tile("Action Items", badge_text="portfolio", expanded=True, key="pred_actions")
+_tile_actions = section_tile("Action Items", badge_text="your holdings + watchlist", expanded=True, key="pred_actions")
 if _tile_actions:
     with _tile_actions:
         render_action_items(df_portfolio)
 
 # ── Section 2: All Portfolio Predictions ──────────────────────────────────────
-_tile_all = section_tile("All Portfolio Predictions", badge_text=f"{len(df_portfolio)} rows", expanded=True, key="pred_all")
+_tile_all = section_tile(
+    "All Portfolio Predictions", badge_text=f"{len(df_portfolio)} rows · your holdings + watchlist",
+    expanded=True, key="pred_all",
+)
 if _tile_all:
     with _tile_all:
         render_all_predictions(df_portfolio)
@@ -162,4 +192,4 @@ drill_ticker = st.session_state.get("drill_ticker")
 drill_date = st.session_state.get("drill_date")
 
 if drill_ticker:
-    render_drill_down(drill_ticker, drill_date)
+    render_drill_down(drill_ticker, drill_date, owner=_owner)

@@ -29,11 +29,32 @@ def _load_predictions(
     selected_date: date | None = None,
     horizon_days: int | None = None,
     min_conviction: float = 0,
+    owner: str | None = None,
 ) -> pd.DataFrame:
-    """Load latest prediction per ticker/horizon for the given date (or all dates if None)."""
+    """
+    Load the latest SHARED prediction per ticker/horizon for the given date (or
+    all dates if None) -- scoped to SHARED_SCOPES so a private chat forecast
+    (scope='private', written by web/pages/4_🤖_Chat.py for whoever asked) never
+    shows up on someone else's screen, and never silently replaces the shared
+    call for that ticker/horizon just because it happens to be more recent.
+
+    owner: when given, that owner's OWN private forecasts are also included
+    (marked is_own_private=True), deduped separately from the shared rows so
+    one never displaces the other -- a viewer can see both "the shared call"
+    and "my own chat forecast" for the same ticker/horizon.
+    """
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
+
+    _sc, _sp = scope_clause(SHARED_SCOPES)
+    where = _sc
+    params = list(_sp)
+    if owner:
+        where = f"({_sc} OR (scope = 'private' AND owner_scope = ?))"
+        params = [*_sp, f"user:{owner}"]
+
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT id, ticker, as_of_date, recommendation, prediction,
+            f"""SELECT id, ticker, as_of_date, recommendation, prediction,
                       confidence, composite_score, horizon_days, prediction_type,
                       predicted_direction, predicted_return_low, predicted_return_high,
                       conviction_score, fundamental_score, valuation_score, research_score, macro_score,
@@ -46,14 +67,16 @@ def _load_predictions(
                       risk_segment, system_version, snapshot_fundamentals_score,
                       snapshot_news_score, snapshot_research_score, snapshot_macro_score,
                       snapshot_news_headlines, brier_score,
-                      trigger_type, trigger_event_id
+                      trigger_type, trigger_event_id, scope
                FROM predictions
-               WHERE as_of_date IS NOT NULL
+               WHERE as_of_date IS NOT NULL AND {where}
                ORDER BY as_of_date DESC, created_at DESC""",
+            params,
         ).fetchall()
 
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
+        df["is_own_private"] = pd.Series(dtype=bool)
         return df
 
     if selected_date is not None:
@@ -65,13 +88,65 @@ def _load_predictions(
     if min_conviction > 0:
         df = df[df["conviction_score"].fillna(0) >= min_conviction]
 
-    # Latest per ticker+horizon
-    df = (
-        df.sort_values("created_at", ascending=False)
-          .drop_duplicates(subset=["ticker", "horizon_days"])
-          .sort_values(["ticker", "horizon_days"])
-    )
-    return df.reset_index(drop=True)
+    # Latest per ticker+horizon -- shared and the viewer's own private rows are
+    # deduped SEPARATELY (never against each other), so a private forecast can
+    # never win the "latest" slot and hide the shared call for everyone else.
+    df["is_own_private"] = df["scope"] == "private"
+    shared = df[~df["is_own_private"]]
+    private = df[df["is_own_private"]]
+    parts = [
+        part.sort_values("created_at", ascending=False).drop_duplicates(subset=["ticker", "horizon_days"])
+        for part in (shared, private) if not part.empty
+    ]
+    df = pd.concat(parts) if parts else df.iloc[0:0]
+    return df.sort_values(["ticker", "horizon_days"]).reset_index(drop=True)
+
+
+def _personal_overlay(ctx, tickers: list[str]) -> dict[str, dict]:
+    """
+    Deterministic, per-viewer badges for a set of tickers on the Predictions
+    page: held (and at what portfolio weight), on the viewer's own restricted
+    list, inside an active blackout window, or gated by the viewer's own
+    pre-clearance preference. Reuses the exact same primitives clearance.py's
+    PolicyDecision is built from — this never re-derives or second-guesses the
+    rule, just surfaces each deterministic fact per row instead of collapsing
+    it into one pass/fail memo. The recommendation itself is never touched:
+    a BUY stays a BUY even if, say, the sector cap is already full — these are
+    read-only context badges, not a rewrite of the call.
+    """
+    from portfolio_agent.clearance import evaluate_blackout_windows
+    from portfolio_agent.services.account_service import list_holdings_for
+    from portfolio_agent.tools.blackout_windows_db import list_active_blackout_windows
+    from portfolio_agent.tools.restricted_list_db import list_restricted_for
+    from portfolio_agent.tools.user_profile_db import get_user_profile_for
+    from datetime import datetime, timezone as _timezone
+
+    wanted = {t.upper() for t in tickers}
+
+    held_value_by_ticker: dict[str, float] = {}
+    for h in list_holdings_for(ctx):
+        t = str(h.get("ticker") or "").upper()
+        if t:
+            held_value_by_ticker[t] = held_value_by_ticker.get(t, 0.0) + float(h.get("current_value") or 0)
+    total_value = sum(held_value_by_ticker.values())
+
+    restricted_by_ticker = {r["ticker"].upper(): r.get("reason") for r in list_restricted_for(ctx)}
+    windows = list_active_blackout_windows()
+    needs_pre_clearance = bool(get_user_profile_for(ctx).pre_clearance_required)
+    now_utc = datetime.now(_timezone.utc)
+
+    overlay: dict[str, dict] = {}
+    for t in wanted:
+        value = held_value_by_ticker.get(t)
+        overlay[t] = {
+            "held": t in held_value_by_ticker,
+            "weight_pct": (value / total_value * 100) if value and total_value else None,
+            "restricted": t in restricted_by_ticker,
+            "restricted_reason": restricted_by_ticker.get(t),
+            "blackout": evaluate_blackout_windows(windows, t, at_utc=now_utc)["active"],
+            "needs_pre_clearance": needs_pre_clearance,
+        }
+    return overlay
 
 
 def _load_ticker_history(ticker: str) -> pd.DataFrame:

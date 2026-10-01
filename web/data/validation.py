@@ -15,6 +15,9 @@ Contains:
   - _returns_by_recommendation   : avg realized return per recommendation bucket (raw + unique-streak)
   - _sell_call_outcomes          : did SELL/STRONG_SELL calls avoid losses
   - _signal_equity_curve         : cumulative "followed the BUY calls" vs SPY curve
+  - equity_curve_date_span       : date range to bulk-fetch/cache index closes over
+  - _add_index_benchmarks        : + Dow/Nasdaq cumulative return, same per-call windows as SPY
+  - _add_portfolio_benchmark     : + the viewer's own recorded portfolio value, re-based to the curve's start
 
 Every query against `predictions` below is restricted to LEGACY_REVIEW_SCOPES
 (shared_market + legacy_unclassified, never private) — the same scope
@@ -434,6 +437,10 @@ def _signal_equity_curve(df: pd.DataFrame, buy_recs: tuple[str, ...] = ("STRONG_
     compounded curve, since calls overlap across tickers and horizons. That
     makes this a "did mechanically following the calls beat SPY over the same
     stretches of time" comparison, not a literal portfolio simulation.
+
+    as_of_date/evaluation_date (each call's own window) are carried through
+    so _add_index_benchmarks() can fetch OTHER indices (Dow, Nasdaq) over the
+    exact same per-call windows SPY's benchmark_return already uses.
     """
     if df.empty or "recommendation" not in df.columns:
         return pd.DataFrame()
@@ -450,4 +457,111 @@ def _signal_equity_curve(df: pd.DataFrame, buy_recs: tuple[str, ...] = ("STRONG_
     return sub[[
         "event_date", "call_num", "ticker", "recommendation",
         "actual_return", "benchmark_return", "strategy_cum", "benchmark_cum",
-    ]]
+        "as_of_date", "evaluation_date",
+    ]].reset_index(drop=True)
+
+
+def _closest_close(closes: dict[str, float], target: str, *, direction: str = "after",
+                   max_lookahead_days: int = 7) -> float | None:
+    """
+    closes: {date_iso: close} from yfinance_tools.get_closes_in_range (only
+    actual trading days are keys). direction='after' mirrors get_close()'s
+    own "on or just after" semantics (a prediction's as_of/evaluation date is
+    always a trading day, but the exact date is looked up defensively);
+    direction='before' is carry-forward, for a less-frequently-snapshotted
+    series like portfolio value against a daily index calendar.
+    """
+    if target in closes:
+        return closes[target]
+    from datetime import date, timedelta
+    d = date.fromisoformat(target)
+    if direction == "after":
+        for i in range(1, max_lookahead_days + 1):
+            cand = (d + timedelta(days=i)).isoformat()
+            if cand in closes:
+                return closes[cand]
+        return None
+    candidates = [c for c in closes if c <= target]
+    return closes[max(candidates)] if candidates else None
+
+
+def equity_curve_date_span(curve_df: pd.DataFrame) -> tuple[str, str] | None:
+    """(start, end) covering every call's window in curve_df, for a caller
+    (the page) to bulk-fetch and cache index closes keyed on this hashable
+    pair, instead of re-fetching on every Streamlit rerun."""
+    if curve_df.empty:
+        return None
+    start = min(curve_df["as_of_date"].dropna(), default=None)
+    end   = max(curve_df["evaluation_date"].dropna(), default=None)
+    return (start, end) if (start and end) else None
+
+
+def _add_index_benchmarks(
+    curve_df: pd.DataFrame,
+    closes_by_symbol: dict[str, dict[str, float]],
+    symbols: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """
+    Add a cumulative-return column per extra index (Dow Jones ^DJI, Nasdaq
+    ^IXIC by default), each computed over the EXACT same per-call window
+    (as_of_date -> evaluation_date) SPY's own benchmark_return already uses —
+    so "did the calls beat the market" is judged consistently across every
+    line on the chart, not SPY-over-its-real-window vs. Dow-over-some-other-
+    window.
+
+    closes_by_symbol: {symbol: {date_iso: close}}, already bulk-fetched (see
+    equity_curve_date_span()) — this function does no I/O itself, so the
+    caller can cache the fetch across Streamlit reruns.
+    """
+    if curve_df.empty:
+        return curve_df
+    symbols = symbols or {"^DJI": "dow_cum", "^IXIC": "nasdaq_cum"}
+    out = curve_df.copy()
+    for symbol, col in symbols.items():
+        closes = closes_by_symbol.get(symbol) or {}
+        if not closes:
+            out[col] = None
+            continue
+        rets = []
+        for _, row in out.iterrows():
+            s = _closest_close(closes, row["as_of_date"], direction="after")
+            e = _closest_close(closes, row["evaluation_date"], direction="after")
+            rets.append((e / s - 1) if (s and e) else None)
+        cum, running = [], 1.0
+        for r in rets:
+            if r is not None:
+                running *= (1 + r)
+            cum.append(running)
+        out[col] = cum
+    return out
+
+
+def _add_portfolio_benchmark(curve_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add the viewer's own recorded portfolio value as a comparison line,
+    re-based to 1.0 at the equity curve's own starting date so it's visually
+    comparable to the strategy/SPY/index cumulative-return lines.
+
+    portfolio_price_history has no owner/portfolio-scoping column yet (a
+    pre-existing gap shared with the Portfolio page's own trend chart, which
+    reads the same table the same unscoped way) — in a genuinely
+    multi-portfolio deployment this would read every portfolio's combined
+    value, not just the viewer's own.
+    """
+    if curve_df.empty:
+        return curve_df
+    from portfolio_agent.tools.holdings_db import get_price_history
+    from web.data.performance import build_trend_series
+
+    series = build_trend_series(get_price_history())
+    out = curve_df.copy()
+    if not series["dates"] or not series["value"]:
+        out["portfolio_cum"] = None
+        return out
+    by_date = dict(zip(series["dates"], series["value"]))
+    base = _closest_close(by_date, out.iloc[0]["as_of_date"], direction="before") or next(iter(by_date.values()))
+    out["portfolio_cum"] = [
+        (_closest_close(by_date, d, direction="before") or base) / base if base else None
+        for d in out["as_of_date"]
+    ]
+    return out

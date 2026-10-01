@@ -91,7 +91,7 @@ with st.sidebar:
 
     def _is_higher_reasoning(model_name: str) -> bool:
         n = model_name.lower()
-        return "claude" in n or "gpt-4" in n
+        return "claude" in n or "gpt-4" in n or "gpt-5" in n or "o3" in n
 
     _all_model_names = _get_model_names()
     _higher_names = [m for m in _all_model_names if _is_higher_reasoning(m)]

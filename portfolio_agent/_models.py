@@ -25,14 +25,20 @@ Task → model mapping (in priority order):
             → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet  (paid last resort)
             Clearance, technical. Uses ADK tools.
 
-  analyst   Claude-Sonnet → GPT-4o → Claude-Haiku → Gemini-Flash → GPT-mini → Gemini-Flash-Lite
-            → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3 → OR-Mistral-Med-3.5 → Groq-70B
+  analyst   Claude-Sonnet → GPT-4o → GPT-5 → o3 → Claude-Haiku → Gemini-Flash → GPT-mini
+            → Gemini-Flash-Lite → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3
+            → OR-Mistral-Med-3.5 → Groq-70B
             Macro regime, risk synthesis. Uses ADK tools.
 
-  reasoning Claude-Sonnet → GPT-4o → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3 → Groq-70B
+  reasoning Claude-Sonnet → GPT-4o → GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max
+            → OR-Grok-4.3 → Groq-70B
             Interactive APEX chat (single-ticker). Daily batch APEX uses a separate
-            dual-run strategy: Claude-Sonnet + GPT-4o run in parallel, results are
-            merged; OR high-reasoning models are mid-tier fallbacks; Groq-70B is last resort.
+            dual-run strategy: two models are randomly picked each run from
+            {Claude-Sonnet, GPT-4o, GPT-5, o3} (see APEX_MODELS in apex_dual_run.py),
+            with the other as a single fallback; OR high-reasoning models are
+            mid-tier fallbacks here in the linear chain; Groq-70B is last resort.
+            o3 doesn't support temperature != 1 — call sites that may hit it pass
+            litellm's drop_params=True rather than special-casing the model.
 
 OpenRouter (OR): gateway to 300+ models via single key (OPENROUTER_API_KEY).
   High-reasoning (analyst/reasoning): OR-Claude-Opus-4.8, OR-Qwen3.7-Max, OR-Grok-4.3
@@ -60,6 +66,19 @@ from datetime import date
 # Suppress noisy LiteLLM "use Gemini directly" warnings
 os.environ.setdefault("ADK_SUPPRESS_GEMINI_LITELLM_WARNINGS", "true")
 
+import litellm
+# OpenAI's o-series reasoning models (o3 in the analyst/reasoning chains and
+# APEX_MODELS below) reject temperature != 1 outright — every other call site
+# in this codebase passes temperature=0.0 for determinism. Rather than special-
+# case every call site (the direct litellm.acompletion in apex_dual_run.py, and
+# every ADK LiteLlm-wrapped specialist call routed through this module's model
+# objects/chains), drop unsupported params globally: litellm silently strips
+# temperature (and anything else a given model doesn't support) instead of
+# raising UnsupportedParamsError. Safe for every other model already in these
+# chains — they all accept temperature=0.0 today, so nothing is actually dropped
+# for them.
+litellm.drop_params = True
+
 from google.adk.models.lite_llm import LiteLlm
 from portfolio_agent.log import get_logger as _get_logger
 _log = _get_logger("models")
@@ -74,6 +93,10 @@ _HAIKU             = "anthropic/claude-haiku-4-5-20251001"
 _SONNET            = "anthropic/claude-sonnet-4-6"
 _GPT_MINI          = "openai/gpt-4o-mini"   # cheap — same tier as Haiku / Groq-70B
 _GPT_4O            = "openai/gpt-4o"        # capable — same tier as Claude Sonnet
+_GPT_5             = "openai/gpt-5"         # high-reasoning — analyst/reasoning (APEX) tier only
+_O3                = "openai/o3"            # high-reasoning — analyst/reasoning (APEX) tier only;
+                                             # o-series doesn't support temperature != 1 — the
+                                             # dual-run/reasoning call sites pass drop_params=True
 
 # ── OpenRouter model IDs (prefix: openrouter/<provider>/<model>) ──────────────
 # High-reasoning — for analyst / reasoning (APEX) chains
@@ -187,6 +210,8 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
     "analyst": [
         (_SONNET,            "anthropic",   "Claude-Sonnet"),
         (_GPT_4O,            "openai",      "GPT-4o"),
+        (_GPT_5,             "openai",      "GPT-5"),
+        (_O3,                "openai",      "o3"),
         (_OR_CLAUDE_OPUS48,  "openrouter",  "OR-Claude-Opus-4.8"),
         (_OR_QWEN37_MAX,     "openrouter",  "OR-Qwen3.7-Max"),
         (_OR_GROK43,         "openrouter",  "OR-Grok-4.3"),
@@ -194,12 +219,15 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
     ],
     "reasoning": [
         # Used by the interactive APEX chat path (single-ticker linear failover).
-        # Daily batch APEX uses a dual-run strategy (see _run_daily_apex in main.py):
-        #   Claude-Sonnet + GPT-4o run in parallel → results merged;
-        #   OR high-reasoning models are mid-tier fallbacks.
+        # Daily batch APEX uses a separate dual-run strategy (see APEX_MODELS in
+        # apex_dual_run.py): two of {Claude-Sonnet, GPT-4o, GPT-5, o3} are randomly
+        # picked each run and merged, with the other as a single fallback;
+        # OR high-reasoning models are mid-tier fallbacks here in the linear chain.
         # Lower-end models (Haiku, Flash, Groq) intentionally excluded.
         (_SONNET,           "anthropic",   "Claude-Sonnet"),
         (_GPT_4O,           "openai",      "GPT-4o"),
+        (_GPT_5,            "openai",      "GPT-5"),
+        (_O3,               "openai",      "o3"),
         (_OR_CLAUDE_OPUS48, "openrouter",  "OR-Claude-Opus-4.8"),
         (_OR_QWEN37_MAX,    "openrouter",  "OR-Qwen3.7-Max"),
         (_OR_GROK43,        "openrouter",  "OR-Grok-4.3"),

@@ -30,7 +30,7 @@ sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 import streamlit as st
-from web.styles import inject_global_css, top_nav, icon_html, material, fmt_pct, fmt_money, section_tile
+from web.styles import inject_global_css, top_nav, material, fmt_pct, fmt_money, section_tile
 
 from web.auth import current_context, require_login
 
@@ -57,6 +57,9 @@ from web.data.validation import (
     _sell_call_outcomes,
     _calibration_headline,
     _signal_equity_curve,
+    equity_curve_date_span,
+    _add_index_benchmarks,
+    _add_portfolio_benchmark,
 )
 from web.components.validation_charts import (
     build_outcome_breakdown_chart,
@@ -86,61 +89,6 @@ with st.sidebar:
         index=1,
         format_func=lambda x: f"{x} days",
     )
-
-    st.divider()
-
-    # ── Model filter ─────────────────────────────────────────────────────────
-    st.markdown(
-        '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 8px">'
-        'Model filter</p>',
-        unsafe_allow_html=True,
-    )
-    def _is_higher_reasoning(model_name: str) -> bool:
-        # Substring match (not an exact-string set) so ensemble label variants —
-        # e.g. "Claude-Sonnet+GPT-4o" vs "Claude-Sonnet + GPT-4o" — and future
-        # GPT-4x releases are all still classified correctly.
-        n = model_name.lower()
-        return "claude" in n or "gpt-4" in n
-
-    _all_model_names = _get_model_names()
-    _higher_names = [m for m in _all_model_names if _is_higher_reasoning(m)]
-    _lower_names  = [m for m in _all_model_names if not _is_higher_reasoning(m)]
-
-    _radio_options = ["All models"]
-    if _higher_names:
-        _radio_options.append("Higher reasoning")
-    if _lower_names:
-        _radio_options.append("Lower reasoning")
-
-    _model_sel = st.selectbox(
-        "model_filter",
-        _radio_options,
-        index=0,
-        label_visibility="collapsed",
-        key="val_model_radio",
-    )
-
-    _GROUP_NAMES = {"Higher reasoning": _higher_names, "Lower reasoning": _lower_names}
-
-    if _model_sel == "All models":
-        _model_filter: list[str] | None = None
-        st.caption("All predictions — no model filter applied")
-    else:
-        _model_filter = _GROUP_NAMES[_model_sel]
-        _icon_name = "psychology" if _model_sel == "Higher reasoning" else "bolt"
-        st.caption(
-            f"{material(_icon_name)} {_model_sel} (GPT-4x / Claude)"
-            if _model_sel == "Higher reasoning" else f"{material(_icon_name)} {_model_sel}"
-        )
-        # Show individual names so the user knows what's included in the group
-        st.markdown(
-            '<div style="margin-top:4px">' +
-            "".join(
-                f'<div style="font-size:0.68rem;color:#6B7280;padding:1px 0">{icon_html(_icon_name, 12)} {m}</div>'
-                for m in _model_filter
-            ) + '</div>',
-            unsafe_allow_html=True,
-        )
 
     st.divider()
 
@@ -189,8 +137,6 @@ _SEG_ICONS = {
 }
 
 _active_filters: list[str] = []
-if _model_filter:
-    _active_filters.append(f"Model: {', '.join(f'`{m}`' for m in _model_filter)}")
 if _seg_sel != "My Tickers":
     _active_filters.append(f"Scope: **{_SEG_ICONS.get(_seg_sel, material('search'))} {_seg_sel}**")
 if _active_filters:
@@ -206,7 +152,7 @@ if _active_filters:
 from portfolio_agent.tools.validation_engine import get_calibration_data
 
 _cal_headline = _calibration_headline(
-    get_calibration_data(lookback_days=lookback, model_names=_model_filter).get("reliability", [])
+    get_calibration_data(lookback_days=lookback).get("reliability", [])
 )
 if _cal_headline:
     st.info(
@@ -224,7 +170,7 @@ else:
 
 # ── Shared per-horizon metrics (used by both Scorecard and Heatmap tabs) ──────
 
-metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+metrics = _compute_filtered_metrics(None, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
 by_horizon: dict[int, dict] = {}
 for row in metrics:
     h = row["horizon_days"]
@@ -260,8 +206,14 @@ with tabs[0]:
         _tile_1 = section_tile("Did This Actually Work?", expanded=True, key="validation_1")
         if _tile_1:
             with _tile_1:
+                _dtw_model_sel = st.multiselect(
+                    "Model", _get_model_names(), default=[],
+                    placeholder="All models — pick to narrow", key="dtw_model_filter",
+                )
+                _dtw_model_filter = _dtw_model_sel or None
+
                 eval_df = _load_evaluated_predictions_df(
-                    lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers
+                    lookback, _dtw_model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers
                 )
                 if not eval_df.empty:
                     _n_raw = len(eval_df)
@@ -314,9 +266,21 @@ with tabs[0]:
                 else:
                     st.caption("No evaluated SELL / STRONG_SELL calls yet.")
 
-                st.caption("If you'd mechanically followed every BUY / STRONG_BUY call, vs. SPY over the same windows")
+                st.caption(
+                    "If you'd mechanically followed every BUY / STRONG_BUY call, vs. SPY, Dow Jones, "
+                    "Nasdaq (each over the same per-call windows) and your own portfolio's actual performance"
+                )
                 curve_df = _signal_equity_curve(eval_df)
                 if not curve_df.empty:
+                    _span = equity_curve_date_span(curve_df)
+                    if _span:
+                        @st.cache_data(ttl=1800, show_spinner="Fetching Dow/Nasdaq…")
+                        def _cached_index_closes(start: str, end: str) -> dict[str, dict[str, float]]:
+                            from portfolio_agent.tools.yfinance_tools import get_closes_in_range
+                            return {s: get_closes_in_range(s, start, end) for s in ("^DJI", "^IXIC")}
+
+                        curve_df = _add_index_benchmarks(curve_df, _cached_index_closes(*_span))
+                    curve_df = _add_portfolio_benchmark(curve_df)
                     st.plotly_chart(build_signal_equity_curve_chart(curve_df), use_container_width=True)
                 else:
                     st.info("Not enough evaluated BUY / STRONG_BUY calls yet to plot a cumulative curve.", icon=material("info"))
@@ -374,9 +338,6 @@ with tabs[1]:
     from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
 
     preds = get_recent_evaluated_predictions(limit=500, lookback_days=lookback)
-    # Apply global model filter
-    if _model_filter and preds:
-        preds = [p for p in preds if p.get("model_name") in _model_filter]
     # Apply segment filter
     _my_set = set(_portfolio_tickers) | set(_watchlist_tickers)
     if _seg_sel == "My Tickers" and _my_set and preds:
@@ -391,8 +352,6 @@ with tabs[1]:
         preds = [p for p in preds if p.get("trigger_type") == "trending_opportunity"]
     if not preds:
         _no_pred_msg = "No evaluated predictions yet."
-        if _model_filter:
-            _no_pred_msg = f"No evaluated predictions for model(s): {', '.join(_model_filter)}"
         if _seg_sel != "All":
             _no_pred_msg += f" (scope: {_seg_sel})"
         st.info(_no_pred_msg, icon=material("info"))

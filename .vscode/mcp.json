@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "alpaca": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["alpaca-mcp-server"],
+      "env": {
+        "ALPACA_API_KEY": "PKUEZVZVIV2UDNCA4I4K6THVF6",
+        "ALPACA_SECRET_KEY": "2wxBsEtboLvXh9nzYkMQRNaLxQ6mjtzkGo2Sabx7GigM"
+      }
+    }
+  }
+}

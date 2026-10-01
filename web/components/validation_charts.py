@@ -825,7 +825,17 @@ def build_returns_by_recommendation_chart(data: list[dict]) -> go.Figure:
 
 
 def build_signal_equity_curve_chart(curve_df: pd.DataFrame) -> go.Figure:
-    """Cumulative return from mechanically following every BUY/STRONG_BUY call vs. SPY over the same windows."""
+    """
+    Cumulative return from mechanically following every BUY/STRONG_BUY call
+    vs. SPY over the same windows, plus optional extra comparison lines when
+    the corresponding column is present in curve_df (all added by
+    web.data.validation, all already normalized to 1.0 at call #1 so they
+    share the same y-axis):
+      dow_cum        Dow Jones (^DJI), same per-call windows as SPY
+      nasdaq_cum     Nasdaq (^IXIC), same per-call windows as SPY
+      portfolio_cum  the viewer's own recorded portfolio value, re-based to
+                     the curve's start date
+    """
     fig = go.Figure()
     hover_dates = curve_df["event_date"].dt.strftime("%Y-%m-%d")
 
@@ -842,6 +852,23 @@ def build_signal_equity_curve_chart(curve_df: pd.DataFrame) -> go.Figure:
         line=dict(color="#94A3B8", width=2, dash="dash"),
         hovertemplate="Call #%{x}<br>SPY cumulative: %{y:+.2f}%<extra></extra>",
     ))
+
+    _EXTRA_LINES = [
+        ("dow_cum",       "Dow Jones (same windows)", "#D97706", "dot"),
+        ("nasdaq_cum",    "Nasdaq (same windows)",     "#7C3AED", "dot"),
+        ("portfolio_cum", "My portfolio",              "#059669", "solid"),
+    ]
+    for col, label, color, dash in _EXTRA_LINES:
+        if col not in curve_df.columns or curve_df[col].isna().all():
+            continue
+        fig.add_trace(go.Scatter(
+            x=curve_df["call_num"], y=(curve_df[col] - 1) * 100,
+            mode="lines", name=label,
+            line=dict(color=color, width=2, dash=dash),
+            connectgaps=True,
+            hovertemplate=f"Call #%{{x}}<br>{label}: %{{y:+.2f}}%<extra></extra>",
+        ))
+
     fig.add_hline(y=0, line_color="#64748B", line_width=1, opacity=0.5)
     fig.update_layout(
         height=380,

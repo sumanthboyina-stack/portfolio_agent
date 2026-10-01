@@ -46,7 +46,7 @@ Copy `.env.example` to `.env` and fill in the values you want to use. Keys marke
 | Variable | Required | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | **Yes** | Claude models (Sonnet) for APEX predictions |
-| `OPENAI_API_KEY` | Recommended | GPT-4o for APEX predictions; APEX randomly selects between Claude Sonnet and GPT-4o each run |
+| `OPENAI_API_KEY` | Recommended | GPT-4o, GPT-5 and o3 for APEX predictions; APEX randomly picks 2 of {Claude Sonnet, GPT-4o, GPT-5, o3} each run |
 | `FRED_API_KEY` | Recommended | Macroeconomic data (rates, inflation, labor, credit). Free at [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 | `FINNHUB_API_KEY` | Recommended | Sell-side consensus, price targets, news, SEC filings. Free tier available at [finnhub.io](https://finnhub.io) |
 | `FINRA_API_KEY` | Recommended | Short interest data (FINRA Datasets API). Bearer token; twice-monthly pulls |

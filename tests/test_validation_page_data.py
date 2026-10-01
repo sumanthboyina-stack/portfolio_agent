@@ -34,6 +34,10 @@ from web.data.validation import (
     _outcome_breakdown,
     _returns_by_recommendation,
     _sell_call_outcomes,
+    _signal_equity_curve,
+    equity_curve_date_span,
+    _add_index_benchmarks,
+    _add_portfolio_benchmark,
 )
 
 
@@ -228,3 +232,77 @@ def test_load_watchlist_tickers_scopes_to_the_caller_not_every_owner():
 
     assert _load_watchlist_tickers(local_context("test")) == ["NVDA"]
     assert _load_watchlist_tickers(bob) == []
+
+
+# ── Equity curve: Dow/Nasdaq + portfolio comparison lines ────────────────────
+
+def _equity_curve_fixture() -> pd.DataFrame:
+    rows = [
+        {"ticker": "AAPL", "horizon_days": 5, "event_date": pd.Timestamp("2026-01-05"),
+         "recommendation": "BUY", "outcome": "strong_correct", "actual_return": 0.03, "excess_return": 0.01,
+         "as_of_date": "2026-01-01", "evaluation_date": "2026-01-08"},
+        {"ticker": "MSFT", "horizon_days": 5, "event_date": pd.Timestamp("2026-01-12"),
+         "recommendation": "BUY", "outcome": "wrong_minor", "actual_return": -0.01, "excess_return": -0.02,
+         "as_of_date": "2026-01-08", "evaluation_date": "2026-01-15"},
+    ]
+    return _signal_equity_curve(pd.DataFrame(rows))
+
+
+def test_signal_equity_curve_carries_call_windows_for_index_lookups():
+    curve = _equity_curve_fixture()
+    assert list(curve["as_of_date"]) == ["2026-01-01", "2026-01-08"]
+    assert list(curve["evaluation_date"]) == ["2026-01-08", "2026-01-15"]
+
+
+def test_equity_curve_date_span_covers_every_calls_window():
+    assert equity_curve_date_span(_equity_curve_fixture()) == ("2026-01-01", "2026-01-15")
+
+
+def test_equity_curve_date_span_none_when_curve_is_empty():
+    assert equity_curve_date_span(pd.DataFrame()) is None
+
+
+def test_add_index_benchmarks_computes_cumulative_return_over_each_calls_own_window():
+    curve = _equity_curve_fixture()
+    closes = {
+        "^DJI":  {"2026-01-01": 100.0, "2026-01-08": 102.0, "2026-01-15": 101.0},
+        "^IXIC": {"2026-01-01": 200.0, "2026-01-08": 210.0, "2026-01-15": 205.0},
+    }
+    out = _add_index_benchmarks(curve, closes)
+
+    # Call 1: DJI 100->102 = +2%; call 2: DJI 102->101 compounds onto that.
+    assert out["dow_cum"].iloc[0] == pytest.approx(1.02)
+    assert out["dow_cum"].iloc[1] == pytest.approx(1.02 * (101 / 102))
+    assert out["nasdaq_cum"].iloc[0] == pytest.approx(1.05)
+
+
+def test_add_index_benchmarks_handles_a_missing_symbol_gracefully():
+    curve = _equity_curve_fixture()
+    out = _add_index_benchmarks(curve, {"^DJI": {}})
+    assert out["dow_cum"].isna().all()
+    assert out["nasdaq_cum"].isna().all()
+
+
+def test_add_portfolio_benchmark_rebases_to_the_curves_start_date(monkeypatch):
+    import portfolio_agent.tools.holdings_db as hdb
+
+    def fake_get_price_history(*a, **kw):
+        return [
+            {"date": "2026-01-01", "broker": "fidelity", "account_number": "X1", "ticker": "AAPL",
+             "market_value": 1000.0, "cost_basis": 900.0, "source": "snapshot"},
+            {"date": "2026-01-08", "broker": "fidelity", "account_number": "X1", "ticker": "AAPL",
+             "market_value": 1050.0, "cost_basis": 900.0, "source": "snapshot"},
+        ]
+    monkeypatch.setattr(hdb, "get_price_history", fake_get_price_history)
+
+    out = _add_portfolio_benchmark(_equity_curve_fixture())
+    assert out["portfolio_cum"].iloc[0] == pytest.approx(1.0)     # baseline at the curve's own start
+    assert out["portfolio_cum"].iloc[1] == pytest.approx(1.05)    # 1050 / 1000
+
+
+def test_add_portfolio_benchmark_empty_when_no_recorded_history(monkeypatch):
+    import portfolio_agent.tools.holdings_db as hdb
+    monkeypatch.setattr(hdb, "get_price_history", lambda *a, **kw: [])
+
+    out = _add_portfolio_benchmark(_equity_curve_fixture())
+    assert out["portfolio_cum"].isna().all()
