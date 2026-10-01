@@ -248,7 +248,7 @@ with tabs[0]:
                 st.divider()
 
                 st.subheader("Directional Accuracy — Rolling Average")
-                st.caption("Rolling % of predictions where predicted direction matched actual direction. 50% = random baseline.")
+                st.caption("Rolling % of predictions where predicted direction matched actual direction (3 classes: UP / DOWN / FLAT). Compare against the naive baselines on the Validation page's “Baselines & sample size” section — there is no fixed random line.")
                 fig_dir = build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
                                                              H_COLORS, H_LABELS, show_aggregate=show_aggregate)
                 st.plotly_chart(fig_dir, use_container_width=True)

@@ -60,6 +60,7 @@ from web.data.validation import (
     equity_curve_date_span,
     _add_index_benchmarks,
     _add_portfolio_benchmark,
+    build_horizon_reports,
 )
 from web.components.validation_charts import (
     build_outcome_breakdown_chart,
@@ -70,7 +71,7 @@ from web.components.validation_charts import (
     _METRIC_CFG,
     OUTCOME_LABELS,
 )
-from web.components.validation_cards import _render_scorecard_tiles
+from web.components.validation_cards import _render_scorecard_tiles, render_baselines_section
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -180,6 +181,36 @@ for row in metrics:
 horizon_labels = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
 all_horizons = [h for h in [5, 21, 63, 250] if h in by_horizon] + \
                [h for h in sorted(by_horizon) if h not in [5, 21, 63, 250]]
+
+# ── Baselines / skill / effective sample size, per horizon ────────────────────
+# Same rows as the tiles above: same lookback + scope, all models. Prior-window
+# baselines (SPY, momentum) need one price fetch per ticker, so a big scope
+# (e.g. "All") asks first instead of fetching hundreds of tickers on every load.
+
+_PRICE_AUTO_MAX_TICKERS = 60
+_reports: dict[int, dict] = {}
+_horizon_baselines: dict[int, float] = {}
+if metrics:
+    _base_df = _load_evaluated_predictions_df(lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+    _n_tickers = int(_base_df["ticker"].nunique()) if not _base_df.empty else 0
+    _use_prices = _n_tickers <= _PRICE_AUTO_MAX_TICKERS
+    if not _use_prices:
+        _use_prices = st.sidebar.toggle(
+            "Price-based baselines",
+            value=False,
+            key="val_price_baselines",
+            help=f"Momentum and SPY-prior-window baselines need price history for each of the {_n_tickers} "
+                 "tickers in this scope (cached for 30 min). Off = those two baselines show as unavailable.",
+        )
+    try:
+        _reports = build_horizon_reports(_base_df, use_prices=_use_prices)
+    except Exception as _exc:   # never let the yardstick take the page down
+        st.warning(f"Baselines unavailable: {_exc}", icon=material("warning"))
+        _reports = {}
+    _horizon_baselines = {
+        h: r["comparison"]["best_baseline"]["accuracy"]
+        for h, r in _reports.items() if r["comparison"].get("best_baseline")
+    }
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
@@ -291,7 +322,11 @@ with tabs[0]:
         if _tile_2:
             with _tile_2:
                 st.caption("Hover any tile for the full definition, performance tiers, and reference values.")
-                _render_scorecard_tiles(by_horizon, all_horizons, horizon_labels)
+                _render_scorecard_tiles(
+                    by_horizon, all_horizons, horizon_labels, reports=_reports,
+                    after_horizon=lambda h: render_baselines_section(
+                        _reports.get(h), horizon_labels.get(h, f"{h}d")),
+                )
 
 
                 # ── Raw values table ──────────────────────────────────────────────────
@@ -303,6 +338,7 @@ with tabs[0]:
                     row  = by_horizon[h_days]
                     hlbl = horizon_labels.get(h_days, f"{h_days}d")
                     n    = row.get("num_predictions") or 0
+                    _five = ((_reports.get(h_days) or {}).get("probability") or {}).get("five")
                     raw_rows.append({
                         "Horizon":           hlbl,
                         "Evaluated Preds":   f"{n} ⚠" if n < 30 else n,
@@ -311,8 +347,10 @@ with tabs[0]:
                         "Excess Return":  fmt_pct(row["mean_excess_return"]*100, signed=True)  if row.get("mean_excess_return")     is not None else "—",
                         "Hi-Conv Acc":    fmt_pct(row["high_conviction_accuracy"]*100) if row.get("high_conviction_accuracy") is not None else "—",
                         "Lo-Conv Acc":    fmt_pct(row["low_conviction_accuracy"]*100)  if row.get("low_conviction_accuracy")  is not None else "—",
-                        "Brier Score":    f"{row['brier_score']:.2f}"                if row.get("brier_score")            is not None else "—",
-                        "Log-Loss":       f"{row['mean_log_loss']:.2f}"              if row.get("mean_log_loss")           is not None else "—",
+                        "Brier (UP vs not-UP)":    f"{row['brier_score']:.3f}"   if row.get("brier_score")  is not None else "—",
+                        "Log-Loss (UP vs not-UP)": f"{row['mean_log_loss']:.3f}" if row.get("mean_log_loss") is not None else "—",
+                        "Brier (5-bucket)":    f"{_five['brier']:.3f}"    if _five else "—",
+                        "Log-Loss (5-bucket)": f"{_five['log_loss']:.3f}" if _five else "—",
                     })
                 st.dataframe(
                     pd.DataFrame(raw_rows),
@@ -326,8 +364,10 @@ with tabs[0]:
                         "Excess Return":   st.column_config.Column(help=_METRIC_CFG["mean_excess_return"]["defn"]),
                         "Hi-Conv Acc":     st.column_config.Column(help=_METRIC_CFG["high_conviction_accuracy"]["defn"]),
                         "Lo-Conv Acc":     st.column_config.Column(help=_METRIC_CFG["low_conviction_accuracy"]["defn"]),
-                        "Brier Score":     st.column_config.Column(help=_METRIC_CFG["brier_score"]["defn"]),
-                        "Log-Loss":        st.column_config.Column(help=_METRIC_CFG["mean_log_loss"]["defn"]),
+                        "Brier (UP vs not-UP)":    st.column_config.Column(help=_METRIC_CFG["brier_score"]["defn"]),
+                        "Log-Loss (UP vs not-UP)": st.column_config.Column(help=_METRIC_CFG["mean_log_loss"]["defn"]),
+                        "Brier (5-bucket)":        st.column_config.Column(help=_METRIC_CFG["brier_5bucket"]["defn"]),
+                        "Log-Loss (5-bucket)":     st.column_config.Column(help=_METRIC_CFG["logloss_5bucket"]["defn"]),
                     },
                 )
 # ── Tab 2: Prediction History — promoted right after Scorecard; once scoped
@@ -560,6 +600,6 @@ with tabs[3]:
                 )
             else:
                 st.plotly_chart(
-                    build_horizon_reliability_chart(by_horizon, all_horizons, horizon_labels),
+                    build_horizon_reliability_chart(by_horizon, all_horizons, horizon_labels, _horizon_baselines),
                     use_container_width=True,
                 )

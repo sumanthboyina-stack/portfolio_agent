@@ -4,6 +4,7 @@ Validation dashboard Plotly chart builders + tier-coloring helpers.
 Contains:
   - _METRIC_CFG, _H_COLORS, _H_LABELS, _TILE_CSS : scorecard tile config/constants
   - _get_tier                        : metric value -> (tier_label, hex_color)
+  - relative_accuracy_tier / skill_tier : baseline-relative tiers (accuracy vs best naive baseline; Brier/log-loss skill)
   - _brier_tier                      : brier score -> (tier_label, hex_color)
   - build_brier_trend_chart          : per-prediction Brier score + rolling avg
   - build_logloss_trend_chart        : per-prediction log-loss + rolling avg
@@ -37,23 +38,36 @@ import plotly.graph_objects as go
 
 # ── Metric config: definitions, tiers, scale ──────────────────────────────────
 
+ACC_NEAR_PTS = 0.02          # within +/- 2 pts of the best baseline counts as "near"
+
+# Tiers for accuracy tiles are relative to the best naive baseline measured on
+# the SAME rows (see validation_metrics.compare_predictors), not a fixed 50%:
+# direction is 3-class (UP/DOWN/FLAT), so there is no universal "random" line.
+_REL_ACC_TIERS = [
+    (None, "#059669", "Above best baseline  (> +2 pts)"),
+    (None, "#EAB308", "Near baseline  (within ±2 pts)"),
+    (None, "#EF4444", "Below best baseline  (< −2 pts)"),
+]
+_REL_ACC_NOTE = "Compared against the best naive baseline on the same rows (see Baselines & sample size)."
+# Brier / log-loss tiles are relative to the sample's own base-rate forecast.
+_SKILL_TIERS = [
+    (None, "#059669", "Clear skill  (≥ +10% vs base rate)"),
+    (None, "#22C55E", "Some skill  (+2% to +10%)"),
+    (None, "#EAB308", "≈ Base rate  (within ±2%)"),
+    (None, "#EF4444", "Worse than base rate  (< −2%)"),
+]
+
 # Each entry: key → (display_label, higher_better, bar_max, bar_min, format_fn, definition, tier_table)
-# bar values are normalized to 0–100 scale so all bars are visually comparable.
-# Brier/Log-Loss are inverted: bar = (1 − val/bar_max) × 100 so higher bar = better.
+# `relative` = "accuracy" | "skill": tier comes from baseline context, not fixed thresholds.
 _METRIC_CFG = {
     "directional_accuracy": dict(
         label="Directional Accuracy",
         higher=True, bar_max=1.0, bar_min=0.0,
         fmt=lambda v: f"{v*100:.2f}%",
-        defn="% of predictions where the model's UP / DOWN / FLAT direction matched the actual market move.",
-        tiers=[
-            (0.75, "#059669", "Exceptional  (≥ 75%)"),
-            (0.65, "#22C55E", "Strong skill  (65 – 75%)"),
-            (0.55, "#EAB308", "Mild signal   (55 – 65%)"),
-            (0.50, "#F97316", "Random        (50 – 55%)"),
-            (0.00, "#EF4444", "Below random  (< 50%)"),
-        ],
-        ref=0.5, ref_label="50% random baseline",
+        defn="% of predictions where the model's UP / DOWN / FLAT direction matched the actual market move "
+             "(3 classes, FLAT = within ±1%).",
+        tiers=_REL_ACC_TIERS, relative="accuracy",
+        ref=None, ref_label=_REL_ACC_NOTE,
     ),
     "in_range_pct": dict(
         label="In-Range %",
@@ -88,56 +102,54 @@ _METRIC_CFG = {
         higher=True, bar_max=1.0, bar_min=0.0,
         fmt=lambda v: f"{v*100:.2f}%",
         defn="Directional accuracy for predictions with conviction score ≥ 7/10. High-conviction calls should outperform average.",
-        tiers=[
-            (0.75, "#059669", "Exceptional  (≥ 75%)"),
-            (0.65, "#22C55E", "Strong skill  (65 – 75%)"),
-            (0.58, "#EAB308", "Mild edge     (58 – 65%)"),
-            (0.50, "#F97316", "No edge       (50 – 58%)"),
-            (0.00, "#EF4444", "Overconfident (< 50%)"),
-        ],
-        ref=0.5, ref_label="50% random baseline",
+        tiers=_REL_ACC_TIERS, relative="accuracy",
+        ref=None, ref_label=_REL_ACC_NOTE + " (horizon-wide baseline, not re-cut by conviction.)",
     ),
     "low_conviction_accuracy": dict(
         label="Lo-Conv Accuracy  (< 7/10)",
         higher=True, bar_max=1.0, bar_min=0.0,
         fmt=lambda v: f"{v*100:.2f}%",
-        defn="Directional accuracy for predictions with conviction score < 7/10. Low-conviction should be closer to random.",
-        tiers=[
-            (0.70, "#059669", "Exceptional  (≥ 70%)"),
-            (0.60, "#22C55E", "Skill        (60 – 70%)"),
-            (0.55, "#EAB308", "Mild signal  (55 – 60%)"),
-            (0.50, "#F97316", "Random       (50 – 55%)"),
-            (0.00, "#EF4444", "Below random (< 50%)"),
-        ],
-        ref=0.5, ref_label="50% random baseline",
+        defn="Directional accuracy for predictions with conviction score < 7/10.",
+        tiers=_REL_ACC_TIERS, relative="accuracy",
+        ref=None, ref_label=_REL_ACC_NOTE + " (horizon-wide baseline, not re-cut by conviction.)",
     ),
     "brier_score": dict(
-        label="Brier Score  ↓ lower = better",
+        label="Brier (UP vs not-UP)  ↓ lower = better",
         higher=False, bar_max=0.30, bar_min=0.0,
-        fmt=lambda v: f"{v:.2f}",
-        defn="Mean squared error of probability forecasts across 5 return buckets (▼▼ / ▼ / → / ▲ / ▲▲). Perfect = 0.0 · Coin flip = 0.25.",
-        tiers=[
-            (0.15, "#059669", "Exceptional     (< 0.15)"),
-            (0.18, "#22C55E", "Genuine skill   (0.15 – 0.18)"),
-            (0.20, "#EAB308", "Mild edge       (0.18 – 0.20)"),
-            (0.25, "#F97316", "Near coin flip  (0.20 – 0.25)"),
-            (99,   "#EF4444", "Actively bad    (> 0.25)"),
-        ],
-        ref=0.25, ref_label="0.25 coin-flip ceiling",
+        fmt=lambda v: f"{v:.3f}",
+        defn="BINARY Brier: mean squared error of P(UP) = P(moderate up)+P(strong up) against 1 if the return "
+             "ended above +1%, else 0 (flat and down both count as not-UP). Perfect = 0. The baseline is "
+             "forecasting this sample's own UP rate p every time: p(1−p) — 0.25 only if exactly 50% went up.",
+        tiers=_SKILL_TIERS, relative="skill", prob="binary", metric="brier",
+        ref=None, ref_label="",
     ),
     "mean_log_loss": dict(
-        label="Log-Loss  ↓ lower = better",
+        label="Log-loss (UP vs not-UP)  ↓ lower = better",
         higher=False, bar_max=1.0, bar_min=0.0,
-        fmt=lambda v: f"{v:.2f}",
-        defn="Cross-entropy loss. Penalises overconfident wrong predictions more than Brier. Perfect = 0.0 · Coin flip ≈ 0.693.",
-        tiers=[
-            (0.30,  "#059669", "Excellent    (< 0.30)"),
-            (0.50,  "#22C55E", "Good signal  (0.30 – 0.50)"),
-            (0.693, "#EAB308", "Marginal     (0.50 – 0.693)"),
-            (1.0,   "#F97316", "Coin-flip    (0.693 – 1.0)"),
-            (99,    "#EF4444", "Overconfident / wrong  (> 1.0)"),
-        ],
-        ref=0.693, ref_label="0.693 coin-flip baseline",
+        fmt=lambda v: f"{v:.3f}",
+        defn="BINARY cross-entropy on the same UP-vs-not-UP event as the Brier tile; penalises confident misses harder. "
+             "Perfect = 0. The baseline is the binary entropy of this sample's UP rate (ln 2 ≈ 0.693 only at 50%).",
+        tiers=_SKILL_TIERS, relative="skill", prob="binary", metric="log_loss",
+        ref=None, ref_label="",
+    ),
+    "brier_5bucket": dict(
+        label="Brier (5-bucket)  ↓ lower = better",
+        higher=False, bar_max=1.0, bar_min=0.0,
+        fmt=lambda v: f"{v:.3f}",
+        defn="Multiclass Brier over the five return buckets (▼▼ / ▼ / → / ▲ / ▲▲): Σ(pₖ − oₖ)², where oₖ = 1 for the "
+             "bucket the return landed in. Range 0–2, perfect = 0. Baseline = forecasting this sample's bucket "
+             "frequencies qₖ every time: Σ qₖ(1−qₖ).",
+        tiers=_SKILL_TIERS, relative="skill", prob="five", metric="brier",
+        ref=None, ref_label="", source="report",
+    ),
+    "logloss_5bucket": dict(
+        label="Log-loss (5-bucket)  ↓ lower = better",
+        higher=False, bar_max=3.0, bar_min=0.0,
+        fmt=lambda v: f"{v:.3f}",
+        defn="−ln(probability given to the bucket that happened), probability floored at 1e-6. Baseline = entropy "
+             "of this sample's bucket frequencies.",
+        tiers=_SKILL_TIERS, relative="skill", prob="five", metric="log_loss",
+        ref=None, ref_label="", source="report",
     ),
 }
 
@@ -185,8 +197,12 @@ _TILE_CSS = """
 
 
 def _get_tier(key: str, val: float) -> tuple[str, str]:
-    """Return (label, hex_color) for the tier this value falls into."""
+    """Return (label, hex_color) for the tier this value falls into. Relative
+    metrics (cfg["relative"]) have no fixed thresholds -- use
+    relative_accuracy_tier()/skill_tier() with their baseline instead."""
     cfg = _METRIC_CFG[key]
+    if cfg.get("relative"):
+        return "No baseline", "#64748B"
     if cfg["higher"]:
         for threshold, color, label in cfg["tiers"]:
             if val >= threshold:
@@ -196,6 +212,28 @@ def _get_tier(key: str, val: float) -> tuple[str, str]:
             if val <= threshold:
                 return label, color
     return cfg["tiers"][-1][2], cfg["tiers"][-1][1]
+
+
+def relative_accuracy_tier(acc: float, best_baseline: float | None) -> tuple[str, str]:
+    """(label, color) for an accuracy vs the best naive baseline on the same rows."""
+    if acc is None or best_baseline is None:
+        return "No baseline", "#64748B"
+    gap = acc - best_baseline
+    if gap > ACC_NEAR_PTS:
+        return _REL_ACC_TIERS[0][2], _REL_ACC_TIERS[0][1]
+    if gap >= -ACC_NEAR_PTS:
+        return _REL_ACC_TIERS[1][2], _REL_ACC_TIERS[1][1]
+    return _REL_ACC_TIERS[2][2], _REL_ACC_TIERS[2][1]
+
+
+def skill_tier(skill: float | None) -> tuple[str, str]:
+    """(label, color) for a Brier / log-loss skill score (1 − score/baseline)."""
+    if skill is None:
+        return "No baseline", "#64748B"
+    for floor, (_, color, label) in zip((0.10, 0.02, -0.02), _SKILL_TIERS):
+        if skill >= floor:
+            return label, color
+    return _SKILL_TIERS[3][2], _SKILL_TIERS[3][1]
 
 
 def _brier_tier(b):
@@ -381,12 +419,17 @@ def build_logloss_trend_chart(fdf, horizons_present, horizon_sel, roll_window, r
 
 
 def build_directional_accuracy_chart(fdf, horizons_present, horizon_sel, roll_window, rolling_df,
-                                      h_colors, h_labels, show_aggregate: bool = True) -> go.Figure:
+                                      h_colors, h_labels, show_aggregate: bool = True,
+                                      baselines: dict | None = None) -> go.Figure:
+    """`baselines`: optional {horizon_days: best naive baseline accuracy}, drawn as a dotted line per
+    horizon. There is no fixed "random" line: direction is 3-class, so chance depends on the class mix."""
     fig_dir = go.Figure()
-    fig_dir.add_hline(
-        y=0.5, line_dash="dot", line_color="#EF4444", opacity=0.6,
-        annotation_text="50% baseline (random)", annotation_font_size=10,
-    )
+    for h, b in (baselines or {}).items():
+        if h in horizon_sel and b is not None:
+            fig_dir.add_hline(
+                y=b, line_dash="dot", line_color=h_colors.get(int(h), "#64748B"), opacity=0.6,
+                annotation_text=f"{h_labels.get(int(h), f'{int(h)}d')} best baseline", annotation_font_size=10,
+            )
     fig_dir.add_hline(
         y=0.6, line_dash="dot", line_color="#16A34A", opacity=0.4,
         annotation_text="60% target", annotation_font_size=10,
@@ -616,11 +659,6 @@ def build_conviction_calibration_chart(conviction_cal: list[dict]) -> go.Figure:
         name="Perfect calibration",
     ))
     fig2.add_trace(go.Scatter(
-        x=[0, 10], y=[0.5, 0.5],
-        mode="lines", line=dict(color="#EF4444", dash="dot", width=1),
-        name="50% random baseline",
-    ))
-    fig2.add_trace(go.Scatter(
         x=[d["mid"] for d in conviction_cal],
         y=[d["accuracy"] for d in conviction_cal],
         mode="lines+markers+text",
@@ -689,11 +727,6 @@ def build_drift_accuracy_chart(drift_5d: list[dict]) -> go.Figure:
     accs  = [d["accuracy"] for d in drift_5d]
     ns    = [d["n"] for d in drift_5d]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=dates, y=[0.5]*len(dates),
-        mode="lines", line=dict(color="#EF4444", dash="dot"),
-        name="50% baseline",
-    ))
     fig.add_trace(go.Scatter(
         x=dates, y=accs,
         mode="lines+markers",
@@ -904,16 +937,21 @@ def build_score_vs_returns_chart(report: dict, score_labels: dict) -> go.Figure:
     return fig
 
 
-def build_horizon_reliability_chart(by_horizon: dict, all_horizons: list, horizon_labels: dict) -> go.Figure:
-    """Simplified 'which time horizon is more reliable' bar — directional accuracy per horizon, no segment breakdown.
-    Flags any bar backed by fewer than ~30 evaluated calls, so a short hot
-    streak doesn't read as a settled, reliable accuracy number."""
+def build_horizon_reliability_chart(by_horizon: dict, all_horizons: list, horizon_labels: dict,
+                                    baselines: dict | None = None) -> go.Figure:
+    """Directional accuracy per horizon, no segment breakdown. `baselines` is an optional
+    {horizon_days: best naive baseline accuracy}: bars are coloured against it (green above, amber
+    within ±2 pts, red below) and the baseline is drawn as a marker. Without baselines, bars are
+    neutral -- there is no fixed "random" line for a 3-class direction call. Flags any bar backed by
+    fewer than ~30 evaluated calls, so a short hot streak doesn't read as a settled accuracy."""
+    baselines = baselines or {}
     labels = [horizon_labels.get(h, f"{h}d") for h in all_horizons]
     accs   = [by_horizon[h].get("directional_accuracy") for h in all_horizons]
     ns     = [by_horizon[h].get("num_predictions") or 0 for h in all_horizons]
     colors = [
-        "#059669" if (a or 0) >= 0.55 else "#EAB308" if (a or 0) >= 0.50 else "#EF4444"
-        for a in accs
+        relative_accuracy_tier(a, baselines.get(h))[1] if (a is not None and baselines.get(h) is not None)
+        else "#94A3B8"
+        for a, h in zip(accs, all_horizons)
     ]
 
     def _bar_text(a, n) -> str:
@@ -927,14 +965,21 @@ def build_horizon_reliability_chart(by_horizon: dict, all_horizons: list, horizo
         marker_color=colors,
         text=[_bar_text(a, n) for a, n in zip(accs, ns)],
         textposition="outside",
+        name="APEX",
     ))
-    fig.add_hline(y=50, line_dash="dot", line_color="#94A3B8",
-                  annotation_text="50% random baseline", annotation_font_size=10)
+    known = [(l, baselines[h]) for l, h in zip(labels, all_horizons) if baselines.get(h) is not None]
+    if known:
+        fig.add_trace(go.Scatter(
+            x=[l for l, _ in known], y=[b * 100 for _, b in known], mode="markers",
+            marker=dict(symbol="line-ew", size=38, line=dict(width=3, color="#0F172A")),
+            name="Best naive baseline",
+            hovertemplate="%{x}: best baseline %{y:.2f}%<extra></extra>",
+        ))
     fig.update_layout(
         height=340,
         yaxis=dict(title="Directional Accuracy (%)", range=[0, 100], gridcolor="#F1F5F9"),
         margin=dict(t=30, b=40, l=50, r=20),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        showlegend=False,
+        showlegend=bool(known),
     )
     return fig

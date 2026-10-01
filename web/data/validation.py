@@ -14,6 +14,8 @@ Contains:
   - _outcome_breakdown           : outcome bucket counts (raw + unique-streak)
   - _returns_by_recommendation   : avg realized return per recommendation bucket (raw + unique-streak)
   - _sell_call_outcomes          : did SELL/STRONG_SELL calls avoid losses
+  - load_price_history           : cached bulk close fetch for the prior-window baselines
+  - build_horizon_reports        : per-horizon baselines / skill / effective-N (validation_metrics)
   - _signal_equity_curve         : cumulative "followed the BUY calls" vs SPY curve
   - equity_curve_date_span       : date range to bulk-fetch/cache index closes over
   - _add_index_benchmarks        : + Dow/Nasdaq cumulative return, same per-call windows as SPY
@@ -310,8 +312,11 @@ def _load_evaluated_predictions_df(
     with sqlite3.connect(str(_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(f"""
-            SELECT as_of_date, evaluation_date, evaluated_at, ticker, horizon_days,
-                   recommendation, outcome, actual_return, excess_return,
+            SELECT id, as_of_date, evaluation_date, evaluated_at, ticker, horizon_days,
+                   recommendation, outcome, actual_return, excess_return, benchmark_return,
+                   predicted_direction, actual_direction,
+                   predicted_return_low, predicted_return_high,
+                   p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                    conviction_score, composite_score, trigger_type, model_name
             FROM predictions
             {where}
@@ -387,6 +392,82 @@ def _returns_by_recommendation(df: pd.DataFrame) -> list[dict]:
             "streak_n": int(streak_n),
         })
     return out
+
+
+_PRICE_TTL_SECONDS = 1800
+_price_cache: dict[tuple[str, str, str], tuple[float, dict[str, float]]] = {}
+
+
+def load_price_history(
+    requests: dict[str, tuple[str, str]],
+    fetch=None,
+    now=None,
+) -> dict[str, dict[str, float]]:
+    """
+    {symbol: {date_iso: close}} for {symbol: (start, end)}, fetched once per
+    symbol via yfinance_tools.get_closes_in_range and cached in-process for
+    30 minutes (the cache outlives Streamlit reruns and sessions). A failed or
+    empty fetch yields {} for that symbol -- the baselines that need it are
+    then reported as unavailable rather than raising. `fetch`/`now` are
+    injectable for tests.
+    """
+    import time
+
+    if fetch is None:
+        from portfolio_agent.tools.yfinance_tools import get_closes_in_range as fetch
+    now = time.time() if now is None else now
+    out: dict[str, dict[str, float]] = {}
+    todo: dict[str, tuple[str, str]] = {}
+    for sym, (start, end) in requests.items():
+        hit = _price_cache.get((sym, start, end))
+        if hit and now - hit[0] < _PRICE_TTL_SECONDS:
+            out[sym] = hit[1]
+        else:
+            todo[sym] = (start, end)
+
+    def _one(item):
+        sym, (start, end) = item
+        try:
+            return sym, (fetch(sym, start, end) or {})
+        except Exception:
+            return sym, {}
+
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(todo))) as pool:
+            for sym, closes in pool.map(_one, todo.items()):
+                if closes:               # don't cache failures
+                    _price_cache[(sym, *todo[sym])] = (now, closes)
+                out[sym] = closes
+    return out
+
+
+def build_horizon_reports(df: pd.DataFrame, fetch=None, use_prices: bool = True) -> dict[int, dict]:
+    """
+    {horizon_days: validation_metrics.horizon_report(...)} for an evaluated-
+    predictions frame (see _load_evaluated_predictions_df). Horizons are never
+    mixed. streak_n uses _add_streak_ids on that horizon's rows, the same
+    streak logic as the rest of this page. use_prices=False skips the price
+    fetch (prior-window baselines then show as unavailable); price data
+    failures degrade the same way; an empty frame yields {}.
+    """
+    from portfolio_agent.tools import validation_metrics as vm
+
+    if df is None or df.empty or "horizon_days" not in df.columns:
+        return {}
+    reports: dict[int, dict] = {}
+    for h, sub in df.dropna(subset=["horizon_days"]).groupby("horizon_days"):
+        sub = sub.reset_index(drop=True)
+        streaked = _add_streak_ids(sub)
+        streak_n = int(streaked["streak_id"].nunique()) if "streak_id" in streaked.columns else None
+        closes: dict = {}
+        if use_prices:
+            try:
+                closes = load_price_history(vm.price_requests(sub), fetch=fetch)
+            except Exception:
+                closes = {}
+        reports[int(h)] = vm.horizon_report(sub, closes, streak_n=streak_n)
+    return reports
 
 
 def _sell_call_outcomes(df: pd.DataFrame, sell_recs: tuple[str, ...] = ("SELL", "STRONG_SELL")) -> dict:
