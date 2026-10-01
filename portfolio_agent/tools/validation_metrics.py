@@ -552,6 +552,14 @@ def auc_vs_beat_spy(d: pd.DataFrame, score: pd.Series, n_boot: int, rng, min_row
     return out
 
 
+def rank_ic_by_date(d: pd.DataFrame, score: pd.Series, min_rows: int = MIN_CS_ROWS) -> dict[str, float]:
+    """{as_of_date: Spearman(score, excess_return)} over the names scored that day; dates with fewer
+    than min_rows names, or a constant side, are omitted. The series rank_ic() averages."""
+    x = d.assign(_s=score)
+    x = x[x["_s"].notna() & x["excess_return"].notna()]
+    return _per_date_stat(x, lambda g: spearman(g["_s"].to_numpy(), g["excess_return"].to_numpy()), min_rows)
+
+
 def rank_ic(d: pd.DataFrame, score: pd.Series, n_boot: int, rng, min_rows: int = MIN_CS_ROWS) -> dict:
     """Daily cross-sectional Spearman correlation between `score` and
     excess_return, averaged over dates (equal weight; dates with fewer than
@@ -559,10 +567,82 @@ def rank_ic(d: pd.DataFrame, score: pd.Series, n_boot: int, rng, min_rows: int =
     x = d.assign(_s=score)
     x = x[x["_s"].notna() & x["excess_return"].notna()]
     n_dates_all = int(_date_keys(x).nunique()) if len(x) else 0
-    per_date = _per_date_stat(x, lambda g: spearman(g["_s"].to_numpy(), g["excess_return"].to_numpy()), min_rows)
+    per_date = rank_ic_by_date(d, score, min_rows)
     out = _mean_over_dates(per_date, n_boot, rng)
     out["n_dates_dropped"] = n_dates_all - out["n_dates"]
     out["n_rows"] = int(sum(len(g) for k, g in x.groupby(_date_keys(x)) if k in per_date))
+    return out
+
+
+def group_excess_contrast(d: pd.DataFrame, in_a: pd.Series, n_boot: int, rng) -> dict:
+    """
+    Mean excess_return of group A (rows where `in_a` is True) minus group B (every other row of `d`),
+    with a date-block bootstrap CI (whole as_of_dates resampled). Same resampling as label_excess(), for
+    an arbitrary split such as BUY / STRONG_BUY ratings vs the rest. diff is None when either side is empty.
+    """
+    x = d[d["excess_return"].notna()]
+    a_mask = in_a.reindex(x.index).fillna(False).to_numpy(dtype=bool)
+    keys = sorted(_date_keys(x).unique()) if len(x) else []
+    out = {"mean_a": None, "mean_b": None, "diff": None, "ci_low": None, "ci_high": None,
+           "n_a": int(a_mask.sum()), "n_b": int((~a_mask).sum()), "n_dates": len(keys)}
+    if not len(x) or out["n_a"] == 0 or out["n_b"] == 0:
+        return out
+    kidx = {k: i for i, k in enumerate(keys)}
+    di = _date_keys(x).map(kidx).to_numpy()
+    ex = x["excess_return"].to_numpy(dtype=float)
+    w = rng.multinomial(len(keys), [1 / len(keys)] * len(keys), size=n_boot).astype(float)
+    means = []
+    for m in (a_mask, ~a_mask):
+        sums = np.bincount(di[m], weights=ex[m], minlength=len(keys))
+        cnts = np.bincount(di[m], minlength=len(keys)).astype(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            means.append((w @ sums) / (w @ cnts))
+    out["mean_a"], out["mean_b"] = float(ex[a_mask].mean()), float(ex[~a_mask].mean())
+    out["diff"] = out["mean_a"] - out["mean_b"]
+    out["ci_low"], out["ci_high"] = _ci(means[0] - means[1])
+    return out
+
+
+def five_bucket_skill_ci(d: pd.DataFrame, n_boot: int, rng) -> dict:
+    """
+    5-bucket Brier skill score (1 - APEX Brier / climatology Brier, the same quantity as
+    probability_baselines()["five"]["brier_skill"]) with a date-block bootstrap CI. The climatology
+    baseline is recomputed from each resample's own bucket frequencies. Per-row Brier comes from
+    brier_5bucket(); buckets from actual_return_bucket().
+    """
+    out = {"skill": None, "ci_low": None, "ci_high": None, "n": 0, "n_dates": 0}
+    if d is None or d.empty or not set(P_COLUMNS) <= set(d.columns) or "actual_return" not in d.columns:
+        return out
+    x = d[d["actual_return"].notna() & d[P_COLUMNS].notna().all(axis=1)]
+    rec, keep = [], []
+    for i, r in zip(x.index, x[P_COLUMNS + ["actual_return"]].to_dict("records")):
+        b = brier_5bucket(r, float(r["actual_return"]))
+        if b is not None:
+            rec.append((b, _BUCKET_NAMES.index(actual_return_bucket(float(r["actual_return"])))))
+            keep.append(i)
+    if not rec:
+        return out
+    x = x.loc[keep]
+    keys = sorted(_date_keys(x).unique())
+    kidx = {k: i for i, k in enumerate(keys)}
+    di = _date_keys(x).map(kidx).to_numpy()
+    brier = np.array([b for b, _ in rec]); bucket = np.array([k for _, k in rec])
+    sums = np.bincount(di, weights=brier, minlength=len(keys))
+    cnts = np.bincount(di, minlength=len(keys)).astype(float)
+    bcnt = np.zeros((len(keys), len(_BUCKET_NAMES)))
+    np.add.at(bcnt, (di, bucket), 1.0)
+
+    def _skill(wv):                              # wv: (B, D) date weights
+        n = wv @ cnts
+        q = (wv @ bcnt) / n[:, None]
+        base = (q * (1 - q)).sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return 1 - ((wv @ sums) / n) / base
+
+    point = _skill(np.ones((1, len(keys))))[0]
+    w = rng.multinomial(len(keys), [1 / len(keys)] * len(keys), size=n_boot).astype(float)
+    out.update(skill=None if np.isnan(point) else float(point), n=len(rec), n_dates=len(keys))
+    out["ci_low"], out["ci_high"] = _ci(_skill(w))
     return out
 
 
