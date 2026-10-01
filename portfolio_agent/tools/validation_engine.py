@@ -82,15 +82,20 @@ def _extract_p_up(pred: dict) -> Optional[float]:
 
 def compute_distribution_metrics(pred: dict, actual_ret: float) -> tuple[Optional[float], Optional[float]]:
     """
-    Compute BINARY Brier score and log-loss from the stored probability distribution.
-    Returns (brier_score, log_loss), or (None, None) if distribution is absent.
+    Compute BINARY (UP vs not-UP) Brier score and log-loss from the stored
+    probability distribution. These are the values persisted in the
+    `brier_score` / `log_loss` columns. They are NOT 5-bucket scores -- for
+    those see brier_5bucket() / logloss_5bucket(). Returns (brier_score,
+    log_loss), or (None, None) if distribution is absent.
 
     p_up = P(moderate_up) + P(strong_up) derived from the 5-bucket distribution.
     actual_up = 1 if actual_ret > +1%, else 0 (flat and down both count as "not up").
 
-    Binary Brier = (p_up − actual_up)²   range [0, 1]  baseline (coin flip) = 0.25
-    Binary log-loss = −[a·log(p) + (1−a)·log(1−p)]   baseline = ln(2) ≈ 0.693
-    Lower is always better for both.
+    Binary Brier = (p_up − actual_up)²   range [0, 1]
+    Binary log-loss = −[a·log(p) + (1−a)·log(1−p)]
+    Lower is always better for both. 0.25 / ln(2) are only the baselines for
+    a 50/50 base rate; the right yardstick is the sample's own base rate (see
+    validation_metrics.probability_baselines).
     """
     p_up = _extract_p_up(pred)
     if p_up is None:
@@ -104,6 +109,42 @@ def compute_distribution_metrics(pred: dict, actual_ret: float) -> tuple[Optiona
     log_loss = -(actual_up * math.log(p_clip) + (1 - actual_up) * math.log(1 - p_clip))
 
     return brier, log_loss
+
+
+def _normalized_bucket_probs(pred: dict) -> Optional[list[float]]:
+    """Stored p_* (ints summing to ~100, or fractions summing to 1) as 5
+    probabilities summing to 1, in RETURN_BUCKETS order. None if any is
+    missing or the total is not positive."""
+    raw = [pred.get(_BUCKET_TO_PROB_KEY[b]) for b in _BUCKET_NAMES]
+    if any(v is None for v in raw):
+        return None
+    total = float(sum(raw))
+    if total <= 0:
+        return None
+    return [v / total for v in raw]
+
+
+def brier_5bucket(pred: dict, actual_ret: float) -> Optional[float]:
+    """
+    5-BUCKET multiclass Brier score: sum_k (p_k - o_k)^2, o_k = 1 for the
+    bucket actual_return_bucket(actual_ret) lands in, else 0. p_k are
+    normalised to sum to 1. Range [0, 2]. None if any p_* is missing.
+    """
+    p = _normalized_bucket_probs(pred)
+    if p is None:
+        return None
+    hit = _BUCKET_NAMES.index(actual_return_bucket(actual_ret))
+    return sum((pk - (1.0 if k == hit else 0.0)) ** 2 for k, pk in enumerate(p))
+
+
+def logloss_5bucket(pred: dict, actual_ret: float) -> Optional[float]:
+    """5-BUCKET log-loss: -ln(max(p_actual_bucket, 1e-6)) with p normalised
+    to sum to 1. None if any p_* is missing."""
+    p = _normalized_bucket_probs(pred)
+    if p is None:
+        return None
+    hit = _BUCKET_NAMES.index(actual_return_bucket(actual_ret))
+    return -math.log(max(p[hit], 1e-6))
 
 
 # ── Outcome scoring ───────────────────────────────────────────────────────────
@@ -122,15 +163,81 @@ def score_outcome(pred: dict, actual_return: float) -> Outcome:
     in_range    = bool(r_lo != 0 or r_hi != 0) and (r_lo <= actual_return <= r_hi)
     dir_correct = pred_dir == actual_dir
 
+    # A matching FLAT call must be checked before the generic dir_correct
+    # branch (FLAT==FLAT is a subset of dir_correct, so the other order made
+    # "flat_correct" unreachable).
+    if pred_dir == "FLAT" and actual_dir == "FLAT":
+        return Outcome("strong_correct", 1.0) if in_range else Outcome("flat_correct", 0.8)
     if dir_correct and in_range:
         return Outcome("strong_correct", 1.0)
     if dir_correct:
         return Outcome("directionally_correct", 0.7)
-    if actual_dir == "FLAT" and pred_dir == "FLAT":
-        return Outcome("flat_correct", 0.8)
-    if not dir_correct and abs(actual_return) > 0.02:
+    if abs(actual_return) > 0.02:
         return Outcome("wrong_significant", 0.0)
     return Outcome("wrong_minor", 0.3)
+
+
+# Labels that mean "predicted direction == actual direction". Single source of
+# truth for anything that has to turn an outcome label into right/wrong.
+CORRECT_OUTCOMES = frozenset({"strong_correct", "directionally_correct", "flat_correct"})
+
+
+def recompute_outcome_labels(dry_run: bool = False) -> dict:
+    """
+    One-off, idempotent backfill: re-derive `outcome` / `outcome_score` for
+    already-evaluated rows from STORED fields only (predicted_direction,
+    predicted_return_low/high, actual_return) -- no price fetching. Needed
+    because FLAT calls that matched a FLAT outcome were stored as
+    "directionally_correct" (0.7) before score_outcome() could return
+    "flat_correct" (0.8).
+
+    Rows are only updated when the new label keeps the right/wrong status
+    (CORRECT_OUTCOMES membership) of the stored one, so headline directional
+    accuracy cannot move; any row where it WOULD flip (e.g. stored under an
+    older FLAT_THRESHOLD) is skipped and counted in `skipped_correctness_flip`
+    -- scripts/backfill_flat_threshold_fix.py owns that kind of fix.
+    Returns counts and a {old -> new} transition tally.
+    """
+    from collections import Counter
+
+    with _db() as c:
+        rows = [dict(r) for r in c.execute(
+            """SELECT id, predicted_direction, predicted_return_low,
+                      predicted_return_high, actual_return, outcome, outcome_score
+               FROM predictions
+               WHERE evaluation_status = 'evaluated' AND actual_return IS NOT NULL"""
+        ).fetchall()]
+
+    transitions: Counter = Counter()
+    updates: list[tuple] = []
+    flips = 0
+    for r in rows:
+        new = score_outcome(r, r["actual_return"])
+        same_label = new.label == r["outcome"]
+        same_score = abs(new.score - (r["outcome_score"] if r["outcome_score"] is not None else -1)) < 1e-9
+        if same_label and same_score:
+            continue
+        if (r["outcome"] in CORRECT_OUTCOMES) != (new.label in CORRECT_OUTCOMES):
+            flips += 1
+            continue
+        transitions[f"{r['outcome']} -> {new.label}"] += 1
+        updates.append((new.label, new.score, r["id"]))
+
+    if updates and not dry_run:
+        with _db() as c:
+            c.executemany("UPDATE predictions SET outcome = ?, outcome_score = ? WHERE id = ?", updates)
+            c.commit()
+
+    result = {
+        "scanned": len(rows), "changed": len(updates), "dry_run": dry_run,
+        "skipped_correctness_flip": flips, "transitions": dict(transitions),
+    }
+    _log.info(
+        f"  [validation/relabel] scanned={len(rows)} changed={len(updates)} "
+        f"skipped_correctness_flip={flips} dry_run={dry_run} {dict(transitions)}",
+        event_type="summary", **{k: v for k, v in result.items() if k != "transitions"},
+    )
+    return result
 
 
 # ── Layer 1: Daily outcome assignment ─────────────────────────────────────────
