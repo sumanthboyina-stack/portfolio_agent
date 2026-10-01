@@ -16,6 +16,7 @@ Contains:
   - _sell_call_outcomes          : did SELL/STRONG_SELL calls avoid losses
   - load_price_history           : cached bulk close fetch for the prior-window baselines
   - build_horizon_reports        : per-horizon baselines / skill / effective-N (validation_metrics)
+  - build_scorecards             : per-horizon Scorecard (validation_scorecard) -- what the user-facing page shows
   - _signal_equity_curve         : cumulative "followed the BUY calls" vs SPY curve
   - equity_curve_date_span       : date range to bulk-fetch/cache index closes over
   - _add_index_benchmarks        : + Dow/Nasdaq cumulative return, same per-call windows as SPY
@@ -314,7 +315,7 @@ def _load_evaluated_predictions_df(
         rows = conn.execute(f"""
             SELECT id, as_of_date, evaluation_date, evaluated_at, ticker, horizon_days,
                    recommendation, outcome, actual_return, excess_return, benchmark_return,
-                   predicted_direction, actual_direction,
+                   in_predicted_range, predicted_direction, actual_direction,
                    predicted_return_low, predicted_return_high,
                    p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                    conviction_score, composite_score, trigger_type, model_name
@@ -468,6 +469,34 @@ def build_horizon_reports(df: pd.DataFrame, fetch=None, use_prices: bool = True)
                 closes = {}
         reports[int(h)] = vm.horizon_report(sub, closes, streak_n=streak_n)
     return reports
+
+
+def build_scorecards(df: pd.DataFrame, fetch=None, use_prices: bool = True) -> dict:
+    """
+    {horizon_days: Scorecard} for an evaluated-predictions frame (see _load_evaluated_predictions_df).
+    Wiring only: the rating-streak count comes from _add_streak_ids (the page's existing streak logic),
+    prices for the prior-window baselines from load_price_history, and every number from
+    validation_scorecard.compute_scorecard. use_prices=False / failed fetches just make those baselines
+    unavailable. An empty frame yields {}.
+    """
+    from portfolio_agent.tools import validation_metrics as vm
+    from portfolio_agent.tools.validation_scorecard import compute_scorecard
+
+    if df is None or df.empty or "horizon_days" not in df.columns:
+        return {}
+    cards: dict = {}
+    for h, sub in df.dropna(subset=["horizon_days"]).groupby("horizon_days"):
+        sub = sub.reset_index(drop=True)
+        streaked = _add_streak_ids(sub)
+        streak_n = int(streaked["streak_id"].nunique()) if "streak_id" in streaked.columns else None
+        closes: dict = {}
+        if use_prices:
+            try:
+                closes = load_price_history(vm.price_requests(sub), fetch=fetch)
+            except Exception:
+                closes = {}
+        cards[int(h)] = compute_scorecard(sub, int(h), closes, streak_n)
+    return cards
 
 
 def _sell_call_outcomes(df: pd.DataFrame, sell_recs: tuple[str, ...] = ("SELL", "STRONG_SELL")) -> dict:

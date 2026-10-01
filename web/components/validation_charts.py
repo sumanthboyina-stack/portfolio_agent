@@ -22,6 +22,8 @@ Contains:
   - build_signal_equity_curve_chart  : cumulative "followed the BUY calls" vs SPY
   - build_score_vs_returns_chart     : top vs bottom quintile return per score system
   - build_horizon_reliability_chart  : simplified accuracy-by-horizon-only view
+  - build_excess_by_recommendation_chart : mean return vs SPY per rating (scorecard page)
+  - build_rank_trend_chart           : rolling day-by-day link between APEX's score and results (scorecard page)
 """
 
 from __future__ import annotations
@@ -994,5 +996,52 @@ def build_horizon_reliability_chart(by_horizon: dict, all_horizons: list, horizo
         margin=dict(t=30, b=40, l=50, r=20),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         showlegend=bool(known),
+    )
+    return fig
+
+
+def build_excess_by_recommendation_chart(rows: list[dict]) -> go.Figure:
+    """Mean return vs SPY per rating for ONE horizon (rows from Scorecard.by_recommendation).
+    Bar text carries n and the number of distinct dates; thin groups (< 30 calls) are flagged."""
+    rows = [r for r in rows if r["n"]]
+    labels = [r["recommendation"].replace("_", " ").title() for r in rows]
+    vals = [r["mean_excess"] * 100 for r in rows]
+
+    def _text(r: dict) -> str:
+        warn = " ⚠ thin" if r["n"] < 30 else ""
+        return f"{r['mean_excess'] * 100:+.2f}% (n={r['n']}, {r['n_dates']} days){warn}"
+
+    fig = go.Figure(go.Bar(
+        x=labels, y=vals, marker_color=[RECOMMENDATION_COLORS.get(r["recommendation"], "#94A3B8") for r in rows],
+        text=[_text(r) for r in rows], textposition="outside",
+        hovertemplate="%{x}<br>Average return vs SPY: %{y:.2f}%<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_color="#64748B", line_width=1)
+    fig.update_layout(
+        height=300, yaxis=dict(title="Avg return vs SPY (%)", gridcolor="#F1F5F9"),
+        margin=dict(t=30, b=40, l=50, r=20), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+    )
+    return fig
+
+
+def build_rank_trend_chart(trend: list[tuple[str, float]], window: int = 5) -> go.Figure:
+    """Each dot = one prediction day: how closely APEX's overall score ordered that day's stocks by how they did
+    against SPY (+1 = perfectly, 0 = not at all, −1 = backwards). The line is a rolling average over `window` days."""
+    fig = go.Figure()
+    if trend:
+        s = pd.Series({pd.Timestamp(d): v for d, v in trend}).sort_index()
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="markers", name="Each day",
+                                 marker=dict(size=8, color="#2563EB", opacity=0.6),
+                                 hovertemplate="%{x|%Y-%m-%d}<br>%{y:+.2f}<extra></extra>"))
+        if len(s) >= 2:
+            fig.add_trace(go.Scatter(x=s.index, y=s.rolling(window, min_periods=1).mean().values, mode="lines",
+                                     name=f"{window}-day average", line=dict(color="#2563EB", width=2.5),
+                                     hovertemplate="%{x|%Y-%m-%d}<br>Average %{y:+.2f}<extra></extra>"))
+    fig.add_hline(y=0, line_dash="dot", line_color="#64748B", opacity=0.6,
+                  annotation_text="no relationship", annotation_font_size=10)
+    fig.update_layout(
+        height=300, yaxis=dict(title="Score vs result (−1 to +1)", range=[-1, 1], gridcolor="#F1F5F9"),
+        xaxis=dict(title="Prediction date"), margin=dict(t=30, b=50, l=60, r=20),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=-0.3),
     )
     return fig

@@ -1,27 +1,24 @@
 """
-APEX Prediction Validation — user-facing trust page: "is this reliable" and
-"did it make money." Opens scoped to the viewer's own holdings + watchlist by
-default, with an explicit toggle to widen to the full shared prediction
-universe (predictions themselves are shared across everyone; this default
-just keeps what's on screen relevant to the person looking at it).
+APEX Prediction Validation — the user-facing trust page: "is this reliable?"
 
-Operator/engineering diagnostics that used to live here — raw Metric Trends,
-the full reliability-diagram Calibration tab, Post-mortems, and Version
-comparison — now live on the separate Validation QA admin page instead. None
-of those help a friend decide whether to trust a BUY call; they help tune the
-shared prediction engine, which is an operator concern.
+One screen: pick a horizon, see how much evidence there is, then four score cards
+(each a plain question, one number, a verdict, the thing it is compared against, and a
+one-line reason) and two charts. Every number comes from
+portfolio_agent.tools.validation_scorecard.compute_scorecard; this file only lays it out.
 
-Privacy note: every filter here (segment radio, horizon/outcome multiselects)
-narrows by *criteria*, never by an enumerable list of other people's specific
-tickers — so there's nothing on this page that could let one viewer page
-through a dropdown to infer what somebody else holds or watches. That
-property needs to be preserved if/when this becomes genuinely multi-user;
-today there's a single shared holdings/watchlist DB, so the question is
-moot in practice but the filter design already assumes the stricter future.
+Everything that used to be here beyond that — the nine-tile metric grid, outcome
+breakdown, the follow-every-BUY index, baselines, confusion matrix, ranking detail, model
+split, FLAT diagnostic, the scoring-snapshot tables — lives on the admin-only Validation QA
+page.
+
+Scope defaults to the viewer's own holdings + watchlist, with an explicit switch to the full
+shared prediction universe. Every filter narrows by *criteria*, never by an enumerable list of
+other people's specific tickers, so nothing here lets one viewer infer what somebody else
+holds or watches.
 """
 from __future__ import annotations
 
-import os
+import html
 import sys
 from pathlib import Path
 
@@ -30,7 +27,7 @@ sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 import streamlit as st
-from web.styles import inject_global_css, top_nav, material, fmt_pct, fmt_money, section_tile
+from web.styles import inject_global_css, top_nav, material, fmt_pct, fmt_money
 
 from web.auth import current_context, require_login
 
@@ -45,34 +42,17 @@ require_login()
 top_nav("validation")
 
 from portfolio_agent.tools.prediction_db import CURRENT_SYSTEM_VERSION
+from portfolio_agent.tools import validation_scorecard as scorecard_mod
 from web.data.validation import (
     _load_portfolio_tickers,
     _load_watchlist_tickers,
-    _get_model_names,
-    _compute_filtered_metrics,
     _load_evaluated_predictions_df,
-    _add_streak_ids,
-    _outcome_breakdown,
-    _returns_by_recommendation,
-    _sell_call_outcomes,
-    _calibration_headline,
-    _signal_equity_curve,
-    equity_curve_date_span,
-    _add_index_benchmarks,
-    _add_portfolio_benchmark,
-    build_horizon_reports,
+    build_scorecards,
 )
 from web.components.validation_charts import (
-    build_outcome_breakdown_chart,
-    build_returns_by_recommendation_chart,
-    build_signal_equity_curve_chart,
-    build_score_vs_returns_chart,
-    build_horizon_reliability_chart,
-    _METRIC_CFG,
+    build_excess_by_recommendation_chart,
+    build_rank_trend_chart,
     OUTCOME_LABELS,
-)
-from web.components.validation_cards import (
-    _render_scorecard_tiles, render_baselines_section, render_ranking_section,
 )
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -95,7 +75,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Scope — defaults to the viewer's own tickers, not the shared universe ──
     st.markdown(
         '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 8px">'
         'Scope</p>',
@@ -118,10 +97,7 @@ with st.sidebar:
     if _seg_sel == "All":
         st.caption(f"{material('public')} Widened to the full shared universe.")
 
-# Load portfolio/watchlist tickers once (used by segment filter throughout) —
-# scoped to the viewer's OWN holdings/watchlist, not the shared union across
-# every user (get_portfolio_tickers()'s default), so "My Tickers"/"Portfolio"/
-# "Watchlist" mean what they say once more than one person is logged in.
+# Scoped to the viewer's OWN holdings/watchlist, not the shared union across every user.
 _ctx = current_context("web:validation")
 _portfolio_tickers = _load_portfolio_tickers(_ctx)
 _watchlist_tickers = _load_watchlist_tickers(_ctx)
@@ -129,267 +105,145 @@ _watchlist_tickers = _load_watchlist_tickers(_ctx)
 # ── Page header ───────────────────────────────────────────────────────────────
 
 st.title(f"{material('track_changes')} APEX Prediction Validation")
-st.caption(f"System version: `{CURRENT_SYSTEM_VERSION}` · Scores predictions after they mature")
+st.caption(f"System version: `{CURRENT_SYSTEM_VERSION}` · Scores predictions after they mature · Detailed diagnostics: Validation QA (admin)")
 
-_SEG_ICONS = {
-    "My Tickers":        material("person"),
-    "All":               material("public"),
-    "Portfolio":         material("work"),
-    "Watchlist":         material("list_alt"),
-    "New Opportunities": material("star"),
+if _seg_sel != "My Tickers":
+    st.info(f"Scope: **{_seg_sel}** · All numbers recalculated for this scope.", icon=material("search"))
+
+# ── Data + scorecards ─────────────────────────────────────────────────────────
+
+eval_df = _load_evaluated_predictions_df(lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+horizons = sorted(int(h) for h in eval_df["horizon_days"].dropna().unique()) if not eval_df.empty else []
+
+if not horizons:
+    st.info(
+        "No evaluated predictions yet. "
+        f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
+        "Schedule page to score matured predictions.",
+        icon=material("info"),
+    )
+    st.stop()
+
+# Momentum / SPY-prior-window baselines need one price fetch per ticker, so a big scope asks first.
+_PRICE_AUTO_MAX_TICKERS = 60
+_n_tickers = int(eval_df["ticker"].nunique())
+_use_prices = _n_tickers <= _PRICE_AUTO_MAX_TICKERS
+if not _use_prices:
+    _use_prices = st.sidebar.toggle(
+        "Price-based baselines",
+        value=False,
+        key="val_price_baselines",
+        help=f"Needs price history for each of the {_n_tickers} tickers in this scope (cached 30 min). "
+             "Off = the 'repeat the last move' comparisons are left out of the direction check.",
+    )
+
+
+@st.cache_data(ttl=600, show_spinner="Scoring…")
+def _cached_scorecards(df: pd.DataFrame, use_prices: bool) -> dict:
+    return build_scorecards(df, use_prices=use_prices)
+
+
+try:
+    _cards = _cached_scorecards(eval_df, _use_prices)
+except Exception as _exc:   # never let the yardstick take the page down
+    st.error(f"Could not compute the scorecard: {_exc}", icon=material("error"))
+    st.stop()
+
+# ── Horizon selector ──────────────────────────────────────────────────────────
+
+_H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
+_h_sel = st.radio(
+    "Horizon", horizons, index=0, horizontal=True, key="val_horizon",
+    format_func=lambda h: _H_LABELS.get(h, f"{h}d"),
+    help="How far ahead the prediction looked. Horizons are never mixed in one number.",
+)
+card = _cards[_h_sel]
+ev = card.evidence
+
+# ── Evidence banner ───────────────────────────────────────────────────────────
+
+_span = f"{ev.first_date} → {ev.last_date}" if ev.first_date else "—"
+_streaks = f", {ev.n_streaks} rating streaks" if ev.n_streaks is not None else ""
+_evidence_text = (
+    f"**Evidence: {ev.level}** · {ev.n_dates} distinct prediction dates ({_span}) · "
+    f"{ev.n_nonoverlap} non-overlapping predictions ({ev.n_raw} total{_streaks})"
+)
+if ev.level == scorecard_mod.LEVEL_TOO_EARLY:
+    st.warning(
+        f"{_evidence_text}. Verdicts switch on at {scorecard_mod.MIN_DATES_FOR_VERDICT} dates; until then the numbers "
+        "below are shown but should be read as a preview, not a result.",
+        icon=material("hourglass_top"),
+    )
+elif ev.level == scorecard_mod.LEVEL_EARLY:
+    st.info(f"{_evidence_text}. Verdicts are allowed, but firm conclusions need {scorecard_mod.ESTABLISHED_DATES}+ dates.", icon=material("info"))
+else:
+    st.success(_evidence_text, icon=material("check_circle"))
+
+# ── Four score cards ──────────────────────────────────────────────────────────
+
+_VERDICT_COLORS = {
+    scorecard_mod.WORKING: "#059669",
+    scorecard_mod.UNPROVEN: "#D97706",
+    scorecard_mod.NOT_WORKING: "#DC2626",
+    scorecard_mod.TOO_EARLY: "#64748B",
+    scorecard_mod.INFO_ONLY: "#2563EB",
 }
 
-_active_filters: list[str] = []
-if _seg_sel != "My Tickers":
-    _active_filters.append(f"Scope: **{_SEG_ICONS.get(_seg_sel, material('search'))} {_seg_sel}**")
-if _active_filters:
-    st.info(
-        "**Active filters** — " + "  ·  ".join(_active_filters) +
-        "  ·  All metrics and tables recalculated for selected filter(s).",
-        icon=material("search"),
+
+def _esc(text: str) -> str:
+    return html.escape(text or "", quote=True)
+
+
+def _card_html(item: scorecard_mod.ScoreItem) -> str:
+    color = _VERDICT_COLORS.get(item.verdict, "#64748B")
+    baseline = f'<div style="font-size:.78rem;opacity:.75;margin:6px 0 2px">Compared with: {_esc(item.baseline_label)}</div>' if item.baseline_label else ""
+    sub = f'<div style="font-size:.76rem;opacity:.7;margin-bottom:6px">{_esc(item.subtitle)}</div>' if item.subtitle else ""
+    return (
+        f'<div title="{_esc(item.help_text)}" style="cursor:help">'
+        f'<div style="font-size:.84rem;font-weight:600;margin-bottom:2px">{_esc(item.title)} '
+        f'<span style="opacity:.55;font-weight:400">ⓘ</span></div>'
+        f'<div style="font-size:.76rem;opacity:.7;min-height:2.4em">{_esc(item.plain_question)}</div>'
+        f'<div style="font-size:2.1rem;font-weight:800;line-height:1.15;margin:6px 0">{_esc(item.display)}</div>'
+        f'<span style="background:{color}22;color:{color};border:1px solid {color}66;border-radius:20px;'
+        f'padding:2px 11px;font-size:.74rem;font-weight:700">{_esc(item.verdict)}</span>'
+        f'{baseline}{sub}'
+        f'<div style="font-size:.8rem;margin-top:8px;line-height:1.4">{_esc(item.one_line_reason)}</div>'
+        f'</div>'
     )
 
-# ── Calibration, in one line — the full reliability diagram lives on the
-# operator-only Validation QA page; a friend just needs the headline number ──
 
-from portfolio_agent.tools.validation_engine import get_calibration_data
+_cols = st.columns(len(card.items))
+for _col, _item in zip(_cols, card.items):
+    with _col:
+        with st.container(border=True):
+            st.markdown(_card_html(_item), unsafe_allow_html=True)
 
-_cal_headline = _calibration_headline(
-    get_calibration_data(lookback_days=lookback).get("reliability", [])
-)
-if _cal_headline:
-    st.info(
-        f"When APEX says it's about **{_cal_headline['mean_stated']*100:.0f}% confident** a stock will rise, "
-        f"it's actually right **{_cal_headline['actual_hit_rate']*100:.0f}%** of the time "
-        f"(based on {_cal_headline['n']} evaluated calls in this confidence range). "
-        "Full reliability diagram: Validation QA.",
-        icon=material("track_changes"),
-    )
-else:
-    st.caption(
-        f"{material('hourglass_top')} Calibration line will appear once enough predictions with a "
-        "probability distribution have been evaluated."
-    )
+st.caption("Hover a card for the technical definition. Ranges are 95% intervals that resample whole prediction dates, "
+           "because stocks predicted on the same day share one market move.")
 
-# ── Shared per-horizon metrics (used by both Scorecard and Heatmap tabs) ──────
+# ── Two charts ────────────────────────────────────────────────────────────────
 
-metrics = _compute_filtered_metrics(None, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
-by_horizon: dict[int, dict] = {}
-for row in metrics:
-    h = row["horizon_days"]
-    if h not in by_horizon:
-        by_horizon[h] = row
-
-horizon_labels = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
-all_horizons = [h for h in [5, 21, 63, 250] if h in by_horizon] + \
-               [h for h in sorted(by_horizon) if h not in [5, 21, 63, 250]]
-
-# ── Baselines / skill / effective sample size, per horizon ────────────────────
-# Same rows as the tiles above: same lookback + scope, all models. Prior-window
-# baselines (SPY, momentum) need one price fetch per ticker, so a big scope
-# (e.g. "All") asks first instead of fetching hundreds of tickers on every load.
-
-_PRICE_AUTO_MAX_TICKERS = 60
-_reports: dict[int, dict] = {}
-_horizon_baselines: dict[int, float] = {}
-if metrics:
-    _base_df = _load_evaluated_predictions_df(lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers)
-    _n_tickers = int(_base_df["ticker"].nunique()) if not _base_df.empty else 0
-    _use_prices = _n_tickers <= _PRICE_AUTO_MAX_TICKERS
-    if not _use_prices:
-        _use_prices = st.sidebar.toggle(
-            "Price-based baselines",
-            value=False,
-            key="val_price_baselines",
-            help=f"Momentum and SPY-prior-window baselines need price history for each of the {_n_tickers} "
-                 "tickers in this scope (cached for 30 min). Off = those two baselines show as unavailable.",
-        )
-    @st.cache_data(ttl=600, show_spinner="Computing ranking metrics and baselines…")
-    def _cached_reports(df: pd.DataFrame, use_prices: bool) -> dict:
-        return build_horizon_reports(df, use_prices=use_prices)
-
-    try:
-        _reports = _cached_reports(_base_df, _use_prices)
-    except Exception as _exc:   # never let the yardstick take the page down
-        st.warning(f"Baselines unavailable: {_exc}", icon=material("warning"))
-        _reports = {}
-    _horizon_baselines = {
-        h: r["comparison"]["best_baseline"]["accuracy"]
-        for h, r in _reports.items() if r["comparison"].get("best_baseline")
-    }
-
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-
-tabs = st.tabs([
-    f"{material('bar_chart')} Scorecard",
-    f"{material('list_alt')} Prediction History",
-    f"{material('calculate')} Score vs Returns",
-    f"{material('map')} Heatmap",
-])
-
-# ── Tab 1: Scorecard ──────────────────────────────────────────────────────────
-
-with tabs[0]:
-    if not metrics:
-        st.info(
-            "No evaluated predictions yet. "
-            f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
-            "Schedule page to score matured predictions.",
-            icon=material("info"),
-        )
+ch1, ch2 = st.columns(2)
+with ch1:
+    st.markdown(f"**Average return vs SPY, by rating** · {_H_LABELS.get(_h_sel, f'{_h_sel}d')} predictions only")
+    if any(r["n"] for r in card.by_recommendation):
+        st.plotly_chart(build_excess_by_recommendation_chart(card.by_recommendation), use_container_width=True)
     else:
-        # ── "Did this actually work?" — outcome breakdown, returns by call,
-        # and a hypothetical equity curve, all first, before the tiles ────────
-        _tile_1 = section_tile("Did This Actually Work?", expanded=True, key="validation_1")
-        if _tile_1:
-            with _tile_1:
-                _dtw_model_sel = st.multiselect(
-                    "Model", _get_model_names(), default=[],
-                    placeholder="All models — pick to narrow", key="dtw_model_filter",
-                )
-                _dtw_model_filter = _dtw_model_sel or None
+        st.info("No rated, evaluated predictions at this horizon yet.", icon=material("info"))
+with ch2:
+    st.markdown("**Does a higher APEX score go with beating SPY?** · day by day")
+    if card.trend:
+        st.plotly_chart(build_rank_trend_chart(card.trend), use_container_width=True)
+    else:
+        st.info("Needs at least 10 stocks scored on the same day.", icon=material("info"))
 
-                eval_df = _load_evaluated_predictions_df(
-                    lookback, _dtw_model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers
-                )
-                if not eval_df.empty:
-                    _n_raw = len(eval_df)
-                    _streaked_df = _add_streak_ids(eval_df)
-                    _n_streaks = _streaked_df["streak_id"].nunique() if "streak_id" in _streaked_df.columns else _n_raw
-                    if _n_streaks < _n_raw:
-                        st.caption(
-                            f"{_n_raw} evaluated calls below, but only {_n_streaks} unique rating streaks — "
-                            "a ticker held at the same call for many days running counts once per streak, "
-                            "not once per day, in that count."
-                        )
+# ── Prediction history (collapsed) ────────────────────────────────────────────
 
-                oc1, oc2 = st.columns(2)
-                with oc1:
-                    st.caption("Outcome breakdown")
-                    breakdown = _outcome_breakdown(eval_df)
-                    if breakdown and sum(b["count"] for b in breakdown):
-                        st.plotly_chart(build_outcome_breakdown_chart(breakdown), use_container_width=True)
-                    else:
-                        st.info("No evaluated predictions yet.", icon=material("info"))
-                with oc2:
-                    st.caption("Avg realized return by recommendation")
-                    rec_returns = _returns_by_recommendation(eval_df)
-                    if rec_returns and any(r["n"] for r in rec_returns):
-                        st.plotly_chart(build_returns_by_recommendation_chart(rec_returns), use_container_width=True)
-                    else:
-                        st.info("No evaluated predictions yet.", icon=material("info"))
-
-                # ── Did SELL calls avoid losses? — a SELL call getting its own
-                # bar above isn't enough: "avoided a loss" and "beat the market
-                # you'd have rotated into" are the two questions that actually
-                # matter for a sell recommendation ─────────────────────────────
-                sell_stats = _sell_call_outcomes(eval_df)
-                if sell_stats["n"]:
-                    sc1, sc2, sc3 = st.columns(3)
-                    sc1.metric("SELL / STRONG_SELL calls evaluated", sell_stats["n"])
-                    sc2.metric(
-                        "% that actually fell",
-                        fmt_pct(sell_stats["pct_fell"] * 100) if sell_stats["pct_fell"] is not None else "—",
-                    )
-                    sc3.metric(
-                        "Avg return vs SPY",
-                        fmt_pct(sell_stats["avg_excess_return"] * 100, signed=True)
-                        if sell_stats["avg_excess_return"] is not None else "—",
-                        help="Negative = the ticker underperformed SPY over the same window, "
-                             "i.e. selling and rotating into the market would have been the better call.",
-                    )
-                    if sell_stats["n"] < 30:
-                        st.caption(f"{material('warning')} Only {sell_stats['n']} evaluated SELL calls — read with caution.")
-                else:
-                    st.caption("No evaluated SELL / STRONG_SELL calls yet.")
-
-                st.caption(
-                    "If you'd mechanically followed every BUY / STRONG_BUY call, vs. SPY, Dow Jones, "
-                    "Nasdaq (each over the same per-call windows) and your own portfolio's actual performance"
-                )
-                curve_df = _signal_equity_curve(eval_df)
-                if not curve_df.empty:
-                    _span = equity_curve_date_span(curve_df)
-                    if _span:
-                        @st.cache_data(ttl=1800, show_spinner="Fetching Dow/Nasdaq…")
-                        def _cached_index_closes(start: str, end: str) -> dict[str, dict[str, float]]:
-                            from portfolio_agent.tools.yfinance_tools import get_closes_in_range
-                            return {s: get_closes_in_range(s, start, end) for s in ("^DJI", "^IXIC")}
-
-                        curve_df = _add_index_benchmarks(curve_df, _cached_index_closes(*_span))
-                    curve_df = _add_portfolio_benchmark(curve_df)
-                    st.plotly_chart(build_signal_equity_curve_chart(curve_df), use_container_width=True)
-                else:
-                    st.info("Not enough evaluated BUY / STRONG_BUY calls yet to plot a cumulative curve.", icon=material("info"))
-
-
-                # ── Metric tiles ──────────────────────────────────────────────────────
-        _tile_2 = section_tile("Ranking Skill & All Metrics by Horizon", expanded=True, key="validation_2")
-        if _tile_2:
-            with _tile_2:
-                st.caption(
-                    "Headline row per horizon: does a higher score go with beating SPY, and do UP-labelled names beat "
-                    "FLAT-labelled ones? Intervals resample whole dates. The row below it (3-class accuracy, calibration) "
-                    "is secondary. Hover any tile for the definition and how to read it.")
-                _render_scorecard_tiles(
-                    by_horizon, all_horizons, horizon_labels, reports=_reports,
-                    after_horizon=lambda h: (
-                        render_ranking_section(_reports.get(h), horizon_labels.get(h, f"{h}d")),
-                        render_baselines_section(_reports.get(h), horizon_labels.get(h, f"{h}d")),
-                    ),
-                )
-
-
-                # ── Raw values table ──────────────────────────────────────────────────
-        _tile_3 = section_tile("Raw Values", expanded=False, key="validation_3")
-        if _tile_3:
-            with _tile_3:
-                raw_rows = []
-                for h_days in all_horizons:
-                    row  = by_horizon[h_days]
-                    hlbl = horizon_labels.get(h_days, f"{h_days}d")
-                    n    = row.get("num_predictions") or 0
-                    _five = ((_reports.get(h_days) or {}).get("probability") or {}).get("five")
-                    raw_rows.append({
-                        "Horizon":           hlbl,
-                        "Evaluated Preds":   f"{n} ⚠" if n < 30 else n,
-                        "Dir Accuracy":   fmt_pct(row["directional_accuracy"]*100) if row.get("directional_accuracy") is not None else "—",
-                        "In-Range %":     fmt_pct(row["in_range_pct"]*100)         if row.get("in_range_pct")          is not None else "—",
-                        "Excess Return":  fmt_pct(row["mean_excess_return"]*100, signed=True)  if row.get("mean_excess_return")     is not None else "—",
-                        "Hi-Conv Acc":    fmt_pct(row["high_conviction_accuracy"]*100) if row.get("high_conviction_accuracy") is not None else "—",
-                        "Lo-Conv Acc":    fmt_pct(row["low_conviction_accuracy"]*100)  if row.get("low_conviction_accuracy")  is not None else "—",
-                        "Brier (UP vs not-UP)":    f"{row['brier_score']:.3f}"   if row.get("brier_score")  is not None else "—",
-                        "Log-Loss (UP vs not-UP)": f"{row['mean_log_loss']:.3f}" if row.get("mean_log_loss") is not None else "—",
-                        "Brier (5-bucket)":    f"{_five['brier']:.3f}"    if _five else "—",
-                        "Log-Loss (5-bucket)": f"{_five['log_loss']:.3f}" if _five else "—",
-                    })
-                st.dataframe(
-                    pd.DataFrame(raw_rows),
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Horizon":         st.column_config.Column(help="Prediction horizon — how many trading days ahead this call was for."),
-                        "Evaluated Preds": st.column_config.Column(help="Number of matured, scored predictions at this horizon over the selected lookback period. ⚠ = fewer than 30 — every metric in this row is not yet statistically reliable."),
-                        "Dir Accuracy":    st.column_config.Column(help=_METRIC_CFG["directional_accuracy"]["defn"]),
-                        "In-Range %":      st.column_config.Column(help=_METRIC_CFG["in_range_pct"]["defn"]),
-                        "Excess Return":   st.column_config.Column(help=_METRIC_CFG["mean_excess_return"]["defn"]),
-                        "Hi-Conv Acc":     st.column_config.Column(help=_METRIC_CFG["high_conviction_accuracy"]["defn"]),
-                        "Lo-Conv Acc":     st.column_config.Column(help=_METRIC_CFG["low_conviction_accuracy"]["defn"]),
-                        "Brier (UP vs not-UP)":    st.column_config.Column(help=_METRIC_CFG["brier_score"]["defn"]),
-                        "Log-Loss (UP vs not-UP)": st.column_config.Column(help=_METRIC_CFG["mean_log_loss"]["defn"]),
-                        "Brier (5-bucket)":        st.column_config.Column(help=_METRIC_CFG["brier_5bucket"]["defn"]),
-                        "Log-Loss (5-bucket)":     st.column_config.Column(help=_METRIC_CFG["logloss_5bucket"]["defn"]),
-                    },
-                )
-# ── Tab 2: Prediction History — promoted right after Scorecard; once scoped
-# to "My Tickers" by default, this is every call made on tickers the viewer
-# actually cares about, and how each one turned out ───────────────────────────
-
-with tabs[1]:
+with st.expander("Prediction history", expanded=False):
     from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
 
-    preds = get_recent_evaluated_predictions(limit=500, lookback_days=lookback)
-    # Apply segment filter
+    preds = [p for p in get_recent_evaluated_predictions(limit=500, lookback_days=lookback)
+             if p.get("horizon_days") == _h_sel]
     _my_set = set(_portfolio_tickers) | set(_watchlist_tickers)
     if _seg_sel == "My Tickers" and _my_set and preds:
         preds = [p for p in preds if p.get("ticker", "").upper() in _my_set]
@@ -402,31 +256,16 @@ with tabs[1]:
     elif _seg_sel == "New Opportunities" and preds:
         preds = [p for p in preds if p.get("trigger_type") == "trending_opportunity"]
     if not preds:
-        _no_pred_msg = "No evaluated predictions yet."
-        if _seg_sel != "All":
-            _no_pred_msg += f" (scope: {_seg_sel})"
-        st.info(_no_pred_msg, icon=material("info"))
+        st.info(f"No evaluated predictions yet. (scope: {_seg_sel})", icon=material("info"))
     else:
-        f1, f2 = st.columns(2)
-        with f1:
-            h_opts = sorted({p["horizon_days"] for p in preds if p.get("horizon_days")})
-            h_filter = st.multiselect(
-                "Horizon", h_opts, default=[],
-                format_func=lambda x: f"{x}d", key="pred_tab_h",
-                placeholder="All horizons — pick to narrow",
-            )
-        with f2:
-            o_opts = sorted({p["outcome"] for p in preds if p.get("outcome")})
-            o_filter = st.multiselect(
-                "Outcome", o_opts, default=[],
-                format_func=lambda o: OUTCOME_LABELS.get(o, o), key="pred_tab_o",
-                placeholder="All outcomes — pick to narrow",
-            )
-
+        o_opts = sorted({p["outcome"] for p in preds if p.get("outcome")})
+        o_filter = st.multiselect(
+            "Outcome", o_opts, default=[],
+            format_func=lambda o: OUTCOME_LABELS.get(o, o), key="pred_tab_o",
+            placeholder="All outcomes — pick to narrow",
+        )
         filtered = sorted(
-            [p for p in preds
-             if (not h_filter or p.get("horizon_days") in h_filter)
-             and (not o_filter or p.get("outcome") in o_filter)],
+            [p for p in preds if not o_filter or p.get("outcome") in o_filter],
             key=lambda p: p.get("as_of_date") or p.get("prediction_date") or "",
             reverse=True,
         )
@@ -440,24 +279,18 @@ with tabs[1]:
             oc    = p.get("outcome") or p.get("evaluation_status") or "—"
             er    = p.get("excess_return")
 
-            # Return % strings
             rng_pct = f"{fmt_pct(rlo, signed=True)} – {fmt_pct(rhi, signed=True)}" if rlo is not None and rhi is not None else "—"
             act_pct = fmt_pct(ar*100, signed=True) if ar is not None else "—"
 
-            # Dollar price strings (only when start_price available)
             if sp and sp > 0:
                 if rlo is not None and rhi is not None:
-                    p_lo = sp * (1 + rlo / 100)
-                    p_hi = sp * (1 + rhi / 100)
-                    rng_price = f"{fmt_money(p_lo)} – {fmt_money(p_hi)}"
+                    rng_price = f"{fmt_money(sp * (1 + rlo / 100))} – {fmt_money(sp * (1 + rhi / 100))}"
                 else:
                     rng_price = "—"
                 act_price = fmt_money(sp * (1 + ar)) if ar is not None else "—"
                 entry_price = fmt_money(sp)
             else:
-                rng_price = "—"
-                act_price = "—"
-                entry_price = "—"
+                rng_price = act_price = entry_price = "—"
 
             dist_parts = []
             for col, label in [("p_strong_down","▼▼"),("p_moderate_down","▼"),
@@ -469,7 +302,6 @@ with tabs[1]:
             rows.append({
                 "Date":            p.get("as_of_date") or p.get("prediction_date") or "",
                 "Ticker":          p.get("ticker") or "",
-                "Horizon":         f"{p['horizon_days']}d" if p.get("horizon_days") else "—",
                 "Predicted":       p.get("predicted_direction") or "—",
                 "Entry Price":     entry_price,
                 "Pred Range %":    rng_pct,
@@ -481,7 +313,6 @@ with tabs[1]:
                 "Outcome":         oc.replace("_", " ").title() if isinstance(oc, str) else oc,
                 "Conviction":      p.get("conviction_score"),
                 "Excess vs SPY":   fmt_pct(er*100, signed=True) if er is not None else "—",
-                "Segment":         p.get("risk_segment") or "unknown",
             })
 
         st.dataframe(
@@ -490,8 +321,6 @@ with tabs[1]:
             hide_index=True,
             column_config={
                 "Date":             st.column_config.Column(help="Date the prediction was made."),
-                "Ticker":           st.column_config.Column(help="Stock ticker symbol."),
-                "Horizon":          st.column_config.Column(help="How many trading days ahead this call was for."),
                 "Predicted":        st.column_config.Column(help="Predicted direction: UP, DOWN, or FLAT."),
                 "Entry Price":      st.column_config.Column(help="Price at the time the prediction was made."),
                 "Pred Range %":     st.column_config.Column(help="Predicted return range (low – high) over the horizon."),
@@ -500,117 +329,9 @@ with tabs[1]:
                 "Actual Price":     st.column_config.Column(help="Realized price at the end of the horizon."),
                 "Distribution":     st.column_config.Column(help="Model's stated probability across 5 return buckets: ▼▼ strong down · ▼ moderate down · → flat · ▲ moderate up · ▲▲ strong up."),
                 "Bucket":           st.column_config.Column(help="Which of the 5 return buckets the actual return landed in."),
-                "Outcome":          st.column_config.Column(help="Whether the call was scored correct or wrong, and by how much (e.g. directionally correct vs. wrong significant)."),
+                "Outcome":          st.column_config.Column(help="Whether the call was scored correct or wrong, and by how much."),
                 "Conviction":       st.column_config.Column(help="Model's self-reported confidence in this call, 1 (low) – 10 (high)."),
                 "Excess vs SPY":    st.column_config.Column(help="Actual return minus the S&P 500's return over the same window. Positive = beat the market."),
-                "Segment":          st.column_config.Column(help="Risk segment this ticker was classified under at prediction time."),
             },
         )
-        st.caption(
-            f"{len(filtered)} of {len(preds)} evaluated predictions shown.  "
-            "Entry Price = price at prediction date · Pred Price Range = estimated price window · "
-            "Actual Price = realized price at horizon.  "
-            "Distribution: ▼▼=strong_down ▼=moderate_down →=flat ▲=moderate_up ▲▲=strong_up"
-        )
-
-# ── Tab 3: Score vs Returns — renamed from "Score Calibration"; the
-# correlation table became the top-vs-bottom-quintile return chart, since
-# that's the plain-English version of the same underlying calibration_analysis
-# computation. Kept user-facing: this directly answers "should I trust a
-# high score," unlike the full reliability-diagram Calibration tab (moved to
-# Validation QA as "Confidence Calibration" to avoid name collision) ─────────
-
-with tabs[2]:
-    from portfolio_agent.tools.scoring_snapshot_db import get_latest_snapshot_date, get_snapshots_for_date
-    from portfolio_agent.tools.calibration_analysis import compute_calibration_report, SCORE_LABELS
-
-    _tile_4 = section_tile(f"{material('calculate')} Today's Scoring Table", expanded=True, key="validation_4")
-    if _tile_4:
-        with _tile_4:
-            st.caption(
-                "Every ticker scored today across all four parallel systems, plus a documented fixed "
-                "blend (Final) — captured daily so it can be checked against realized returns later."
-            )
-            snap_date = get_latest_snapshot_date()
-            if not snap_date:
-                st.info(
-                    "No scoring snapshots yet — this table populates once the morning batch's "
-                    "Score Calibration phase runs.",
-                    icon=material("calculate"),
-                )
-            else:
-                st.caption(f"As of {snap_date}")
-                snap_rows = get_snapshots_for_date(snap_date)
-                table_rows = [{
-                    "Ticker":        r["ticker"],
-                    "APEX":          f"{r['apex_score']:.2f}" if r.get("apex_score") is not None else "—",
-                    "Valuation":     f"{r['valuation_score']:.2f}" if r.get("valuation_score") is not None else "—",
-                    "Opportunity":   f"{r['opportunity_score']:.2f}" if r.get("opportunity_score") is not None else "—",
-                    "Portfolio Fit": f"{r['portfolio_fit_score']:.2f}" if r.get("portfolio_fit_score") is not None else "—",
-                    "Final":         f"{r['final_score']:.2f}" if r.get("final_score") is not None else "—",
-                } for r in snap_rows]
-                st.dataframe(
-                    pd.DataFrame(table_rows),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Ticker":        st.column_config.Column(help="Stock ticker symbol."),
-                        "APEX":          st.column_config.Column(help="4-analyst panel composite score (0–10) — Fundamentals, Research, Macro, and News blended."),
-                        "Valuation":     st.column_config.Column(help="DCF-based valuation score (0–10) — how attractively priced vs. intrinsic value."),
-                        "Opportunity":   st.column_config.Column(help="Opportunity Engine score (0–100) — momentum, correlation, and portfolio fit blended for new candidates."),
-                        "Portfolio Fit": st.column_config.Column(help="Position-sizing / correlation fit score (0–100) — how well this ticker complements existing holdings."),
-                        "Final":         st.column_config.Column(help="Weighted blend, normalized to 0–100: 30% APEX + 20% Valuation + 30% Opportunity + 20% Portfolio Fit."),
-                    },
-                )
-    _tile_5 = section_tile(f"{material('bar_chart')} Score vs Returns", expanded=False, key="validation_5")
-    if _tile_5:
-        with _tile_5:
-            st.caption(
-                "For each scoring system: the average realized return of the top-20% vs. bottom-20% "
-                "scored names at this horizon — did the names we scored highly actually do better?"
-            )
-            horizon_choice = st.radio(
-                "Horizon", [30, 60, 90, 250], format_func=lambda h: f"{h}d", horizontal=True, key="calib_horizon",
-            )
-            report = compute_calibration_report(horizon_choice)
-            _has_any = any(not s.get("insufficient_data") for s in report["scores"].values())
-            if not _has_any:
-                st.info(
-                    f"Not enough matured {horizon_choice}-day snapshots yet to compare scores against returns.",
-                    icon=material("info"),
-                )
-            else:
-                st.plotly_chart(build_score_vs_returns_chart(report, SCORE_LABELS), use_container_width=True)
-
-            any_insufficient = any(s.get("insufficient_data") for s in report["scores"].values())
-            if any_insufficient:
-                st.info(
-                    f"Some scores don't have {report['min_sample']} matured {horizon_choice}-day snapshots yet — "
-                    f"a {horizon_choice}-day horizon needs {horizon_choice} days of history before the first row "
-                    "can even mature, so this fills in gradually. Check back as more days pass.",
-                    icon=material("hourglass_top"),
-                )
-# ── Tab 4: Heatmap — simplified to horizon-only. Segment × horizon detail
-# moved conceptually to Validation QA territory (not wired there either,
-# since no one asked for it back — the underlying accuracy-heatmap functions
-# stay in the codebase, just unused, so it can come back easily if needed) ───
-
-with tabs[3]:
-    _tile_6 = section_tile("Which Horizon Is More Reliable?", expanded=True, key="validation_6")
-    if _tile_6:
-        with _tile_6:
-            st.caption(
-                "Directional accuracy by prediction horizon — useful for deciding how much to weight "
-                "a 5-day call vs. a 63-day one. Segment-level detail lives on Validation QA."
-            )
-            if not metrics:
-                st.info(
-                    f"No evaluated predictions yet. Run {material('nights_stay')} **Evening** on the "
-                    f"{material('calendar_month')} Schedule page to generate this view.",
-                    icon=material("info"),
-                )
-            else:
-                st.plotly_chart(
-                    build_horizon_reliability_chart(by_horizon, all_horizons, horizon_labels, _horizon_baselines),
-                    use_container_width=True,
-                )
+        st.caption(f"{len(filtered)} of {len(preds)} evaluated {_H_LABELS.get(_h_sel, f'{_h_sel}d')} predictions shown.")
