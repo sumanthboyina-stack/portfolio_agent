@@ -46,7 +46,7 @@ Copy `.env.example` to `.env` and fill in the values you want to use. Keys marke
 | Variable | Required | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | **Yes** | Claude models (Sonnet) for APEX predictions |
-| `OPENAI_API_KEY` | Recommended | GPT-4o, GPT-5 and o3 for APEX predictions; APEX randomly picks 2 of {Claude Sonnet, GPT-4o, GPT-5, o3} each run |
+| `OPENAI_API_KEY` | Recommended | GPT-4o, GPT-5 and o3 — the default APEX fallback models (and any challenger), see [Model providers](#model-providers) |
 | `FRED_API_KEY` | Recommended | Macroeconomic data (rates, inflation, labor, credit). Free at [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 | `FINNHUB_API_KEY` | Recommended | Sell-side consensus, price targets, news, SEC filings. Free tier available at [finnhub.io](https://finnhub.io) |
 | `FINRA_API_KEY` | Recommended | Short interest data (FINRA Datasets API). Bearer token; twice-monthly pulls |
@@ -175,11 +175,27 @@ Batch times (CST): Morning 06:30 · Intraday checks 11:00, 13:00, 15:00 · Eveni
 
 ### APEX predictions
 
-APEX selects a primary model randomly each run and falls back to the other on timeout (90 s) or error. If both fail, the ticker is skipped — no placeholder is written to the database.
+APEX uses one **champion** model for every prediction, so the validation record compares like with like over time. If the champion times out (90 s), hits a provider/quota error, or returns unparseable output, APEX tries each **fallback** model in order. If every model fails, the ticker is skipped — no placeholder is written to the database.
 
-| Role | Primary | Fallback |
+| Setting (`engine_settings`) | Default | Meaning |
 |---|---|---|
-| APEX prediction | Claude Sonnet (Anthropic) | GPT-4o (OpenAI) |
+| `apex_champion_model` | `Claude-Sonnet` | Model used for every prediction |
+| `apex_fallback_models` | `["GPT-5", "GPT-4o", "o3"]` | Tried in this order, only when the model before it failed |
+| `apex_challenger_model` | none (off) | Optional second model run on the same prompt for comparison |
+| `apex_challenger_sample_pct` | `0` | % of tickers (0–100) that also get a challenger run |
+
+No environment variable is needed; the defaults live in `portfolio_agent/tools/apex_dual_run.py`. To change them, call `update_engine_settings(updated_by=..., apex_champion_model=..., apex_fallback_models=[...], apex_challenger_model=..., apex_challenger_sample_pct=...)` from `portfolio_agent.tools.engine_settings_db` (labels must be one of `Claude-Sonnet`, `GPT-4o`, `GPT-5`, `o3`; `apex_challenger_model=None` turns the challenger off).
+
+Every stored prediction records its `prediction_role`:
+
+| Role | Shown to users | Counted in default validation |
+|---|---|---|
+| `champion` | Yes | Yes |
+| `fallback` — champion failed that run | Yes | Yes |
+| `challenger` — shadow run on a deterministic sample of tickers | Never | Only on Validation QA → Roles (paired champion-vs-challenger comparison) |
+| `legacy_random` — made before champion selection, when each run picked a random model | Yes (history) | Only with **Include legacy predictions** switched on |
+
+Which model ran and why is logged with `event_type` `apex_model_plan` (once per phase), `apex_model_select` (role + reason per attempt), `apex_retry`, `apex_complete`, `apex_exhausted` and `apex_challenger`.
 
 ### Batch pipeline phases (fundamentals, research, news)
 
@@ -248,7 +264,7 @@ Every prediction is evaluated when its horizon matures:
 
 **Layer 2 — Rolling metrics** (nightly, incremental)
 - Aggregates L1 outcomes into directional accuracy, high/low conviction accuracy, Brier score, and log-loss
-- Broken down by horizon, ticker segment, and model (Claude vs GPT-4o)
+- Broken down by horizon, ticker segment, model, and prediction role (champion / fallback / challenger / legacy)
 - Baseline for Brier score is 0.25 (coin-flip); baseline for log-loss is ln(2) ≈ 0.693
 
 **Layer 3 — Pattern analysis** (weekly, LLM-assisted)

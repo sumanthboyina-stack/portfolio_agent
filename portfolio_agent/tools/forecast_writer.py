@@ -20,11 +20,13 @@ from portfolio_agent.log import get_logger
 from portfolio_agent.privacy import PrivateDataLeak, assert_market_only, collect_private_terms
 from portfolio_agent.tools.market_context import MarketContext
 from portfolio_agent.tools.prediction_db import (
-    CURRENT_SYSTEM_VERSION, SCOPE_PRIVATE, SCOPE_SHARED, insert_prediction,
+    CURRENT_SYSTEM_VERSION, ROLE_CHALLENGER, ROLE_CHAMPION, ROLE_FALLBACK, ROLE_INTERACTIVE,
+    SCOPE_PRIVATE, SCOPE_SHARED, insert_prediction,
 )
 
 GUARDRAIL_VERSION = "conviction-guardrails/1.0"       # apex._apply_conviction_guardrails
 SHARED_ORIGINS = frozenset({"pipeline.apex"})         # scheduled market-only generation only
+SHARED_ROLES = frozenset({ROLE_CHAMPION, ROLE_FALLBACK, ROLE_CHALLENGER})   # the batch model plan's roles
 _log = get_logger("forecast_writer")
 
 
@@ -71,6 +73,9 @@ def write_shared_forecast(context: MarketContext, provenance: ForecastProvenance
     ticker = str(row.get("ticker") or context.ticker).upper()
     if ticker != context.ticker:
         raise ForecastScopeError("forecast ticker does not match its market context")
+    role = row.get("prediction_role", ROLE_CHAMPION)
+    if role not in SHARED_ROLES:
+        raise ForecastScopeError(f"prediction_role {role!r} may not be written as a shared forecast")
     hz = row.get("horizon_days")
     if hz is not None and int(hz) not in context.horizons:
         raise ForecastScopeError(f"horizon {hz} was not part of the market context {list(context.horizons)}")
@@ -95,6 +100,7 @@ def write_shared_forecast(context: MarketContext, provenance: ForecastProvenance
 
 def write_private_forecast(owner: str, provenance: ForecastProvenance, **row) -> dict:
     ticker = str(row.get("ticker") or "").upper()
+    row.setdefault("prediction_role", ROLE_INTERACTIVE)   # not produced by the batch champion/fallback plan
     res = insert_prediction(
         **row, scope=SCOPE_PRIVATE, origin=provenance.origin, origin_run_id=provenance.origin_run_id,
         owner_scope=f"user:{owner}", evidence_refs=provenance.extra_evidence or None,

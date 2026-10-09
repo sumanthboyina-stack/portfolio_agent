@@ -32,11 +32,11 @@ Task → model mapping (in priority order):
 
   reasoning Claude-Sonnet → GPT-4o → GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max
             → OR-Grok-4.3 → Groq-70B
-            Interactive APEX chat (single-ticker). Daily batch APEX uses a separate
-            dual-run strategy: two models are randomly picked each run from
-            {Claude-Sonnet, GPT-4o, GPT-5, o3} (see APEX_MODELS in apex_dual_run.py),
-            with the other as a single fallback; OR high-reasoning models are
-            mid-tier fallbacks here in the linear chain; Groq-70B is last resort.
+            Interactive APEX chat (single-ticker). Daily batch APEX uses a separate,
+            deterministic plan: one champion model plus an ordered fallback list from
+            {Claude-Sonnet, GPT-4o, GPT-5, o3}, configured in engine_settings (see
+            apex_dual_run.py); OR high-reasoning models are mid-tier fallbacks here
+            in the linear chain; Groq-70B is last resort.
             o3 doesn't support temperature != 1 — call sites that may hit it pass
             litellm's drop_params=True rather than special-casing the model.
 
@@ -219,10 +219,10 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
     ],
     "reasoning": [
         # Used by the interactive APEX chat path (single-ticker linear failover).
-        # Daily batch APEX uses a separate dual-run strategy (see APEX_MODELS in
-        # apex_dual_run.py): two of {Claude-Sonnet, GPT-4o, GPT-5, o3} are randomly
-        # picked each run and merged, with the other as a single fallback;
-        # OR high-reasoning models are mid-tier fallbacks here in the linear chain.
+        # Daily batch APEX uses a separate, deterministic champion + ordered-fallback
+        # plan over {Claude-Sonnet, GPT-4o, GPT-5, o3} (engine_settings; see
+        # apex_dual_run.py); OR high-reasoning models are mid-tier fallbacks here
+        # in the linear chain.
         # Lower-end models (Haiku, Flash, Groq) intentionally excluded.
         (_SONNET,           "anthropic",   "Claude-Sonnet"),
         (_GPT_4O,           "openai",      "GPT-4o"),

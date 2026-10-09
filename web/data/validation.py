@@ -27,6 +27,10 @@ Every query against `predictions` below is restricted to LEGACY_REVIEW_SCOPES
 validation_engine.py uses for historical evaluation/dashboards. Without it, a
 private chat forecast (yours or, now that logins are per-owner, someone
 else's) would get folded into what reads as the shared track record.
+
+Every query is ALSO restricted by prediction_role (roles=, default
+VALIDATION_ROLES = champion + fallback): rows from the legacy random-model era
+and challenger shadow rows appear only when the caller asks for them.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 
-from portfolio_agent.tools.prediction_db import LEGACY_REVIEW_SCOPES, scope_clause
+from portfolio_agent.tools.prediction_db import LEGACY_REVIEW_SCOPES, VALIDATION_ROLES, role_clause, scope_clause
 
 _DB = _ROOT / "data" / "portfolio.db"
 
@@ -49,6 +53,8 @@ def _load_metric_series(
     segment: str = "All",
     portfolio_tickers: list[str] | None = None,
     watchlist_tickers: list[str] | None = None,
+    *,
+    roles: tuple[str, ...] = VALIDATION_ROLES,
 ) -> pd.DataFrame:
     """Per-prediction brier_score + log_loss for evaluated rows, optionally filtered by segment."""
     if not _DB.exists():
@@ -74,6 +80,7 @@ def _load_metric_series(
         seg_clause = "AND trigger_type = 'trending_opportunity'"
 
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    _rc, _rp = role_clause(roles)
     with sqlite3.connect(str(_DB)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(f"""
@@ -88,9 +95,10 @@ def _load_metric_series(
             WHERE evaluation_status = 'evaluated'
               AND brier_score IS NOT NULL
               AND {_sc}
+              AND {_rc}
               {seg_clause}
             ORDER BY as_of_date ASC
-        """, [*_sp, *seg_params]).fetchall()
+        """, [*_sp, *_rp, *seg_params]).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
         df["prediction_date"] = pd.to_datetime(df["prediction_date"])
@@ -122,18 +130,20 @@ def _load_watchlist_tickers(ctx) -> list[str]:
         return []
 
 
-def _get_model_names() -> list[str]:
+def _get_model_names(*, roles: tuple[str, ...] = VALIDATION_ROLES) -> list[str]:
     """Return distinct model_name values from predictions table, sorted by count desc."""
     if not _DB.exists():
         return []
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    _rc, _rp = role_clause(roles)
     with sqlite3.connect(str(_DB)) as conn:
         rows = conn.execute(
             f"""SELECT model_name, COUNT(*) as cnt FROM predictions
                WHERE model_name IS NOT NULL
                  AND {_sc}
+                 AND {_rc}
                GROUP BY model_name ORDER BY cnt DESC""",
-            _sp,
+            [*_sp, *_rp],
         ).fetchall()
     return [r[0] for r in rows]
 
@@ -144,6 +154,8 @@ def _compute_filtered_metrics(
     segment: str = "All",
     portfolio_tickers: list[str] | None = None,
     watchlist_tickers: list[str] | None = None,
+    *,
+    roles: tuple[str, ...] = VALIDATION_ROLES,
 ) -> list[dict]:
     """
     Recompute rolling metrics directly from the predictions table, optionally
@@ -179,7 +191,8 @@ def _compute_filtered_metrics(
         seg_clause = "AND trigger_type = 'trending_opportunity'"
 
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
-    params: list = [lookback] + list(_sp) + model_params + seg_params
+    _rc, _rp = role_clause(roles)
+    params: list = [lookback] + list(_sp) + list(_rp) + model_params + seg_params
 
     sql = f"""
         SELECT
@@ -207,6 +220,7 @@ def _compute_filtered_metrics(
         WHERE evaluation_status = 'evaluated'
           AND as_of_date >= DATE('now', '-' || ? || ' days')
           AND {_sc}
+          AND {_rc}
           {model_clause}
           {seg_clause}
         GROUP BY horizon_days
@@ -270,6 +284,8 @@ def _load_evaluated_predictions_df(
     segment: str = "My Tickers",
     portfolio_tickers: list[str] | None = None,
     watchlist_tickers: list[str] | None = None,
+    *,
+    roles: tuple[str, ...] = VALIDATION_ROLES,
 ) -> pd.DataFrame:
     """
     Every evaluated prediction (recommendation, outcome, actual_return,
@@ -284,8 +300,9 @@ def _load_evaluated_predictions_df(
     my_tickers = sorted(set(portfolio_tickers or []) | set(watchlist_tickers or []))
 
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
-    clauses = ["evaluation_status = 'evaluated'", _sc]
-    params: list = list(_sp)
+    _rc, _rp = role_clause(roles)
+    clauses = ["evaluation_status = 'evaluated'", _sc, _rc]
+    params: list = [*_sp, *_rp]
     if lookback_days:
         clauses.append("as_of_date >= DATE('now', '-' || ? || ' days')")
         params.append(lookback_days)
@@ -318,7 +335,7 @@ def _load_evaluated_predictions_df(
                    in_predicted_range, predicted_direction, actual_direction,
                    predicted_return_low, predicted_return_high,
                    p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                   conviction_score, composite_score, trigger_type, model_name
+                   conviction_score, composite_score, trigger_type, model_name, prediction_role
             FROM predictions
             {where}
             ORDER BY COALESCE(evaluation_date, as_of_date) ASC

@@ -18,6 +18,10 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
+# Challenger shadow rows never reach a user-facing read; evaluated per query (it also
+# guarantees the prediction_role column exists on this DB).
+from portfolio_agent.tools.prediction_db import not_challenger_sql as _not_challenger_sql
+
 
 def _resolve_portfolio_id(owner: str | None) -> tuple[int | None, bool]:
     """
@@ -459,11 +463,11 @@ def _chat_tool_get_prediction_accuracy(ticker: str) -> dict:
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT horizon_days, outcome, outcome_score, brier_score,
                    actual_direction, actual_return, evaluated_at, recommendation
             FROM predictions
-            WHERE ticker = ? AND evaluation_status = 'evaluated'
+            WHERE ticker = ? AND evaluation_status = 'evaluated' AND {_not_challenger_sql()}
             ORDER BY evaluated_at DESC
         """, [ticker.upper()]).fetchall()
         conn.close()
@@ -651,16 +655,16 @@ def _chat_tool_get_latest_opportunities(min_confidence: int = 6, limit: int = 10
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
                    p.news_score, p.research_score, p.fundamental_score,
                    p.reasoning, p.created_at
             FROM predictions p
             JOIN (
                 SELECT ticker, MAX(created_at) dt
-                FROM predictions WHERE trigger_type='trending_opportunity'
+                FROM predictions WHERE trigger_type='trending_opportunity' AND {_not_challenger_sql()}
                 GROUP BY ticker
-            ) x ON p.ticker=x.ticker AND p.created_at=x.dt
+            ) x ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
             WHERE p.trigger_type='trending_opportunity'
               AND p.recommendation IN ('BUY','STRONG_BUY')
               AND COALESCE(p.confidence, 0) >= ?
@@ -672,16 +676,16 @@ def _chat_tool_get_latest_opportunities(min_confidence: int = 6, limit: int = 10
         if not opportunities:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
                        p.news_score, p.research_score, p.fundamental_score,
                        p.reasoning, p.created_at
                 FROM predictions p
                 JOIN (
                     SELECT ticker, MAX(created_at) dt
-                    FROM predictions WHERE trigger_type='trending_opportunity'
+                    FROM predictions WHERE trigger_type='trending_opportunity' AND {_not_challenger_sql()}
                     GROUP BY ticker
-                ) x ON p.ticker=x.ticker AND p.created_at=x.dt
+                ) x ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
                 WHERE p.trigger_type='trending_opportunity'
                 ORDER BY p.created_at DESC, p.composite_score DESC NULLS LAST
                 LIMIT ?
@@ -713,12 +717,12 @@ def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: i
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
                    p.pt_mean, p.pt_current_price, p.pt_num_analysts, p.created_at
             FROM predictions p
-            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions GROUP BY ticker) x
-              ON p.ticker = x.ticker AND p.created_at = x.dt
+            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions WHERE {_not_challenger_sql()} GROUP BY ticker) x
+              ON p.ticker = x.ticker AND p.created_at = x.dt AND {_not_challenger_sql("p")}
             WHERE p.recommendation IN ('BUY', 'STRONG_BUY')
               AND p.pt_mean IS NOT NULL AND p.pt_current_price > 0
         """).fetchall()
@@ -785,8 +789,8 @@ def _chat_tool_get_portfolio_summary(owner: str | None = None) -> dict:
                 SELECT p.ticker, p.recommendation, p.confidence, p.composite_score
                 FROM predictions p
                 JOIN (SELECT ticker, MAX(created_at) dt FROM predictions
-                      WHERE ticker IN ({ph}) GROUP BY ticker) x
-                  ON p.ticker=x.ticker AND p.created_at=x.dt
+                      WHERE ticker IN ({ph}) AND {_not_challenger_sql()} GROUP BY ticker) x
+                  ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
             """, ht).fetchall()}
             for h in holdings:
                 h["apex"] = preds.get(h["ticker"])
@@ -925,8 +929,8 @@ def _chat_tool_get_predictions_summary(segment: str = "all",
                    p.fundamental_score, p.research_score, p.news_score,
                    p.trigger_type, p.created_at
             FROM predictions p
-            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions GROUP BY ticker) x
-              ON p.ticker=x.ticker AND p.created_at=x.dt
+            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions WHERE {_not_challenger_sql()} GROUP BY ticker) x
+              ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
             WHERE 1=1 {seg_clause} {rec_clause}
             ORDER BY p.composite_score DESC NULLS LAST
             LIMIT 30

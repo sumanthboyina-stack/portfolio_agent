@@ -18,6 +18,10 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
+# Challenger shadow rows never reach a user-facing read; evaluated per query (it also
+# guarantees the prediction_role column exists on this DB).
+from portfolio_agent.tools.prediction_db import not_challenger_sql as _not_challenger_sql
+
 from portfolio_agent.tools.db import db_conn
 
 
@@ -55,8 +59,8 @@ def get_critical_nudge_items(owner: str, limit: int = 3) -> list[dict]:
                 SELECT p.ticker, p.recommendation, p.confidence
                 FROM predictions p
                 JOIN (SELECT ticker, MAX(created_at) dt FROM predictions
-                      WHERE ticker IN ({ph}) GROUP BY ticker) x
-                  ON p.ticker=x.ticker AND p.created_at=x.dt
+                      WHERE ticker IN ({ph}) AND {_not_challenger_sql()} GROUP BY ticker) x
+                  ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
             """, list(hset)).fetchall()
         }
 

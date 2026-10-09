@@ -15,7 +15,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from portfolio_agent.tools.prediction_db import (
-    LEGACY_REVIEW_SCOPES, SHARED_SCOPES, _db, scope_clause,
+    LEGACY_REVIEW_SCOPES, SHARED_SCOPES, VALIDATION_ROLES, _db, not_challenger_sql, role_clause, scope_clause,
 )
 from portfolio_agent.tools.yfinance_tools import get_close
 from portfolio_agent.log import get_logger as _get_logger
@@ -442,10 +442,17 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
                    WHERE evaluation_status = 'evaluated'
                      AND evaluated_at >= ?
                      AND horizon_days IS NOT NULL
-                     AND {_legacy_sc}""",
+                     AND {_legacy_sc}
+                     AND {not_challenger_sql()}""",
                 [cutoff, *_legacy_sp],
             ).fetchall()
 
+        # Challenger shadow rows are excluded above: they share (ticker, horizon,
+        # as_of_date) with the production row and have the higher id, so the cohort
+        # collapse below would otherwise pick the challenger. This stored series keeps
+        # legacy_random rows (it is a continuous history that ages them out of the
+        # 30/90/365-day windows); the role-filtered views live in the dashboard readers.
+        #
         # Evaluation cohorts: a same-day event-driven regeneration (Phase 8) can
         # leave MULTIPLE shared rows for the same (ticker, horizon_days,
         # as_of_date) -- e.g. a routine morning version plus an intraday
@@ -793,7 +800,8 @@ def weekly_pattern_analysis() -> dict:
                  AND evaluated_at >= ?
                  AND horizon_days IS NOT NULL
                  AND actual_direction IS NOT NULL
-                 AND {_shared_sc}""",
+                 AND {_shared_sc}
+                 AND {not_challenger_sql()}""",
             [_week_ago, *_shared_sp],
         ).fetchall()
     rows = [dict(r) for r in rows]
@@ -951,10 +959,16 @@ def get_active_failure_patterns(limit: int = 5) -> list[dict]:
 
 # ── Dashboard read helpers ─────────────────────────────────────────────────────
 
-def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None = None) -> list[dict]:
+# Every reader below takes roles= (prediction_role values), default VALIDATION_ROLES
+# (champion + fallback): legacy random-model rows and challenger shadow rows are
+# only included when a caller asks for them explicitly.
+
+def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None = None, *,
+                                     roles: tuple[str, ...] = VALIDATION_ROLES) -> list[dict]:
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
-    where = f"WHERE evaluation_status IN ('evaluated', 'data_missing') AND {_sc}"
-    params: list = [*_sp]
+    _rc, _rp = role_clause(roles)
+    where = f"WHERE evaluation_status IN ('evaluated', 'data_missing') AND {_sc} AND {_rc}"
+    params: list = [*_sp, *_rp]
     if lookback_days:
         cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
         where += " AND as_of_date >= ?"
@@ -968,7 +982,7 @@ def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None
                       risk_segment, system_version, evaluated_at, evaluation_status,
                       in_predicted_range, error_magnitude,
                       p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                      brier_score, log_loss, model_name,
+                      brier_score, log_loss, model_name, prediction_role,
                       start_price, pt_current_price
                FROM predictions
                {where}
@@ -978,10 +992,12 @@ def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None
     return [dict(r) for r in rows]
 
 
-def get_accuracy_heatmap_data(lookback_days: int | None = None, model_names: list[str] | None = None) -> list[dict]:
+def get_accuracy_heatmap_data(lookback_days: int | None = None, model_names: list[str] | None = None, *,
+                              roles: tuple[str, ...] = VALIDATION_ROLES) -> list[dict]:
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
-    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", "actual_direction IS NOT NULL", _sc]
-    params: list = [*_sp]
+    _rc, _rp = role_clause(roles)
+    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", "actual_direction IS NOT NULL", _sc, _rc]
+    params: list = [*_sp, *_rp]
     if lookback_days:
         clauses.append("as_of_date >= ?")
         params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
@@ -1003,7 +1019,8 @@ def get_accuracy_heatmap_data(lookback_days: int | None = None, model_names: lis
     return [dict(r) for r in rows]
 
 
-def get_calibration_data(lookback_days: int | None = None, model_names: list[str] | None = None) -> dict:
+def get_calibration_data(lookback_days: int | None = None, model_names: list[str] | None = None, *,
+                         roles: tuple[str, ...] = VALIDATION_ROLES) -> dict:
     """
     Returns all data needed for the calibration tab:
 
@@ -1019,8 +1036,9 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
       Brier baseline = 0.25 (coin flip), log-loss baseline = ln(2) ≈ 0.693
     """
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
-    clauses = ["evaluation_status = 'evaluated'", "actual_direction IS NOT NULL", _sc]
-    params: list = [*_sp]
+    _rc, _rp = role_clause(roles)
+    clauses = ["evaluation_status = 'evaluated'", "actual_direction IS NOT NULL", _sc, _rc]
+    params: list = [*_sp, *_rp]
     if lookback_days:
         clauses.append("as_of_date >= ?")
         params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
@@ -1138,11 +1156,13 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
     }
 
 
-def get_drift_data(horizon_days: int = 5, window: int = 30, lookback_days: int = 90, model_names: list[str] | None = None) -> list[dict]:
+def get_drift_data(horizon_days: int = 5, window: int = 30, lookback_days: int = 90, model_names: list[str] | None = None,
+                   *, roles: tuple[str, ...] = VALIDATION_ROLES) -> list[dict]:
     cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
-    extra = f"AND {_sc}"
-    params: list = [horizon_days, cutoff, *_sp]
+    _rc, _rp = role_clause(roles)
+    extra = f"AND {_sc} AND {_rc}"
+    params: list = [horizon_days, cutoff, *_sp, *_rp]
     if model_names:
         extra += f" AND model_name IN ({','.join('?' * len(model_names))})"
         params.extend(model_names)
@@ -1177,24 +1197,28 @@ def get_drift_data(horizon_days: int = 5, window: int = 30, lookback_days: int =
     return result
 
 
-def get_volume_by_horizon(lookback_days: int = 90) -> list[dict]:
+def get_volume_by_horizon(lookback_days: int = 90, *, roles: tuple[str, ...] = VALIDATION_ROLES) -> list[dict]:
     cutoff = (_today_cst() - timedelta(days=lookback_days)).isoformat()
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    _rc, _rp = role_clause(roles)
     with _db() as c:
         rows = c.execute(
             f"""SELECT as_of_date AS pred_date, horizon_days, COUNT(*) AS n
                FROM predictions
-               WHERE as_of_date >= ? AND horizon_days IS NOT NULL AND {scope_clause(LEGACY_REVIEW_SCOPES)[0]}
+               WHERE as_of_date >= ? AND horizon_days IS NOT NULL AND {_sc} AND {_rc}
                GROUP BY as_of_date, horizon_days
                ORDER BY as_of_date""",
-            [cutoff, *scope_clause(LEGACY_REVIEW_SCOPES)[1]],
+            [cutoff, *_sp, *_rp],
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_system_version_comparison(lookback_days: int | None = None, model_names: list[str] | None = None) -> list[dict]:
+def get_system_version_comparison(lookback_days: int | None = None, model_names: list[str] | None = None, *,
+                                  roles: tuple[str, ...] = VALIDATION_ROLES) -> list[dict]:
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
-    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", _sc]
-    params: list = [*_sp]
+    _rc, _rp = role_clause(roles)
+    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", _sc, _rc]
+    params: list = [*_sp, *_rp]
     if lookback_days:
         clauses.append("as_of_date >= ?")
         params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())

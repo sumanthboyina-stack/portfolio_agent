@@ -56,7 +56,7 @@ def _insert_prediction(scope: str, *, ticker: str = "AAPL", model_name: str = "c
         "evaluation_status": "evaluated", "brier_score": 0.2, "log_loss": 0.5,
         "model_name": model_name, "scope": scope, "outcome": "strong_correct",
         "actual_return": 0.02, "excess_return": 0.01, "recommendation": "BUY",
-        "conviction_score": 7, "composite_score": 7.0,
+        "conviction_score": 7, "composite_score": 7.0, "prediction_role": "champion",
     }
     row.update(overrides)
     with prediction_db_conn() as conn:

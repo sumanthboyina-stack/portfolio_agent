@@ -52,9 +52,9 @@ def _insert_rows(n_dates=3, per_date=12):
                     """INSERT INTO predictions (ticker, created_at, prediction, recommendation, horizon_days, as_of_date,
                            evaluation_date, evaluation_status, predicted_direction, actual_return, benchmark_return, excess_return,
                            composite_score, in_predicted_range, outcome, scope, model_name, brier_score, log_loss,
-                           p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up)
+                           p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up, prediction_role)
                        VALUES (?, datetime('now'), 'x', ?, 5, ?, ?, 'evaluated', ?, ?, 0.0, ?, ?, ?, 'strong_correct', 'shared_market', 'm',
-                           0.2, 0.6, 5, 10, 25, 40, 20)""",
+                           0.2, 0.6, 5, 10, 25, 40, 20, 'champion')""",
                     [f"T{d}_{i}", "BUY" if i >= per_date // 2 else "HOLD", day, day, "UP" if i >= per_date // 2 else "FLAT",
                      0.002 * i, 0.002 * i, float(i), i % 2])
         conn.commit()
@@ -73,7 +73,7 @@ def test_qa_page_renders_all_tabs_with_empty_data():
     labels = " ".join(t.label for t in at.tabs)
     for name in OLD_TABS + NEW_TABS:
         assert name in labels, name
-    assert len(at.tabs) == 12
+    assert len(at.tabs) == 13                                       # + Roles (champion / fallback / challenger)
 
 
 def test_qa_page_hosts_the_components_removed_from_the_user_page():

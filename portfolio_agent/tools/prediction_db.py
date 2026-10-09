@@ -15,7 +15,9 @@ Schema (predictions table):
   pt_mean, pt_median, pt_high, pt_low, pt_num_analysts, pt_current_price,
   actual_return, actual_direction, outcome, error_magnitude, evaluated_at,
   guardrail_flags (deterministic post-hoc caps applied before storage, e.g.
-  'no_news_bullish_capped', 'bounce_thesis_capped')
+  'no_news_bullish_capped', 'bounce_thesis_capped'),
+  prediction_role (champion | fallback | challenger | legacy_random | interactive —
+  see ROLE_* below; challenger rows are evaluated but never shown to users)
 """
 
 from __future__ import annotations
@@ -70,6 +72,76 @@ def scope_clause(scopes: tuple[str, ...]) -> tuple[str, list]:
     if not scopes:
         raise ValueError("scope_clause: at least one scope is required")
     return f"scope IN ({','.join('?' * len(scopes))})", list(scopes)
+
+
+# ── Role of a forecast row: which model-selection path produced it ────────────
+# champion       the configured champion model (engine_settings.apex_champion_model)
+# fallback       a model from the ordered fallback list, because the champion
+#                timed out / failed — still the production prediction that day
+# challenger     an optional shadow run of engine_settings.apex_challenger_model on
+#                the same prompt. Evaluated like any row, but NEVER shown to users
+#                and never fed back into prompts, same-day dedup,
+#                previous_prediction, rolling metrics or failure-pattern mining
+# legacy_random  rows written before champion selection, when run_apex picked a
+#                random model per run — kept and viewable, labelled as such
+# interactive    private chat / personalized forecasts (not the batch model plan)
+# insert_prediction always writes a role; NULL only ever means "predates the
+# column" and the migration below backfills it to legacy_random.
+ROLE_CHAMPION = "champion"
+ROLE_FALLBACK = "fallback"
+ROLE_CHALLENGER = "challenger"
+ROLE_LEGACY_RANDOM = "legacy_random"
+ROLE_INTERACTIVE = "interactive"
+PREDICTION_ROLES = frozenset({ROLE_CHAMPION, ROLE_FALLBACK, ROLE_CHALLENGER, ROLE_LEGACY_RANDOM, ROLE_INTERACTIVE})
+VALIDATION_ROLES: tuple[str, ...] = (ROLE_CHAMPION, ROLE_FALLBACK)                    # default validation views
+VALIDATION_ROLES_WITH_LEGACY: tuple[str, ...] = (*VALIDATION_ROLES, ROLE_LEGACY_RANDOM)
+REVIEW_ROLES: tuple[str, ...] = (*VALIDATION_ROLES_WITH_LEGACY, ROLE_CHALLENGER)       # role breakdown / comparison
+ROLE_LABELS = {
+    ROLE_CHAMPION: "Champion",
+    ROLE_FALLBACK: "Fallback",
+    ROLE_CHALLENGER: "Challenger",
+    ROLE_LEGACY_RANDOM: "Legacy (random model)",
+    ROLE_INTERACTIVE: "Interactive",
+}
+
+
+_schema_ready: set[str] = set()
+
+
+def ensure_schema() -> None:
+    """
+    Run the idempotent predictions schema/migration once per process per DB file.
+    Several readers (web pages, chat tools, batch helpers) open raw connections
+    that never pass through _db(); the two SQL-fragment helpers below call this
+    so a query that references prediction_role can never run before the column
+    exists on a database prediction_db hasn't touched yet in this process.
+    """
+    from portfolio_agent.tools import db as _db_module
+    key = str(_db_module.DB_PATH)
+    if key in _schema_ready:
+        return
+    with _db():
+        pass
+    _schema_ready.add(key)
+
+
+def role_clause(roles: tuple[str, ...], alias: str = "") -> tuple[str, list]:
+    """SQL fragment + params restricting a predictions query to *roles* (alias: table alias, e.g. "p")."""
+    roles = tuple(roles)
+    if not roles:
+        raise ValueError("role_clause: at least one role is required")
+    ensure_schema()
+    col = f"{alias}.prediction_role" if alias else "prediction_role"
+    return f"{col} IN ({','.join('?' * len(roles))})", list(roles)
+
+
+def not_challenger_sql(alias: str = "") -> str:
+    """Parameterless SQL fragment every user-facing / prompt-feeding reader adds: a challenger
+    row is written AFTER the champion row for the same ticker, so any "latest row" query would
+    otherwise surface it. Evaluate it at query time (it ensures the column exists)."""
+    ensure_schema()
+    col = f"{alias}.prediction_role" if alias else "prediction_role"
+    return f"COALESCE({col}, '') <> '{ROLE_CHALLENGER}'"
 
 
 @contextmanager
@@ -244,7 +316,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("guardrail_version",           "TEXT"),
         ("history_lineage",             "TEXT"),
         ("context_digest",              "TEXT"),
+        # No DEFAULT on purpose: ADD COLUMN ... DEFAULT 'champion' would stamp every
+        # pre-existing (randomly-selected) row as champion. insert_prediction always
+        # writes the role explicitly instead.
+        ("prediction_role",             "TEXT"),
     ])
+    # Rows that predate prediction_role came from random per-run model selection.
+    # Idempotent: once backfilled, no row is NULL again.
+    conn.execute("UPDATE predictions SET prediction_role = ? WHERE prediction_role IS NULL", [ROLE_LEGACY_RANDOM])
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_role ON predictions(prediction_role, horizon_days)")
     # Rows that predate scopes stay unclassified: they are never promoted to shared
     # by default and only reach readers through the restricted legacy path.
     conn.execute("UPDATE predictions SET scope = ? WHERE scope IS NULL", [SCOPE_LEGACY])
@@ -374,7 +454,8 @@ def get_today_horizons(ticker: str, today: str, *, scopes: tuple[str, ...] = DIS
     with _db() as c:
         rows = c.execute(
             f"""SELECT horizon_days FROM predictions
-                WHERE ticker = ? AND as_of_date = ? AND horizon_days IS NOT NULL AND {sc}""",
+                WHERE ticker = ? AND as_of_date = ? AND horizon_days IS NOT NULL AND {sc}
+                  AND {not_challenger_sql()}""",
             [ticker.upper(), today, *sp],
         ).fetchall()
     return {r[0] for r in rows}
@@ -395,7 +476,8 @@ def event_already_processed(ticker: str, trigger_event_id: int, today: str, *,
     with _db() as c:
         row = c.execute(
             f"""SELECT 1 FROM predictions
-                WHERE ticker = ? AND as_of_date = ? AND trigger_event_id = ? AND {sc} LIMIT 1""",
+                WHERE ticker = ? AND as_of_date = ? AND trigger_event_id = ? AND {sc}
+                  AND {not_challenger_sql()} LIMIT 1""",
             [ticker.upper(), today, trigger_event_id, *sp],
         ).fetchone()
     return row is not None
@@ -474,11 +556,16 @@ def insert_prediction(
     guardrail_version: Optional[str] = None,
     history_lineage: Optional[list] = None,
     context_digest: Optional[str] = None,
+    # Which model-selection path produced the row (see ROLE_* above). Always written.
+    prediction_role: str = ROLE_CHAMPION,
 ) -> dict:
     """
     Insert a new prediction row (append-only). One row per horizon per ticker per date.
     Returns {saved, ticker, changed, previous}.
     """
+    if prediction_role not in PREDICTION_ROLES:
+        raise ValueError(f"insert_prediction: prediction_role must be one of {sorted(PREDICTION_ROLES)}, "
+                         f"not {prediction_role!r}")
     if scope not in WRITABLE_SCOPES:
         raise ValueError(f"insert_prediction: scope must be one of {sorted(WRITABLE_SCOPES)}, not {scope!r}")
     if scope == SCOPE_SHARED and not context_digest:
@@ -536,12 +623,13 @@ def insert_prediction(
                         trigger_type, trigger_event_id,
                         weight_regime, weights_used, valuation_score, guardrail_flags, raw_conviction_score,
                         scope, origin, origin_run_id, origin_time_utc, owner_scope, evidence_refs,
-                        policy_version, model_used, guardrail_version, history_lineage, context_digest)
+                        policy_version, model_used, guardrail_version, history_lineage, context_digest,
+                        prediction_role)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -571,6 +659,7 @@ def insert_prediction(
                     policy_version, model_used, guardrail_version,
                     json.dumps(history_lineage, default=str) if history_lineage else None,
                     context_digest,
+                    prediction_role,
                 ],
             )
             c.commit()
@@ -587,12 +676,13 @@ def get_latest_prediction(ticker: str, horizon_days: Optional[int] = None, *,
         if horizon_days is not None:
             row = c.execute(
                 f"""SELECT * FROM predictions WHERE ticker = ? AND horizon_days = ? AND {sc}
+                      AND {not_challenger_sql()}
                     ORDER BY created_at DESC LIMIT 1""",
                 [ticker.upper(), horizon_days, *sp],
             ).fetchone()
         else:
             row = c.execute(
-                f"""SELECT * FROM predictions WHERE ticker = ? AND {sc}
+                f"""SELECT * FROM predictions WHERE ticker = ? AND {sc} AND {not_challenger_sql()}
                     ORDER BY created_at DESC LIMIT 1""",
                 [ticker.upper(), *sp],
             ).fetchone()
@@ -611,7 +701,7 @@ def get_prediction_history(ticker: str, limit: int = 10, *,
     sc, sp = scope_clause(scopes)
     with _db() as c:
         rows = c.execute(
-            f"""SELECT * FROM predictions WHERE ticker = ? AND {sc}
+            f"""SELECT * FROM predictions WHERE ticker = ? AND {sc} AND {not_challenger_sql()}
                 ORDER BY created_at DESC LIMIT ?""",
             [ticker.upper(), *sp, limit],
         ).fetchall()
@@ -749,7 +839,7 @@ def get_all_latest_predictions(*, scopes: tuple[str, ...] = DISPLAY_SCOPES) -> d
             SELECT p.* FROM predictions p
             INNER JOIN (
                 SELECT ticker, MAX(id) AS max_id
-                FROM predictions WHERE {sc} GROUP BY ticker
+                FROM predictions WHERE {sc} AND {not_challenger_sql()} GROUP BY ticker
             ) latest ON p.id = latest.max_id
         """, sp).fetchall()
     result = {}
@@ -805,11 +895,11 @@ def get_score_change_breakdown(ticker: str) -> Optional[dict]:
     ticker = ticker.upper()
     with _db() as c:
         rows = c.execute(
-            """SELECT as_of_date, recommendation, composite_score,
+            f"""SELECT as_of_date, recommendation, composite_score,
                       fundamental_score, research_score, macro_score, news_score,
                       weight_regime, weights_used, panel_summary
                FROM predictions
-               WHERE ticker = ? AND as_of_date IS NOT NULL
+               WHERE ticker = ? AND as_of_date IS NOT NULL AND {not_challenger_sql()}
                ORDER BY as_of_date DESC, created_at DESC""",
             [ticker],
         ).fetchall()

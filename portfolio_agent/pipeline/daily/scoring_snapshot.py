@@ -33,7 +33,7 @@ def _todays_prediction_rows(today: str) -> list[dict]:
     one with today's date.
     """
     from portfolio_agent.tools.db import db_conn
-    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, not_challenger_sql, scope_clause
 
     _sc, _sp = scope_clause(SHARED_SCOPES)
     with db_conn() as conn:
@@ -41,7 +41,7 @@ def _todays_prediction_rows(today: str) -> list[dict]:
             f"""SELECT ticker, composite_score, valuation_score, recommendation,
                       reasoning, reasoning_text, panel_summary, created_at, guardrail_flags
                FROM predictions
-               WHERE as_of_date = ? AND {_sc}
+               WHERE as_of_date = ? AND {_sc} AND {not_challenger_sql()}
                ORDER BY created_at DESC""",
             (today, *_sp),
         ).fetchall()

@@ -12,7 +12,9 @@ split, FLAT diagnostic, the scoring-snapshot tables — lives on the admin-only 
 page.
 
 Scope defaults to the viewer's own holdings + watchlist, with an explicit switch to the full
-shared prediction universe. Every filter narrows by *criteria*, never by an enumerable list of
+shared prediction universe. Rows default to the champion model plan (champion + fallback); predictions
+from the earlier random-model era are hidden behind an explicit "Include legacy predictions" switch and
+labelled as such, and challenger shadow rows never appear here (they are compared on Validation QA). Every filter narrows by *criteria*, never by an enumerable list of
 other people's specific tickers, so nothing here lets one viewer infer what somebody else
 holds or watches.
 """
@@ -41,7 +43,9 @@ inject_global_css()
 require_login()
 top_nav("validation")
 
-from portfolio_agent.tools.prediction_db import CURRENT_SYSTEM_VERSION
+from portfolio_agent.tools.prediction_db import (
+    CURRENT_SYSTEM_VERSION, ROLE_LABELS, ROLE_LEGACY_RANDOM, VALIDATION_ROLES, VALIDATION_ROLES_WITH_LEGACY,
+)
 from portfolio_agent.tools import validation_scorecard as scorecard_mod
 from web.data.validation import (
     _load_portfolio_tickers,
@@ -97,6 +101,16 @@ with st.sidebar:
     if _seg_sel == "All":
         st.caption(f"{material('public')} Widened to the full shared universe.")
 
+    st.divider()
+    _include_legacy = st.toggle(
+        "Include legacy predictions",
+        value=False,
+        key="val_include_legacy",
+        help="Predictions made before APEX switched to one champion model, when each run picked a random model "
+             "(Claude-Sonnet / GPT-4o / GPT-5 / o3). Mixed models, so not comparable over time — off by default.",
+    )
+_roles = VALIDATION_ROLES_WITH_LEGACY if _include_legacy else VALIDATION_ROLES
+
 # Scoped to the viewer's OWN holdings/watchlist, not the shared union across every user.
 _ctx = current_context("web:validation")
 _portfolio_tickers = _load_portfolio_tickers(_ctx)
@@ -112,16 +126,32 @@ if _seg_sel != "My Tickers":
 
 # ── Data + scorecards ─────────────────────────────────────────────────────────
 
-eval_df = _load_evaluated_predictions_df(lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+eval_df = _load_evaluated_predictions_df(lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers, roles=_roles)
 horizons = sorted(int(h) for h in eval_df["horizon_days"].dropna().unique()) if not eval_df.empty else []
 
+_n_legacy_hidden = 0 if _include_legacy else len(_load_evaluated_predictions_df(
+    lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers, roles=(ROLE_LEGACY_RANDOM,)))
+if _include_legacy:
+    st.caption(f"{material('history')} Includes legacy predictions from the random-model era — "
+               "mixed models, so read trends with care.")
+elif _n_legacy_hidden:
+    st.caption(f"{material('visibility_off')} {_n_legacy_hidden} legacy predictions (random model per run, before "
+               "champion selection) are hidden. Turn on **Include legacy predictions** in the sidebar to see them.")
+
 if not horizons:
-    st.info(
-        "No evaluated predictions yet. "
-        f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
-        "Schedule page to score matured predictions.",
-        icon=material("info"),
-    )
+    if _n_legacy_hidden:
+        st.info(
+            "No champion-model predictions have been scored yet in this scope — they mature 5–63 trading days "
+            "after they are made. Turn on **Include legacy predictions** to see the earlier random-model record.",
+            icon=material("hourglass_top"),
+        )
+    else:
+        st.info(
+            "No evaluated predictions yet. "
+            f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
+            "Schedule page to score matured predictions.",
+            icon=material("info"),
+        )
     st.stop()
 
 # Momentum / SPY-prior-window baselines need one price fetch per ticker, so a big scope asks first.
@@ -242,7 +272,7 @@ with ch2:
 with st.expander("Prediction history", expanded=False):
     from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
 
-    preds = [p for p in get_recent_evaluated_predictions(limit=500, lookback_days=lookback)
+    preds = [p for p in get_recent_evaluated_predictions(limit=500, lookback_days=lookback, roles=_roles)
              if p.get("horizon_days") == _h_sel]
     _my_set = set(_portfolio_tickers) | set(_watchlist_tickers)
     if _seg_sel == "My Tickers" and _my_set and preds:
@@ -313,6 +343,7 @@ with st.expander("Prediction history", expanded=False):
                 "Outcome":         oc.replace("_", " ").title() if isinstance(oc, str) else oc,
                 "Conviction":      p.get("conviction_score"),
                 "Excess vs SPY":   fmt_pct(er*100, signed=True) if er is not None else "—",
+                "Source":          ROLE_LABELS.get(p.get("prediction_role"), p.get("prediction_role") or "—"),
             })
 
         st.dataframe(
@@ -332,6 +363,7 @@ with st.expander("Prediction history", expanded=False):
                 "Outcome":          st.column_config.Column(help="Whether the call was scored correct or wrong, and by how much."),
                 "Conviction":       st.column_config.Column(help="Model's self-reported confidence in this call, 1 (low) – 10 (high)."),
                 "Excess vs SPY":    st.column_config.Column(help="Actual return minus the S&P 500's return over the same window. Positive = beat the market."),
+                "Source":           st.column_config.Column(help="Champion: the configured APEX model · Fallback: a backup model used because the champion failed that run · Legacy (random model): made before champion selection."),
             },
         )
         st.caption(f"{len(filtered)} of {len(preds)} evaluated {_H_LABELS.get(_h_sel, f'{_h_sel}d')} predictions shown.")

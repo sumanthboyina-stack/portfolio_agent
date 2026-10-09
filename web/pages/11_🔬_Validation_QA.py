@@ -13,6 +13,10 @@ the admin drawer instead of on the main Validation page.
 It also hosts everything that used to sit on the user-facing Validation page before that page was reduced to
 four score cards: Baselines, Ranking detail, Calibration, Models, FLAT diagnostic, the legacy metric tiles &
 outcome breakdown, the compounded call-return index, and the scoring-snapshot tables.
+
+Rows are filtered by prediction_role (sidebar "Prediction roles", default champion + fallback; legacy
+random-model rows on request). The Roles tab is the one place every role — including challenger shadow
+rows — is shown side by side, with the champion-vs-challenger comparison on the same tickers and dates.
 """
 from __future__ import annotations
 
@@ -47,7 +51,9 @@ from portfolio_agent.tools.validation_engine import (
     get_volume_by_horizon,
     get_system_version_comparison,
 )
-from portfolio_agent.tools.prediction_db import get_validation_reports, CURRENT_SYSTEM_VERSION
+from portfolio_agent.tools.prediction_db import (
+    get_validation_reports, CURRENT_SYSTEM_VERSION, REVIEW_ROLES, VALIDATION_ROLES, VALIDATION_ROLES_WITH_LEGACY,
+)
 from web.data.validation import (
     _load_metric_series,
     _load_portfolio_tickers,
@@ -113,7 +119,7 @@ with st.sidebar:
         n = model_name.lower()
         return "claude" in n or "gpt-4" in n or "gpt-5" in n or "o3" in n
 
-    _all_model_names = _get_model_names()
+    _all_model_names = _get_model_names(roles=VALIDATION_ROLES_WITH_LEGACY)
     _higher_names = [m for m in _all_model_names if _is_higher_reasoning(m)]
     _lower_names  = [m for m in _all_model_names if not _is_higher_reasoning(m)]
 
@@ -158,6 +164,27 @@ with st.sidebar:
         ),
     )
 
+    st.divider()
+
+    st.markdown(
+        '<p style="font-size:0.72rem;font-weight:600;color:#9CA3AF;margin:0 0 8px">'
+        'Prediction roles</p>',
+        unsafe_allow_html=True,
+    )
+    _role_sel = st.radio(
+        "roles",
+        ["Champion + fallback", "+ Legacy (random model)"],
+        index=0,
+        label_visibility="collapsed",
+        key="valqa_roles",
+        help=(
+            "Champion + fallback: rows from the configured champion model plan (default)  ·  "
+            "+ Legacy: also rows from the random-model era, before champion selection. "
+            "Challenger shadow rows only appear on the Roles tab."
+        ),
+    )
+_qa_roles = VALIDATION_ROLES if _role_sel == "Champion + fallback" else VALIDATION_ROLES_WITH_LEGACY
+
 # The loaders are scoped to the caller's own holdings/watchlist and need the caller's context
 # (this page used to call them with no argument, which raised a TypeError on load).
 _ctx = current_context("web:validation_qa")
@@ -167,7 +194,8 @@ _watchlist_tickers = _load_watchlist_tickers(_ctx)
 # ── Shared data for the detail tabs (same filters as the sidebar) ─────────────
 
 _H_LABELS_ALL = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
-_qa_df = _load_evaluated_predictions_df(lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+_qa_df = _load_evaluated_predictions_df(lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers,
+                                        roles=_qa_roles)
 _qa_horizons = sorted(int(h) for h in _qa_df["horizon_days"].dropna().unique()) if not _qa_df.empty else []
 
 _PRICE_AUTO_MAX_TICKERS = 60
@@ -232,6 +260,7 @@ tabs = st.tabs([
     f"{material('grid_view')} Legacy tiles & outcomes",
     f"{material('show_chart')} Equity curve",
     f"{material('calculate')} Scoring snapshots",
+    f"{material('swap_horiz')} Roles",
 ])
 
 # ── Tab 1: Metric Trends ──────────────────────────────────────────────────────
@@ -246,13 +275,16 @@ with tabs[0]:
                 "Schedule page) scores matured predictions."
             )
 
-            metric_df  = _load_metric_series(_seg_sel, _portfolio_tickers, _watchlist_tickers)
+            metric_df  = _load_metric_series(_seg_sel, _portfolio_tickers, _watchlist_tickers, roles=_qa_roles)
             rolling_df = _load_rolling_metrics_series(_seg_sel)
 
             if _model_filter and not metric_df.empty and "model_name" in metric_df.columns:
                 metric_df = metric_df[metric_df["model_name"].isin(_model_filter)]
             if _model_filter and not rolling_df.empty:
                 st.caption(f"{material('info')} Aggregate rolling metrics (dashed lines) are not model-filtered — they reflect all models.")
+            if not rolling_df.empty:
+                st.caption(f"{material('info')} The nightly aggregate (dashed lines) excludes challenger rows but keeps "
+                           "legacy random-model rows; it is not filtered by the Prediction roles selector.")
 
             H_COLORS = {5: "#2563EB", 21: "#7C3AED", 63: "#059669"}
             H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
@@ -349,7 +381,7 @@ with tabs[0]:
                 st.divider()
 
                 st.subheader("Prediction Volume by Horizon")
-                vol_data = get_volume_by_horizon(lookback_days=lookback)
+                vol_data = get_volume_by_horizon(lookback_days=lookback, roles=_qa_roles)
                 if not vol_data:
                     st.info("No volume data yet.")
                 else:
@@ -358,7 +390,7 @@ with tabs[0]:
 # ── Tab 2: Confidence Calibration ─────────────────────────────────────────────
 
 with tabs[1]:
-    _cal_raw = get_calibration_data(lookback_days=lookback, model_names=_model_filter)
+    _cal_raw = get_calibration_data(lookback_days=lookback, model_names=_model_filter, roles=_qa_roles)
     if isinstance(_cal_raw, list):
         _cal_raw = {"conviction": _cal_raw, "summary": {}, "reliability": [], "bucket_table": []}
     cal            = _cal_raw
@@ -451,7 +483,7 @@ perfect = 0.0 · coin flip = 0.25 · worst = 1.0
             # Prediction History tab, since it's the same probability-calibration
             # detail this tab already covers, not something a friend needs to see ──
             from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
-            _hist_preds = get_recent_evaluated_predictions(limit=1000, lookback_days=lookback)
+            _hist_preds = get_recent_evaluated_predictions(limit=1000, lookback_days=lookback, roles=_qa_roles)
             if _model_filter:
                 _hist_preds = [p for p in _hist_preds if p.get("model_name") in _model_filter]
             b_vals  = [p["brier_score"] for p in _hist_preds if p.get("brier_score") is not None]
@@ -551,7 +583,7 @@ with tabs[2]:
 # ── Tab 4: Version Comparison ─────────────────────────────────────────────────
 
 with tabs[3]:
-    ver_data = get_system_version_comparison(lookback_days=lookback, model_names=_model_filter)
+    ver_data = get_system_version_comparison(lookback_days=lookback, model_names=_model_filter, roles=_qa_roles)
     if not ver_data:
         st.info("No version comparison data yet — needs evaluated predictions.")
     else:
@@ -594,7 +626,7 @@ with tabs[5]:
 # ── Tab 7: Calibration (probability skill vs sample baselines) ────────────────
 
 with tabs[6]:
-    render_calibration_headline(lookback, _model_filter)
+    render_calibration_headline(lookback, _model_filter, _qa_roles)
     st.caption("The reliability diagram and conviction calibration are on the Confidence Calibration tab.")
     _cal_rows = []
     for _h, _rep in sorted(_reports.items()):
@@ -639,7 +671,8 @@ with tabs[8]:
 # ── Tab 10: Legacy tiles & outcome breakdown ──────────────────────────────────
 
 with tabs[9]:
-    _qa_metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers)
+    _qa_metrics = _compute_filtered_metrics(_model_filter, lookback, _seg_sel, _portfolio_tickers, _watchlist_tickers,
+                                            roles=_qa_roles)
     _qa_by_h: dict[int, dict] = {}
     for _row in _qa_metrics:
         _qa_by_h.setdefault(_row["horizon_days"], _row)
@@ -658,3 +691,60 @@ with tabs[10]:
 
 with tabs[11]:
     render_scoring_snapshots()
+
+# ── Tab 13: Roles (champion / fallback / challenger / legacy) ─────────────────
+
+def _fmt_acc(v) -> str:
+    return "—" if v is None else f"{v:.1%}"
+
+
+def _fmt_skill(v) -> str:
+    return "—" if v is None else f"{v:+.1%}"
+
+
+with tabs[12]:
+    from portfolio_agent.tools.validation_roles import champion_vs_challenger, role_breakdown
+
+    st.caption("Every evaluated row split by how its model was chosen. Lookback, model and segment filters from the "
+               "sidebar apply; the Prediction roles selector does not (every role is shown here). Baselines here use "
+               "no price history, so momentum / SPY-prior-window comparisons are left out.")
+    _roles_df = _load_evaluated_predictions_df(lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers,
+                                               roles=REVIEW_ROLES)
+    if _roles_df.empty:
+        st.info("No evaluated predictions in this scope yet.", icon=material("info"))
+    else:
+        _rb = role_breakdown(_roles_df)
+        st.markdown("**By prediction role**")
+        st.dataframe(pd.DataFrame([{
+            "Horizon": _H_LABELS_ALL.get(r["horizon_days"], f"{r['horizon_days']}d"), "Role": r["label"], "n": r["n"],
+            "Accuracy": _fmt_acc(r["accuracy"]), "Best naive baseline": r["best_baseline"] or "—",
+            "Baseline accuracy": _fmt_acc(r["best_baseline_accuracy"]),
+            "Brier skill (UP vs not)": _fmt_skill(r["brier_skill_binary"]),
+            "Brier skill (5-bucket)": _fmt_skill(r["brier_skill_five"]),
+        } for r in _rb]), hide_index=True, use_container_width=True)
+        st.caption("Legacy (random model) rows mix four models and are shown for reference only.")
+
+        st.divider()
+        st.markdown("**Champion vs challenger — same tickers, same dates**")
+        _cvc = champion_vs_challenger(_roles_df)
+        if not _cvc:
+            st.info("No challenger rows have matured yet. A challenger runs only when engine_settings has "
+                    "apex_challenger_model set and apex_challenger_sample_pct above 0 (off by default).",
+                    icon=material("info"))
+        else:
+            st.dataframe(pd.DataFrame([{
+                "Horizon": _H_LABELS_ALL.get(h, f"{h}d"), "Pairs": c["n_pairs"], "Dates": c["n_dates"],
+                "Production model(s)": ", ".join(c["production_models"]) or "—",
+                "Challenger model(s)": ", ".join(c["challenger_models"]) or "—",
+                "Production accuracy": _fmt_acc(c["production"]["accuracy"]),
+                "Challenger accuracy": _fmt_acc(c["challenger"]["accuracy"]),
+                "Production Brier skill (5-bucket)": _fmt_skill(c["production"]["brier_skill_five"]),
+                "Challenger Brier skill (5-bucket)": _fmt_skill(c["challenger"]["brier_skill_five"]),
+                "Both right": c["head_to_head"]["both_right"],
+                "Only production right": c["head_to_head"]["production_only"],
+                "Only challenger right": c["head_to_head"]["challenger_only"],
+                "Both wrong": c["head_to_head"]["both_wrong"],
+            } for h, c in sorted(_cvc.items())]), hide_index=True, use_container_width=True)
+            st.caption("Production = the champion row, or the fallback row on runs where the champion failed. Only "
+                       "(ticker, date) pairs with BOTH a production and a challenger row count. A handful of pairs or "
+                       "dates cannot separate two models — treat small samples as anecdotes.")

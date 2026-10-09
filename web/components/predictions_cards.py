@@ -565,7 +565,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None, owner: str | No
     own private chat forecasts on this ticker when owner is given — a private
     forecast someone else made on this ticker must never surface here.
     """
-    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, not_challenger_sql, scope_clause
 
     st.markdown("---")
     _drill_name = _cname(drill_ticker)
@@ -583,7 +583,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None, owner: str | No
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT * FROM predictions
-               WHERE ticker = ? AND (as_of_date = ? OR ? IS NULL) AND {where}
+               WHERE ticker = ? AND (as_of_date = ? OR ? IS NULL) AND {where} AND {not_challenger_sql()}
                ORDER BY horizon_days ASC, created_at DESC""",
             (drill_ticker, drill_date, drill_date, *params),
         ).fetchall()

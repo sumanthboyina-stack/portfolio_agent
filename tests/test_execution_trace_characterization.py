@@ -263,7 +263,6 @@ def test_run_apex_primary_success_is_exactly_one_model_call(monkeypatch):
         calls.append(model)
         return _fake_resp(_VALID_JSON)
 
-    monkeypatch.setattr(adr, "random", type("R", (), {"shuffle": staticmethod(lambda lst: None)}))
     monkeypatch.setattr(adr.litellm, "acompletion", _fake_acompletion)
 
     result = asyncio.run(adr.run_apex("AAPL", "prompt"))
@@ -282,7 +281,6 @@ def test_run_apex_primary_failure_falls_back_to_second_model_once(monkeypatch):
             raise RuntimeError("429 rate limit")              # matches _is_failover_error
         return _fake_resp(_VALID_JSON)
 
-    monkeypatch.setattr(adr, "random", type("R", (), {"shuffle": staticmethod(lambda lst: None)}))
     monkeypatch.setattr(adr.litellm, "acompletion", _fake_acompletion)
 
     result = asyncio.run(adr.run_apex("AAPL", "prompt"))
@@ -290,7 +288,7 @@ def test_run_apex_primary_failure_falls_back_to_second_model_once(monkeypatch):
     assert len(calls) == 2                                    # primary + exactly one fallback attempt
 
 
-def test_run_apex_both_models_failing_returns_none_after_exactly_two_calls(monkeypatch):
+def test_run_apex_all_models_failing_returns_none_after_one_call_per_plan_model(monkeypatch):
     from portfolio_agent.tools import apex_dual_run as adr
 
     calls = []
@@ -299,12 +297,13 @@ def test_run_apex_both_models_failing_returns_none_after_exactly_two_calls(monke
         calls.append(model)
         raise RuntimeError("429 rate limit")
 
-    monkeypatch.setattr(adr, "random", type("R", (), {"shuffle": staticmethod(lambda lst: None)}))
     monkeypatch.setattr(adr.litellm, "acompletion", _fake_acompletion)
 
     result = asyncio.run(adr.run_apex("AAPL", "prompt"))
     assert result is None
-    assert len(calls) == 2                                    # never more than one retry — no placeholder written
+    # champion + each fallback exactly once, in order — no placeholder written
+    assert len(calls) == 1 + len(adr.DEFAULT_FALLBACKS)
+    assert len(set(calls)) == len(calls)
 
 
 # ── web/chat orchestration: chain fallback, one attempt per chain entry ──────

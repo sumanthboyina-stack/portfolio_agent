@@ -46,11 +46,14 @@ from web.components.validation_charts import (
 from web.components.validation_cards import _render_scorecard_tiles
 
 
-def render_calibration_headline(lookback: int, model_names: list[str] | None = None) -> None:
+def render_calibration_headline(lookback: int, model_names: list[str] | None = None,
+                                roles: tuple[str, ...] | None = None) -> None:
+    from portfolio_agent.tools.prediction_db import VALIDATION_ROLES
     from portfolio_agent.tools.validation_engine import get_calibration_data
 
     headline = _calibration_headline(
-        get_calibration_data(lookback_days=lookback, model_names=model_names).get("reliability", [])
+        get_calibration_data(lookback_days=lookback, model_names=model_names,
+                             roles=roles or VALIDATION_ROLES).get("reliability", [])
     )
     if headline:
         st.info(

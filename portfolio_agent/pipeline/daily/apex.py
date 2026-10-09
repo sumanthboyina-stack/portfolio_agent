@@ -1,4 +1,4 @@
-"""APEX phase — per-ticker dual-run predictions."""
+"""APEX phase — per-ticker predictions from the champion model plan (see tools.apex_dual_run)."""
 
 from __future__ import annotations
 
@@ -67,7 +67,8 @@ async def _run_daily_apex(
     scheduled_horizons_override: list[int] | None = None,
 ) -> None:
     """
-    Phase 4 — per-ticker APEX dual-run predictions.
+    Phase 4 — per-ticker APEX predictions: the champion model (fallbacks on
+    failure), plus an optional challenger shadow run on a sampled subset.
 
     trigger_map: {ticker → (trigger_type, trigger_event_id)} for event-driven runs.
     scheduled_horizons_override: pass explicit horizons (event-driven cadence path);
@@ -87,6 +88,7 @@ async def _run_daily_apex(
         get_trailing_return as _get_trailing_return,
     )
     from portfolio_agent.tools.apex_dual_run import run_apex as _run_apex
+    from portfolio_agent.tools.apex_dual_run import challenger_selected, load_model_plan, run_challenger
 
     if trigger_map is None:
         trigger_map = {}
@@ -114,6 +116,14 @@ async def _run_daily_apex(
         scheduled_horizons = get_scheduled_horizons(today_date)
     horizons_instr = _build_horizons_instruction(scheduled_horizons)
     log.info(f"  Scheduled horizons today: {scheduled_horizons}", event_type="info")
+
+    # One plan per phase: decides challenger sampling below. run_apex resolves the
+    # same engine_settings itself, so champion/fallback order is identical.
+    model_plan = load_model_plan()
+    log.info(f"  APEX model plan: {model_plan.describe()}", event_type="apex_model_plan",
+             champion=model_plan.champion[2], fallbacks=[m[2] for m in model_plan.fallbacks],
+             challenger=model_plan.challenger[2] if model_plan.challenger else None,
+             challenger_pct=model_plan.challenger_pct)
 
     seen_pt: set[str] = set()
     to_predict = []
@@ -234,8 +244,126 @@ async def _run_daily_apex(
         event_type="fetch_start",
     )
 
+    def _save_horizon_rows(
+        ticker: str, result, horizons: list[int], *,
+        has_news: bool, trailing_10d: float | None,
+        trig_type: str | None, trig_ev_id: int | None,
+    ) -> tuple[list[int], list[str]]:
+        """Write one shared row per horizon in *horizons* from *result* (champion,
+        fallback or challenger — result.role becomes the row's prediction_role),
+        applying the same conviction guardrails to each. Returns
+        (horizons saved, error strings)."""
+        data             = result.merged
+        model_label_used = "+".join(result.model_sources)
+        model_prov_used  = result.model_sources[0].split("-")[0].lower()
+
+        _ctx_res = {}
+        try:
+            _ctx_res = json.loads(ctx_map.get(ticker, "{}")).get("research") or {}
+        except Exception:
+            pass
+
+        _common = dict(
+            ticker=ticker,
+            prediction=data.get("prediction", "NEUTRAL"),
+            recommendation=data.get("recommendation", "HOLD"),
+            confidence=data.get("confidence"),
+            target_price=data.get("target_price"),
+            fundamental_score=data.get("fundamental_score"),
+            research_score=data.get("research_score"),
+            macro_score=data.get("macro_score"),
+            news_score=data.get("news_score"),
+            composite_score=data.get("composite_score"),
+            reasoning=data.get("reasoning", ""),
+            panel_summary=data.get("panel_summary", {}),
+            model_name=model_label_used,
+            model_provider=model_prov_used,
+            pt_mean=_ctx_res.get("price_target_avg"),
+            pt_median=_ctx_res.get("price_target_median"),
+            pt_high=_ctx_res.get("price_target_high"),
+            pt_low=_ctx_res.get("price_target_low"),
+            pt_num_analysts=_ctx_res.get("num_analysts"),
+            pt_current_price=_ctx_res.get("current_price"),
+            used_fallback=result.used_fallback,
+            prediction_role=result.role,
+            weight_regime=data.get("weight_regime"),
+            weights_used=data.get("weights_used"),
+            valuation_score=data.get("valuation_score"),
+        )
+
+        horizons_data    = data.get("horizons") or []
+        horizons_by_days = {
+            h.get("horizon_days"): h for h in horizons_data
+            if isinstance(h, dict) and h.get("horizon_days")
+        }
+        saved:  list[int] = []
+        errors: list[str] = []
+
+        for h_days in horizons:
+            h_data = horizons_by_days.get(h_days, {})
+            dist   = h_data.get("distribution") or {}
+
+            _pred_dir = h_data.get("predicted_direction")
+            _raw_conviction = h_data.get("conviction_score")
+            _conviction, _flags = _apply_conviction_guardrails(
+                _pred_dir, _raw_conviction, has_news, trailing_10d,
+            )
+
+            # A row's own dict, not the shared _common (which is reused across
+            # every horizon of this ticker) -- composite_score is capped ONLY
+            # for the horizon(s) the guardrail actually fired on.
+            _row = dict(_common)
+            if _flags:
+                _orig_composite = _row.get("composite_score")
+                if _orig_composite is not None:
+                    _row["composite_score"] = min(float(_orig_composite), _conviction)
+                log.warning(
+                    f"  [guardrail] {ticker} {h_days}d — conviction capped "
+                    f"({_raw_conviction} → {_conviction}), composite_score capped "
+                    f"({_orig_composite} → {_row.get('composite_score')}): {', '.join(_flags)}",
+                    event_type="warning", ticker=ticker,
+                )
+
+            _prov = ForecastProvenance(
+                origin="pipeline.apex", model_used=f"{model_prov_used}:{model_label_used}",
+                policy_version=policy_version, guardrail_version=GUARDRAIL_VERSION,
+            )
+            save   = write_shared_forecast(
+                mctx_map[ticker], _prov,
+                **_row,
+                horizon_days=h_days,
+                predicted_direction=_pred_dir,
+                predicted_return_low=h_data.get("predicted_return_low"),
+                predicted_return_high=h_data.get("predicted_return_high"),
+                conviction_score=_conviction,
+                # Preserved even though the DISPLAYED/stored conviction_score
+                # above is capped -- so failure-pattern mining can still find
+                # this call in the high-conviction bucket it actually belongs
+                # in (see validation_engine._split_by_conviction_for_mining).
+                # None (not just equal to conviction_score) when no cap fired,
+                # so a reader can tell "never capped" apart from "capped to
+                # exactly its own raw value" by coincidence.
+                raw_conviction_score=_raw_conviction if _flags else None,
+                reasoning_text=h_data.get("reasoning_text") or data.get("reasoning", ""),
+                start_price=price_map.get(ticker),
+                p_strong_down=dist.get("strong_down"),
+                p_moderate_down=dist.get("moderate_down"),
+                p_flat=dist.get("flat"),
+                p_moderate_up=dist.get("moderate_up"),
+                p_strong_up=dist.get("strong_up"),
+                trigger_type=trig_type,
+                trigger_event_id=trig_ev_id,
+                guardrail_flags=_flags or None,
+            )
+            if save.get("saved"):
+                saved.append(h_days)
+            else:
+                errors.append(f"{h_days}d: {save.get('error', 'unknown error')}")
+        return saved, errors
+
     completed: list[str] = []
     failed:    list[str] = list(ctx_failed)
+    challenger_rows = 0
 
     if tracker:
         tracker.start_phase("apex", total=len(has_ctx))
@@ -274,54 +402,14 @@ async def _run_daily_apex(
                 tracker.tick("apex", len(completed), len(has_ctx), ticker=ticker)
             continue
 
-        data             = result.merged
         model_label_used = "+".join(result.model_sources)
-        model_prov_used  = result.model_sources[0].split("-")[0].lower()
+        _trig_type, _trig_ev_id = trigger_map.get(ticker, (None, None))
+        _has_news = bool(_ctx_parsed.get("news"))
+        saved_horizons: list[int] = []
 
         try:
-            _ctx_res = {}
-            try:
-                _ctx_res = json.loads(ctx_map.get(ticker, "{}")).get("research") or {}
-            except Exception:
-                pass
+            done_today = get_today_horizons(ticker, today, scopes=SHARED_SCOPES)
 
-            _common = dict(
-                ticker=ticker,
-                prediction=data.get("prediction", "NEUTRAL"),
-                recommendation=data.get("recommendation", "HOLD"),
-                confidence=data.get("confidence"),
-                target_price=data.get("target_price"),
-                fundamental_score=data.get("fundamental_score"),
-                research_score=data.get("research_score"),
-                macro_score=data.get("macro_score"),
-                news_score=data.get("news_score"),
-                composite_score=data.get("composite_score"),
-                reasoning=data.get("reasoning", ""),
-                panel_summary=data.get("panel_summary", {}),
-                model_name=model_label_used,
-                model_provider=model_prov_used,
-                pt_mean=_ctx_res.get("price_target_avg"),
-                pt_median=_ctx_res.get("price_target_median"),
-                pt_high=_ctx_res.get("price_target_high"),
-                pt_low=_ctx_res.get("price_target_low"),
-                pt_num_analysts=_ctx_res.get("num_analysts"),
-                pt_current_price=_ctx_res.get("current_price"),
-                used_fallback=result.used_fallback,
-                weight_regime=data.get("weight_regime"),
-                weights_used=data.get("weights_used"),
-                valuation_score=data.get("valuation_score"),
-            )
-
-            done_today       = get_today_horizons(ticker, today, scopes=SHARED_SCOPES)
-            horizons_data    = data.get("horizons") or []
-            horizons_by_days = {
-                h.get("horizon_days"): h for h in horizons_data
-                if isinstance(h, dict) and h.get("horizon_days")
-            }
-            saved_count   = 0
-            save_errors: list[str] = []
-
-            _trig_type, _trig_ev_id = trigger_map.get(ticker, (None, None))
             # This ticker reached generation for an event-driven reason (see
             # the pre-fetch skip logic above, which already confirmed THIS
             # event hasn't produced a row yet) -- the generic "done today"
@@ -331,82 +419,26 @@ async def _run_daily_apex(
             done_today_for_save = set() if _trig_ev_id is not None else done_today
             horizons_needed = [h for h in scheduled_horizons if h not in done_today_for_save]
 
-            _has_news = bool(_ctx_parsed.get("news"))
             try:
                 _trailing_10d = _get_trailing_return(ticker, today)
             except Exception:
                 _trailing_10d = None
 
-            for h_days in scheduled_horizons:
-                if h_days in done_today_for_save:
-                    continue
-                h_data = horizons_by_days.get(h_days, {})
-                dist   = h_data.get("distribution") or {}
+            saved_horizons, save_errors = _save_horizon_rows(
+                ticker, result, horizons_needed,
+                has_news=_has_news, trailing_10d=_trailing_10d,
+                trig_type=_trig_type, trig_ev_id=_trig_ev_id,
+            )
+            saved_count = len(saved_horizons)
 
-                _pred_dir = h_data.get("predicted_direction")
-                _raw_conviction = h_data.get("conviction_score")
-                _conviction, _flags = _apply_conviction_guardrails(
-                    _pred_dir, _raw_conviction, _has_news, _trailing_10d,
-                )
-
-                # A row's own dict, not the shared _common (which is reused across
-                # every horizon of this ticker) -- composite_score is capped ONLY
-                # for the horizon(s) the guardrail actually fired on.
-                _row = dict(_common)
-                if _flags:
-                    _orig_composite = _row.get("composite_score")
-                    if _orig_composite is not None:
-                        _row["composite_score"] = min(float(_orig_composite), _conviction)
-                    log.warning(
-                        f"  [guardrail] {ticker} {h_days}d — conviction capped "
-                        f"({_raw_conviction} → {_conviction}), composite_score capped "
-                        f"({_orig_composite} → {_row.get('composite_score')}): {', '.join(_flags)}",
-                        event_type="warning", ticker=ticker,
-                    )
-
-                _prov = ForecastProvenance(
-                    origin="pipeline.apex", model_used=f"{model_prov_used}:{model_label_used}",
-                    policy_version=policy_version, guardrail_version=GUARDRAIL_VERSION,
-                )
-                save   = write_shared_forecast(
-                    mctx_map[ticker], _prov,
-                    **_row,
-                    horizon_days=h_days,
-                    predicted_direction=_pred_dir,
-                    predicted_return_low=h_data.get("predicted_return_low"),
-                    predicted_return_high=h_data.get("predicted_return_high"),
-                    conviction_score=_conviction,
-                    # Preserved even though the DISPLAYED/stored conviction_score
-                    # above is capped -- so failure-pattern mining can still find
-                    # this call in the high-conviction bucket it actually belongs
-                    # in (see validation_engine._split_by_conviction_for_mining).
-                    # None (not just equal to conviction_score) when no cap fired,
-                    # so a reader can tell "never capped" apart from "capped to
-                    # exactly its own raw value" by coincidence.
-                    raw_conviction_score=_raw_conviction if _flags else None,
-                    reasoning_text=h_data.get("reasoning_text") or data.get("reasoning", ""),
-                    start_price=price_map.get(ticker),
-                    p_strong_down=dist.get("strong_down"),
-                    p_moderate_down=dist.get("moderate_down"),
-                    p_flat=dist.get("flat"),
-                    p_moderate_up=dist.get("moderate_up"),
-                    p_strong_up=dist.get("strong_up"),
-                    trigger_type=_trig_type,
-                    trigger_event_id=_trig_ev_id,
-                    guardrail_flags=_flags or None,
-                )
-                if save.get("saved"):
-                    saved_count += 1
-                else:
-                    save_errors.append(f"{h_days}d: {save.get('error', 'unknown error')}")
-
-            rec  = data.get("recommendation", "?")
-            conf = data.get("confidence", "?")
-            run_tag = "fallback" if result.used_fallback else "primary"
+            rec  = result.merged.get("recommendation", "?")
+            conf = result.merged.get("confidence", "?")
+            run_tag = result.role if not result.fallback_reason else f"{result.role}: {result.fallback_reason}"
             log.info(
                 f"  [{model_label_used}] APEX: {ticker} → {rec} (conf={conf}, {run_tag}) "
                 f"· {saved_count}/{len(horizons_needed)} horizon row(s) saved",
                 event_type="db_write", ticker=ticker, action=rec, model=model_label_used,
+                role=result.role,
             )
 
             for _err in save_errors:
@@ -432,6 +464,34 @@ async def _run_daily_apex(
             )
             failed.append(ticker)
 
+        # ── Optional challenger: same prompt, same horizons the production row(s)
+        # just covered. Kept outside the try above so a challenger problem never
+        # changes the ticker's own completed/failed status.
+        if saved_horizons and model_plan.challenger and challenger_selected(ticker, today, model_plan.challenger_pct):
+            try:
+                ch = await run_challenger(ticker, prompt, model_plan)
+                if ch is not None:
+                    ch_saved, ch_errors = _save_horizon_rows(
+                        ticker, ch, saved_horizons,
+                        has_news=_has_news, trailing_10d=_trailing_10d,
+                        trig_type=_trig_type, trig_ev_id=_trig_ev_id,
+                    )
+                    challenger_rows += len(ch_saved)
+                    log.info(
+                        f"  [{ch.model_sources[0]}] APEX challenger: {ticker} → "
+                        f"{ch.merged.get('recommendation', '?')} · {len(ch_saved)}/{len(saved_horizons)} row(s) saved",
+                        event_type="apex_challenger", ticker=ticker, model=ch.model_sources[0],
+                        role=ch.role, saved=len(ch_saved),
+                    )
+                    for _err in ch_errors:
+                        log.warning(f"  [challenger] {ticker} save failed — {_err}",
+                                    event_type="warning", ticker=ticker)
+            except Exception as exc:
+                log.warning(
+                    f"  [challenger] {ticker} — {type(exc).__name__}: {exc} — no challenger row",
+                    event_type="warning", ticker=ticker,
+                )
+
         if tracker:
             tracker.tick("apex", len(completed), len(has_ctx), ticker=ticker,
                          note=f"{ticker_num}/{len(has_ctx)}")
@@ -440,6 +500,7 @@ async def _run_daily_apex(
         tracker.finish_phase("apex", len(completed), len(failed))
     log.info(
         f"\n  APEX phase done — {len(completed)} tickers · {len(failed)} failed"
-        f"  ({len(has_ctx)} per-ticker dual-run calls, horizons {scheduled_horizons})",
+        f"  ({len(has_ctx)} per-ticker model-plan calls, horizons {scheduled_horizons}"
+        f"{f', {challenger_rows} challenger row(s)' if challenger_rows else ''})",
         event_type="phase_end", saved=len(completed), failed=len(failed),
     )

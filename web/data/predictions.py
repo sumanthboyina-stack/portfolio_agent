@@ -43,7 +43,7 @@ def _load_predictions(
     one never displaces the other -- a viewer can see both "the shared call"
     and "my own chat forecast" for the same ticker/horizon.
     """
-    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, not_challenger_sql, scope_clause
 
     _sc, _sp = scope_clause(SHARED_SCOPES)
     where = _sc
@@ -69,7 +69,7 @@ def _load_predictions(
                       snapshot_news_headlines, brier_score,
                       trigger_type, trigger_event_id, scope
                FROM predictions
-               WHERE as_of_date IS NOT NULL AND {where}
+               WHERE as_of_date IS NOT NULL AND {where} AND {not_challenger_sql()}
                ORDER BY as_of_date DESC, created_at DESC""",
             params,
         ).fetchall()
@@ -150,15 +150,17 @@ def _personal_overlay(ctx, tickers: list[str]) -> dict[str, dict]:
 
 
 def _load_ticker_history(ticker: str) -> pd.DataFrame:
+    from portfolio_agent.tools.prediction_db import not_challenger_sql
+
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT id, ticker, as_of_date, recommendation, prediction,
+            f"""SELECT id, ticker, as_of_date, recommendation, prediction,
                       confidence, composite_score, horizon_days,
                       predicted_direction, predicted_return_low, predicted_return_high,
                       conviction_score, evaluation_status, outcome, actual_return,
                       start_price, created_at
                FROM predictions
-               WHERE ticker = ? AND as_of_date IS NOT NULL
+               WHERE ticker = ? AND as_of_date IS NOT NULL AND {not_challenger_sql()}
                ORDER BY as_of_date ASC, created_at ASC""",
             (ticker,),
         ).fetchall()
@@ -188,28 +190,32 @@ def _load_edge_data(horizon_days: int, risk_segment: str | None) -> dict | None:
 
 
 def _load_system_stats(selected_date: date) -> dict:
-    """Load stats for the system strip."""
+    """Load stats for the system strip (challenger shadow rows excluded)."""
+    from portfolio_agent.tools.prediction_db import not_challenger_sql
+
+    nc = not_challenger_sql()
     date_str = selected_date.isoformat()
     with _conn() as conn:
         total_today = conn.execute(
-            "SELECT COUNT(DISTINCT ticker) FROM predictions WHERE as_of_date = ?",
+            f"SELECT COUNT(DISTINCT ticker) FROM predictions WHERE as_of_date = ? AND {nc}",
             (date_str,),
         ).fetchone()[0]
 
         latest_row = conn.execute(
-            "SELECT created_at, system_version FROM predictions WHERE as_of_date IS NOT NULL ORDER BY created_at DESC LIMIT 1"
+            f"SELECT created_at, system_version FROM predictions WHERE as_of_date IS NOT NULL AND {nc} "
+            "ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
 
         total_tickers = conn.execute(
-            "SELECT COUNT(DISTINCT ticker) FROM predictions WHERE as_of_date IS NOT NULL"
+            f"SELECT COUNT(DISTINCT ticker) FROM predictions WHERE as_of_date IS NOT NULL AND {nc}"
         ).fetchone()[0]
 
         n_matured = conn.execute(
-            "SELECT COUNT(*) FROM predictions WHERE evaluation_status = 'evaluated'"
+            f"SELECT COUNT(*) FROM predictions WHERE evaluation_status = 'evaluated' AND {nc}"
         ).fetchone()[0]
 
         brier_row = conn.execute(
-            "SELECT AVG(brier_score) FROM predictions WHERE horizon_days = 5 AND brier_score IS NOT NULL"
+            f"SELECT AVG(brier_score) FROM predictions WHERE horizon_days = 5 AND brier_score IS NOT NULL AND {nc}"
         ).fetchone()
 
     return {

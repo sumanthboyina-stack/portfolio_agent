@@ -12,6 +12,10 @@ import streamlit as st
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+# Challenger shadow rows never reach a user-facing read; evaluated per query (it also
+# guarantees the prediction_role column exists on this DB).
+from portfolio_agent.tools.prediction_db import not_challenger_sql as _not_challenger_sql
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -134,8 +138,8 @@ def _load(owner: str) -> dict:
                 FROM predictions p
                 JOIN (
                     SELECT ticker, MAX(created_at) dt
-                    FROM predictions WHERE ticker IN ({ph}) GROUP BY ticker
-                ) x ON p.ticker=x.ticker AND p.created_at=x.dt
+                    FROM predictions WHERE ticker IN ({ph}) AND {_not_challenger_sql()} GROUP BY ticker
+                ) x ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
             """, ht).fetchall()
             d["hpreds"] = {r[0]: dict(r) for r in rows}
         else:
@@ -147,7 +151,7 @@ def _load(owner: str) -> dict:
                 SELECT ticker, recommendation, previous_prediction, confidence,
                        composite_score, created_at, reasoning
                 FROM predictions
-                WHERE changed_from_previous=1 AND created_at>=? AND ticker IN ({ph})
+                WHERE changed_from_previous=1 AND created_at>=? AND ticker IN ({ph}) AND {_not_challenger_sql()}
                 ORDER BY created_at DESC LIMIT 10
             """, [ago3d] + ht).fetchall()
             d["rec_changes"] = [dict(r) for r in rows]
@@ -178,8 +182,8 @@ def _load(owner: str) -> dict:
             rows = c.execute(f"""
                 SELECT p.ticker, p.recommendation, p.confidence, p.composite_score, p.created_at
                 FROM predictions p
-                JOIN (SELECT ticker, MAX(created_at) dt FROM predictions GROUP BY ticker) x
-                  ON p.ticker=x.ticker AND p.created_at=x.dt
+                JOIN (SELECT ticker, MAX(created_at) dt FROM predictions WHERE {_not_challenger_sql()} GROUP BY ticker) x
+                  ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
                 WHERE p.ticker NOT IN ({ph})
                   AND p.recommendation IN ('BUY','STRONG_BUY') AND p.confidence>=7
                   AND (p.trigger_type IS NULL OR p.trigger_type != 'trending_opportunity')

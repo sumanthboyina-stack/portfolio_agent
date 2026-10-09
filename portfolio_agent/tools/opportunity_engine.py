@@ -21,7 +21,7 @@ import json
 from typing import Optional
 
 from portfolio_agent.tools.db import db_conn
-from portfolio_agent.tools.prediction_db import SHARED_SCOPES, scope_clause
+from portfolio_agent.tools.prediction_db import SHARED_SCOPES, not_challenger_sql, scope_clause
 
 _WATCH_COMPOSITE_FLOOR = 5.5
 _CONVICTION_BONUS_SCALE = 3.0
@@ -39,7 +39,8 @@ def latest_trending_opportunity_date() -> str | None:
     _sc, _sp = scope_clause(SHARED_SCOPES)
     with db_conn() as conn:
         row = conn.execute(
-            f"SELECT MAX(as_of_date) AS d FROM predictions WHERE trigger_type = 'trending_opportunity' AND {_sc}",
+            f"SELECT MAX(as_of_date) AS d FROM predictions WHERE trigger_type = 'trending_opportunity' AND {_sc} "
+            f"AND {not_challenger_sql()}",
             _sp,
         ).fetchone()
     return row["d"] if row else None
@@ -69,6 +70,7 @@ def _latest_trending_opportunity_predictions() -> list[dict]:
                       reasoning, reasoning_text, panel_summary, created_at, guardrail_flags
                FROM predictions
                WHERE trigger_type = 'trending_opportunity' AND as_of_date = ? AND {_sc}
+                 AND {not_challenger_sql()}
                ORDER BY created_at DESC""",
             (latest_date, *_sp),
         ).fetchall()
@@ -242,7 +244,7 @@ def get_opportunity_history(ticker: str, window_days: int = 30) -> dict:
             f"""SELECT as_of_date, composite_score, recommendation, guardrail_flags
                FROM predictions
                WHERE trigger_type = 'trending_opportunity' AND ticker = ?
-                 AND as_of_date >= ? AND {_sc}
+                 AND as_of_date >= ? AND {_sc} AND {not_challenger_sql()}
                ORDER BY as_of_date ASC""",
             (ticker, cutoff, *_sp),
         ).fetchall()
