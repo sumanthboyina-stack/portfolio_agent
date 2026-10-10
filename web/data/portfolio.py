@@ -138,8 +138,35 @@ def holdings_table_rows(holdings: list, names: dict[str, str] | None = None) -> 
             "account_masked": masked_account_number(h.get("account_number")),
             "account_id": account_id(h.get("broker"), h.get("account_number")),
             "price_as_of": h.get("price_as_of"),
+            "instrument_type": h.get("instrument_type") or "UNKNOWN",
+            "asset_class": h.get("asset_class") or "UNKNOWN",
+            "leverage": h.get("leverage_factor") if (h.get("leverage_factor") or 1.0) != 1.0 else None,
         })
     return rows
+
+
+def label_breakdown(holdings: list, field: str, labels: dict[str, str] | None = None) -> dict:
+    """
+    Value by a holding field (instrument_type, asset_class, ...) in the same shape as sector_breakdown(), so the
+    same donut/table renders it: {"total", "rows": [{sector (the label), value, pct, tickers}], "unvalued": n}.
+    A holding with no value for the field groups under "UNKNOWN"; unvalued positions are excluded and counted.
+    """
+    labels = labels or {}
+    valued = [h for h in holdings if h.get("current_value") is not None and h.get("ticker")]
+    groups: dict[str, dict] = {}
+    for h in valued:
+        key = (h.get(field) or "UNKNOWN")
+        label = labels.get(key, key.replace("_", " ").title() if key != "UNKNOWN" else "Unclassified")
+        row = groups.setdefault(label, {"sector": label, "value": 0.0, "tickers": set()})
+        row["value"] += float(h["current_value"])
+        row["tickers"].add(h["ticker"].upper())
+    total = sum(r["value"] for r in groups.values())
+    rows = sorted(groups.values(), key=lambda r: -r["value"])
+    for r in rows:
+        r["value"] = round(r["value"], 2)
+        r["pct"] = round(r["value"] / total * 100, 2) if total else 0.0
+        r["tickers"] = sorted(r["tickers"])
+    return {"total": round(total, 2), "rows": rows, "unvalued": len(holdings) - len(valued)}
 
 
 def group_holdings_by_account(holdings: list[dict]) -> list[dict]:

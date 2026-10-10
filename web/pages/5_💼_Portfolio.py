@@ -33,7 +33,7 @@ from web.styles import (
     SUCCESS_LIGHT, WARNING_LIGHT, PRIMARY_LIGHT,
 )
 from web.data.portfolio import (
-    group_holdings_by_account, account_id, scope_holdings, summarize_holdings, holdings_table_rows,    is_fund, sector_breakdown, UNKNOWN_SECTOR,
+    group_holdings_by_account, account_id, scope_holdings, summarize_holdings, holdings_table_rows,    is_fund, sector_breakdown, label_breakdown, UNKNOWN_SECTOR,
 )
 from web.data.performance import build_trend_series, normalize_index_series
 from web.data.watchlist import (
@@ -188,8 +188,11 @@ _TABLE_COLUMNS = {
     "account": st.column_config.TextColumn("Account", width="small"),
     "account_masked": st.column_config.TextColumn("Acct #", width="small"),
     "price_as_of": st.column_config.TextColumn("Price as of", width="small"),
+    "instrument_type": st.column_config.TextColumn("Type", width="small", help="Stock, ETF, mutual fund, money market, target-date fund, …"),
+    "asset_class": st.column_config.TextColumn("Asset class", width="small"),
+    "leverage": st.column_config.NumberColumn("Leverage", format="%.1fx", help="Leveraged (2x, 3x) or inverse (negative) fund; blank = 1x."),
 }
-_DEFAULT_COLS = ["ticker", "description", "shares", "avg_cost", "current_price", "current_value", "gain", "gain_pct", "account"]
+_DEFAULT_COLS = ["ticker", "description", "instrument_type", "shares", "avg_cost", "current_price", "current_value", "gain", "gain_pct", "account"]
 _COMPACT_COLS = ["ticker", "shares", "current_value", "gain_pct"]
 
 
@@ -217,6 +220,17 @@ def _render_holdings_table(scoped: list, scope_label: str) -> None:
                 | df["description"].str.lower().str.contains(query, regex=False)
                 | df["account"].str.lower().str.contains(query, regex=False))
         df = df[mask]
+
+    if not df.empty:
+        t1, t2 = st.columns(2)
+        types = t1.multiselect("Type", sorted(df["instrument_type"].unique()), key="hld_types", placeholder="All types",
+                               label_visibility="collapsed", help="Filter by what the security is (stock, ETF, fund, …).")
+        classes = t2.multiselect("Asset class", sorted(df["asset_class"].unique()), key="hld_classes",
+                                 placeholder="All asset classes", label_visibility="collapsed")
+        if types:
+            df = df[df["instrument_type"].isin(types)]
+        if classes:
+            df = df[df["asset_class"].isin(classes)]
 
     selected_id = None
     def _table(frame: pd.DataFrame, key: str):
@@ -315,7 +329,10 @@ def _render_edit_position_form(h) -> None:
 # ── 4. Allocation & performance ───────────────────────────────────────────────
 
 def _render_allocation(summary: dict, scope_label: str, scoped: list) -> None:
-    breakdown = sector_breakdown(scoped)
+    group_by = st.radio("Group by", ["Sector", "Asset class", "Instrument type"], horizontal=True, key="alloc_group",
+                        label_visibility="collapsed")
+    breakdown = (sector_breakdown(scoped) if group_by == "Sector"
+                 else label_breakdown(scoped, "asset_class" if group_by == "Asset class" else "instrument_type"))
     rows, total = breakdown["rows"], breakdown["total"]
     if not rows or total <= 0:
         st.caption("No valued positions to allocate.")
@@ -335,8 +352,10 @@ def _render_allocation(summary: dict, scope_label: str, scoped: list) -> None:
         )
         st.markdown(f'<table style="width:100%;border-collapse:collapse;font-size:0.8rem">{lines}</table>', unsafe_allow_html=True)
         notes = []
-        if any(r["sector"] == UNKNOWN_SECTOR for r in rows):
+        if group_by == "Sector" and any(r["sector"] == UNKNOWN_SECTOR for r in rows):
             notes.append("Unknown = no sector on the import and none in the cached universe data.")
+        if group_by != "Sector" and any(r["sector"] == "Unclassified" for r in rows):
+            notes.append("Unclassified = not yet identified; correct it on the Accounts page.")
         if breakdown["unvalued"]:
             notes.append(f"{breakdown['unvalued']} unvalued position(s) excluded.")
         if notes:

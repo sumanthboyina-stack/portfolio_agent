@@ -1213,6 +1213,44 @@ def get_volume_by_horizon(lookback_days: int = 90, *, roles: tuple[str, ...] = V
     return [dict(r) for r in rows]
 
 
+UNCLASSIFIED = "UNCLASSIFIED"    # predictions made before instrument_type was recorded (and not backfilled)
+
+
+def get_instrument_type_breakdown(lookback_days: int | None = None, model_names: list[str] | None = None, *,
+                                  roles: tuple[str, ...] = VALIDATION_ROLES) -> list[dict]:
+    """
+    Evaluated predictions grouped by (instrument_type, horizon): n, directional accuracy, mean excess return vs SPY,
+    mean binary Brier score, and how many were leveraged / inverse funds. STOCK vs ETF vs MUTUAL_FUND ... side by side,
+    so a fund's record is never silently blended into the stock record. Rows with no recorded type are UNCLASSIFIED.
+    """
+    _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
+    _rc, _rp = role_clause(roles)
+    clauses = ["evaluation_status = 'evaluated'", "horizon_days IS NOT NULL", "actual_direction IS NOT NULL", _sc, _rc]
+    params: list = [*_sp, *_rp]
+    if lookback_days:
+        clauses.append("as_of_date >= ?")
+        params.append((_today_cst() - timedelta(days=lookback_days)).isoformat())
+    if model_names:
+        clauses.append(f"model_name IN ({','.join('?' * len(model_names))})")
+        params.extend(model_names)
+    with _db() as c:
+        rows = c.execute(
+            f"""SELECT COALESCE(instrument_type, '{UNCLASSIFIED}') AS instrument_type,
+                      horizon_days,
+                      COUNT(*) AS n,
+                      AVG(CASE WHEN UPPER(actual_direction) = UPPER(predicted_direction) THEN 1.0 ELSE 0.0 END) AS dir_acc,
+                      AVG(excess_return) AS mean_excess,
+                      AVG(brier_score) AS brier,
+                      SUM(CASE WHEN COALESCE(leverage_factor, 1.0) <> 1.0 THEN 1 ELSE 0 END) AS n_leveraged
+               FROM predictions
+               WHERE {' AND '.join(clauses)}
+               GROUP BY 1, horizon_days
+               ORDER BY horizon_days, n DESC""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_system_version_comparison(lookback_days: int | None = None, model_names: list[str] | None = None, *,
                                   roles: tuple[str, ...] = VALIDATION_ROLES) -> list[dict]:
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)

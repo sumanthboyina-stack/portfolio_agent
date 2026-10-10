@@ -281,5 +281,9 @@ def commit_plan(plan: ImportPlan, fetch_prices: bool = True, *,
                 detail=", ".join(acct.cash_lines) or None, reason="import", conn=conn)
             cash_accounts += acct.cash_amount is not None
         repo.update_import_run(run_id, conn=conn, cash_accounts=cash_accounts, **totals)
+    # Classify any security seen for the first time (stock / ETF / fund / ...). A network lookup, so it runs
+    # after the commit; best effort — a failed lookup leaves the instrument UNKNOWN and never fails the import.
+    from portfolio_agent.services.instrument_classifier import classify_new_holdings
+    classify_new_holdings(ctx, sorted({r["ticker"] for rows in priced_rows.values() for r in rows if r.get("ticker")}))
     return ImportResult(run_id, plan.broker, [a.label for a in plan.accounts], totals["added"], totals["updated"],
                         totals["removed"], totals["positions"], cash_accounts, statement, price_as_of, sorted(unpriced))

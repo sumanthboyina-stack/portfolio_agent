@@ -22,3 +22,17 @@ def _reset_shared_price_cache():
     price_acquisition._default_cache.invalidate_all()
     technical_features._default_history_cache.invalidate_all()
     portfolio_assessment._get_default_cache().invalidate_all()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_instrument_lookups(monkeypatch):
+    """
+    Adding a position or committing an import classifies new instruments through yfinance. No test may reach
+    the network: every lookup comes back empty (a failed lookup — classification is skipped, nothing raises).
+    Tests of the classifier itself monkeypatch fetch_info with their own canned data.
+    """
+    from portfolio_agent.services import instrument_classifier
+    monkeypatch.setattr(instrument_classifier, "fetch_info", lambda ticker: None)
+    instrument_classifier._reset_failed_lookups()       # the failed-lookup memo is per process: don't leak between tests
+    yield
+    instrument_classifier._reset_failed_lookups()

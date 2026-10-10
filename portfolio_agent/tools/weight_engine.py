@@ -12,12 +12,28 @@ Horizon intuition:
   250d — fundamentals + macro dominate; news is minimal
 
 A WEIGHT_FLOOR (5%) prevents any source from being fully zeroed out.
+
+Funds are the one exception. For an ETF / ETN / mutual fund / target-date fund (domain.FUND_INSTRUMENT_TYPES)
+the company-fundamentals and DCF-valuation sources do not apply — there is no income statement to read — so
+they are EXCLUDED: weight exactly 0, no floor, no data cap, and the remaining sources are renormalised
+(each still subject to the floor) so the weights sum to 1.0. Passing instrument_type=None, "STOCK" or any other
+type leaves every number identical to the stock path.
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import Optional
+
+from portfolio_agent.domain import FUND_INSTRUMENT_TYPES
+
+# Sources that don't apply to a fund (see module docstring).
+FUND_EXCLUDED_SOURCES: tuple[str, ...] = ("fundamentals", "valuation")
+
+
+def excluded_sources(instrument_type: Optional[str]) -> tuple[str, ...]:
+    """Weight sources that do not apply to this instrument type (() for a stock / unknown)."""
+    return FUND_EXCLUDED_SOURCES if instrument_type in FUND_INSTRUMENT_TYPES else ()
 
 # ── Legacy single-horizon base (kept for backward compat / chat path) ──────────
 BASE: dict[str, float] = {
@@ -482,8 +498,24 @@ def _apply_signals(
     return raw, regime, rationale, data_caps, signal_strengths
 
 
-def _normalize(raw: dict[str, float], use_floor: bool = False, floor: float | None = None) -> dict[str, float]:
-    """Normalize weights to 1.0, with optional floor clamping (default: WEIGHT_FLOOR, the module constant)."""
+def _normalize(raw: dict[str, float], use_floor: bool = False, floor: float | None = None,
+               excluded: tuple[str, ...] = ()) -> dict[str, float]:
+    """
+    Normalize weights to 1.0, with optional floor clamping (default: WEIGHT_FLOOR, the module constant).
+
+    *excluded* sources are forced to exactly 0.0: they are left out of the floor and of the normalisation, and
+    the rounding remainder goes to the largest remaining source (not to "fundamentals", which may be excluded).
+    With nothing excluded this is the original computation, unchanged.
+    """
+    if excluded:
+        active = {k: v for k, v in raw.items() if k not in excluded}
+        if use_floor:
+            active = {k: max(v, WEIGHT_FLOOR if floor is None else floor) for k, v in active.items()}
+        total = sum(active.values())
+        weights = {k: round(v / total, 3) for k, v in active.items()}
+        carrier = max(weights, key=weights.get)
+        weights[carrier] = round(weights[carrier] + round(1.000 - sum(weights.values()), 3), 3)
+        return {k: (0.0 if k in excluded else weights[k]) for k in raw}
     if use_floor:
         raw = {k: max(v, WEIGHT_FLOOR if floor is None else floor) for k, v in raw.items()}
     total = sum(raw.values())
@@ -500,6 +532,7 @@ def compute_dynamic_weights_for_horizon(
     horizon_days: int,
     db_context: dict,
     macro_snapshot: dict,
+    instrument_type: Optional[str] = None,
 ) -> dict[str, float]:
     """
     Compute dynamic weights for a specific horizon.
@@ -519,7 +552,7 @@ def compute_dynamic_weights_for_horizon(
         db_context.get("fundamentals"),
         db_context.get("valuation"),
     )
-    return _normalize(raw, use_floor=True, floor=settings["weight_floor"])
+    return _normalize(raw, use_floor=True, floor=settings["weight_floor"], excluded=excluded_sources(instrument_type))
 
 
 SUPPORTED_HORIZONS: tuple[int, ...] = tuple(sorted(HORIZON_BASE_WEIGHTS))
@@ -558,11 +591,12 @@ def compute_dynamic_weights_all_horizons(
     horizons: list[int],
     db_context: dict,
     macro_snapshot: dict,
+    instrument_type: Optional[str] = None,
 ) -> dict[int, dict[str, float]]:
     """Compute weights for exactly the requested horizons in a single call. No
     profile is consulted: the caller states the horizons explicitly."""
     return {
-        h: compute_dynamic_weights_for_horizon(ticker, h, db_context, macro_snapshot)
+        h: compute_dynamic_weights_for_horizon(ticker, h, db_context, macro_snapshot, instrument_type)
         for h in horizons
     }
 
@@ -577,9 +611,14 @@ def compute_dynamic_weights(
     fundamentals_data: Optional[dict],
     horizons: list[int] | None = None,
     valuation_data: Optional[dict] = None,
+    instrument_type: Optional[str] = None,
 ) -> dict:
     """
     Compute context-aware weights for the APEX panel synthesis.
+
+    instrument_type: for a fund type (domain.FUND_INSTRUMENT_TYPES) fundamentals and valuation are excluded —
+    weight 0.0 in every weight dict, absent from data_caps — and the rest renormalised to 1.0. None / a stock
+    type: unchanged.
 
     When horizons is provided, also computes per-horizon weights under the
     'weights_by_horizon' key for exactly those horizons. Nothing here reads a
@@ -594,7 +633,11 @@ def compute_dynamic_weights(
     raw, regime, rationale, data_caps, signal_strengths = _apply_signals(
         effective_settings()["base_weights"], news_data, research_data, macro_snapshot, fundamentals_data, valuation_data
     )
-    weights = _normalize(raw, use_floor=False)
+    excl = excluded_sources(instrument_type)
+    weights = _normalize(raw, use_floor=False, excluded=excl)
+    if excl:
+        for src in excl:                 # not applicable: no cap to apply, nothing to say "no data" about
+            data_caps.pop(src, None)
 
     # Per-horizon weights
     weights_by_horizon: dict[int, dict[str, float]] | None = None
@@ -606,7 +649,7 @@ def compute_dynamic_weights(
             "valuation":    valuation_data,
         }
         weights_by_horizon = compute_dynamic_weights_all_horizons(
-            ticker, horizons, db_ctx, macro_snapshot or {}
+            ticker, horizons, db_ctx, macro_snapshot or {}, instrument_type
         )
 
     def _pct(v: float) -> str:
@@ -621,6 +664,8 @@ def compute_dynamic_weights(
     )
 
     def _delta(key: str) -> str:
+        if key in excl:
+            return "0% (not applicable to a fund)"
         base_pct = round(BASE[key] * 100)
         cur_pct  = round(weights[key] * 100)
         diff_val = cur_pct - base_pct
@@ -638,7 +683,8 @@ def compute_dynamic_weights(
             src: {
                 "weight":    weights[src],
                 "delta":     _delta(src),
-                "rationale": rationale[src],
+                "rationale": ("Not applicable to a fund (no company financials) — weight 0, redistributed to the "
+                              "other sources" if src in excl else rationale[src]),
             }
             for src in ("fundamentals", "valuation", "research", "macro", "news")
         },

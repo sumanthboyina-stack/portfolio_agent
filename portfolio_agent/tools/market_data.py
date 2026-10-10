@@ -14,6 +14,12 @@ from __future__ import annotations
 _CHUNK = 20   # tickers per yfinance.download() call
 
 
+def _market_symbols(tickers: list[str]) -> list[str]:
+    """Drop ticker-less funds ("CIT:..." keys): they are private identifiers, never sent to the provider."""
+    from portfolio_agent.domain import is_synthetic_ticker
+    return [t for t in tickers if t and not is_synthetic_ticker(t)]
+
+
 def _chunks(tickers: list[str]) -> list[list[str]]:
     return [tickers[i:i + _CHUNK] for i in range(0, len(tickers), _CHUNK)]
 
@@ -35,6 +41,7 @@ def fetch_last_closes(tickers: list[str]) -> tuple[dict[str, float], str | None]
     import yfinance as yf
     prices: dict[str, float] = {}
     as_of: str | None = None
+    tickers = _market_symbols(tickers)
     for chunk in _chunks(tickers):
         try:
             data = yf.download(" ".join(chunk), period="5d", interval="1d",
@@ -60,6 +67,7 @@ def fetch_daily_closes(tickers: list[str], start: str, end: str) -> dict[str, di
     ticker that cannot be parsed just comes back empty.
     """
     import yfinance as yf
+    tickers = _market_symbols(tickers)
     out: dict[str, dict[str, float]] = {t: {} for t in tickers}
     for chunk in _chunks(tickers):
         data = yf.download(" ".join(chunk), start=start, end=end, interval="1d",

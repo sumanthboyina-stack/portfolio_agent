@@ -14,6 +14,9 @@ It also hosts everything that used to sit on the user-facing Validation page bef
 four score cards: Baselines, Ranking detail, Calibration, Models, FLAT diagnostic, the legacy metric tiles &
 outcome breakdown, the compounded call-return index, and the scoring-snapshot tables.
 
+The Instrument types tab splits every number by what the security was (stock, ETF, mutual fund, ...), since a fund
+is forecast without company fundamentals and must be read against its own record.
+
 Rows are filtered by prediction_role (sidebar "Prediction roles", default champion + fallback; legacy
 random-model rows on request). The Roles tab is the one place every role — including challenger shadow
 rows — is shown side by side, with the champion-vs-challenger comparison on the same tickers and dates.
@@ -261,6 +264,7 @@ tabs = st.tabs([
     f"{material('show_chart')} Equity curve",
     f"{material('calculate')} Scoring snapshots",
     f"{material('swap_horiz')} Roles",
+    f"{material('category')} Instrument types",
 ])
 
 # ── Tab 1: Metric Trends ──────────────────────────────────────────────────────
@@ -748,3 +752,36 @@ with tabs[12]:
             st.caption("Production = the champion row, or the fallback row on runs where the champion failed. Only "
                        "(ticker, date) pairs with BOTH a production and a challenger row count. A handful of pairs or "
                        "dates cannot separate two models — treat small samples as anecdotes.")
+
+
+# ── Tab 14: Instrument types (STOCK vs ETF vs MUTUAL_FUND ...) ────────────────
+
+with tabs[13]:
+    from portfolio_agent.tools.validation_engine import get_instrument_type_breakdown
+    from portfolio_agent.tools.validation_roles import instrument_type_breakdown
+
+    st.caption("Evaluated predictions split by what the security was when the forecast was made. Funds are predicted without "
+               "company fundamentals or valuation, so their record is judged on its own. Lookback, model, segment and role "
+               "filters from the sidebar apply. UNCLASSIFIED = made before the type was recorded "
+               "(`python -m scripts.backfill_instrument_classification --stamp-predictions` stamps older rows).")
+    _it_rows = get_instrument_type_breakdown(lookback, _model_filter, roles=_qa_roles)
+    if not _it_rows:
+        st.info("No evaluated predictions yet.", icon=material("info"))
+    else:
+        st.markdown("**By instrument type**")
+        st.dataframe(pd.DataFrame([{
+            "Horizon": _H_LABELS_ALL.get(r["horizon_days"], f"{r['horizon_days']}d"), "Type": r["instrument_type"], "n": r["n"],
+            "Directional accuracy": _fmt_acc(r["dir_acc"]), "Mean excess vs SPY": fmt_pct(r["mean_excess"] * 100, signed=True) if r["mean_excess"] is not None else "—",
+            "Brier (UP vs not)": "—" if r["brier"] is None else f"{r['brier']:.3f}", "Leveraged / inverse": r["n_leveraged"],
+        } for r in _it_rows]), hide_index=True, use_container_width=True)
+        _it_df = _load_evaluated_predictions_df(lookback, _model_filter, _seg_sel, _portfolio_tickers, _watchlist_tickers,
+                                                roles=_qa_roles)
+        _it_base = instrument_type_breakdown(_it_df)
+        if _it_base:
+            st.markdown("**Against naive baselines** (no price history, so momentum / SPY-prior-window are left out)")
+            st.dataframe(pd.DataFrame([{
+                "Horizon": _H_LABELS_ALL.get(r["horizon_days"], f"{r['horizon_days']}d"), "Type": r["instrument_type"], "n": r["n"],
+                "Accuracy": _fmt_acc(r["accuracy"]), "Best naive baseline": r["best_baseline"] or "—",
+                "Baseline accuracy": _fmt_acc(r["best_baseline_accuracy"]),
+                "Brier skill (5-bucket)": _fmt_skill(r["brier_skill_five"]),
+            } for r in _it_base]), hide_index=True, use_container_width=True)

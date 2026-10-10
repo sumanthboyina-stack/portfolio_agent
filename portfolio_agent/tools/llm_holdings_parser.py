@@ -14,7 +14,8 @@ canonical shape as ``parse_fidelity_csv`` / ``parse_vanguard_csv``:
     current_value     float|None
     account_name      str          "" if unknown
     account_number    str          "" if unknown (masked to last 4 digits)
-    account_type      str          TAXABLE | IRA | ROTH_IRA | 401K
+    account_type      str          a domain.AccountType value: TAXABLE | TRADITIONAL_IRA | ROTH_IRA | ROLLOVER_IRA |
+                                   SEP_IRA | 401K | ROTH_401K | 403B | 457B | HSA | 529 | CASH | OTHER
     sector            str          always "" at parse time
 
 Never raises on bad input — returns [] and lets the caller decide how to
@@ -45,7 +46,7 @@ _EXCEL_EXTENSIONS = (".xlsx", ".xlsm", ".xls")
 _ZIP_SIGNATURE = b"PK\x03\x04"          # every .xlsx is a ZIP container
 _XLS_SIGNATURE = b"\xd0\xcf\x11\xe0"    # legacy .xls (OLE2 compound file)
 
-_VALID_ACCOUNT_TYPES = ("TAXABLE", "IRA", "ROTH_IRA", "401K")
+from portfolio_agent.domain import normalize_account_type
 
 
 # ── Input detection ────────────────────────────────────────────────────────────
@@ -111,7 +112,8 @@ into a JSON array. Each element must have exactly these keys:
   "current_value"    number or null  - current market value of the position
   "account_name"     string  - account nickname / title, "" if not present
   "account_number"   string  - masked to the LAST 4 DIGITS only (e.g. "****1234"), "" if not present
-  "account_type"     string  - one of "TAXABLE", "IRA", "ROTH_IRA", "401K"
+  "account_type"     string  - one of "TAXABLE", "TRADITIONAL_IRA", "ROTH_IRA", "ROLLOVER_IRA", "SEP_IRA",
+                               "401K", "ROTH_401K", "403B", "457B", "HSA", "529", "CASH", "OTHER"
 
 Rules:
 - Skip cash, money-market, sweep, and "pending activity" line items (e.g. SPAXX, FDRXX,
@@ -120,8 +122,9 @@ Rules:
 - If multiple sheets are present, only pull real positions. Ignore summary, cover,
   performance, activity, and disclosure sheets entirely.
 - Infer account_type from context (account name, sheet name, section headers):
-  "Roth" -> ROTH_IRA; "Rollover"/"Traditional"/"SEP"/"IRA" -> IRA; "401(k)"/"401k" -> 401K;
-  brokerage/individual/joint/trust or genuinely ambiguous -> TAXABLE.
+  "Roth IRA" -> ROTH_IRA; "Roth 401(k)" -> ROTH_401K; "Rollover" -> ROLLOVER_IRA; "SEP" -> SEP_IRA;
+  "Traditional"/plain "IRA" -> TRADITIONAL_IRA; "401(k)"/"401k" -> 401K; "403(b)" -> 403B; "457" -> 457B;
+  "HSA" -> HSA; "529" -> 529; brokerage/individual/joint/trust or genuinely ambiguous -> TAXABLE.
 - Mask account numbers to their last 4 digits if present.
 - Use null for numbers and "" for strings that are not present in the source.
   NEVER fabricate, estimate, or compute a value that is not in the source.
@@ -217,17 +220,8 @@ def _to_str(value: Any) -> str:
 
 
 def _normalise_account_type(value: Any, account_name: str = "") -> str:
-    raw = _to_str(value).upper().replace("-", "_").replace(" ", "_")
-    if raw in _VALID_ACCOUNT_TYPES:
-        return raw
-    combined = f"{raw} {account_name.upper()}"
-    if "ROTH" in combined:
-        return "ROTH_IRA"
-    if "401" in combined:
-        return "401K"
-    if "IRA" in combined or "ROLLOVER" in combined or "TRADITIONAL" in combined or "SEP" in raw:
-        return "IRA"
-    return "TAXABLE"
+    """Any account-type string the model (or a sheet) produced -> an AccountType value; unknown -> TAXABLE."""
+    return normalize_account_type(_to_str(value), account_name)
 
 
 def _mask_account_number(value: Any) -> str:

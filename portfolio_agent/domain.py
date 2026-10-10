@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
@@ -102,6 +104,197 @@ class _DictCompat:
 LOCAL_OWNER = "sumanth_b"
 
 
+# ── Instrument & account taxonomy ──────────────────────────────────────────────
+# The single definition of the vocabularies stored in instruments.instrument_type /
+# instruments.asset_class and accounts.account_type. Values are the exact strings in the
+# database; StrEnum members ARE str, so they compare and bind like plain strings.
+
+class InstrumentType(StrEnum):
+    STOCK = "STOCK"
+    ETF = "ETF"
+    ETN = "ETN"
+    MUTUAL_FUND = "MUTUAL_FUND"
+    MONEY_MARKET = "MONEY_MARKET"
+    TARGET_DATE_FUND = "TARGET_DATE_FUND"
+    BOND = "BOND"
+    CIT = "CIT"                      # collective investment trust (e.g. 401k fund with no ticker)
+    CASH = "CASH"
+    OTHER = "OTHER"
+    UNKNOWN = "UNKNOWN"
+
+
+class AssetClass(StrEnum):
+    US_EQUITY = "US_EQUITY"
+    INTL_EQUITY = "INTL_EQUITY"
+    FIXED_INCOME = "FIXED_INCOME"
+    REAL_ESTATE = "REAL_ESTATE"
+    COMMODITY = "COMMODITY"
+    CASH = "CASH"
+    MULTI_ASSET = "MULTI_ASSET"
+    UNKNOWN = "UNKNOWN"
+
+
+class AccountType(StrEnum):
+    TAXABLE = "TAXABLE"
+    TRADITIONAL_IRA = "TRADITIONAL_IRA"
+    ROTH_IRA = "ROTH_IRA"
+    ROLLOVER_IRA = "ROLLOVER_IRA"
+    SEP_IRA = "SEP_IRA"
+    K401 = "401K"
+    ROTH_401K = "ROTH_401K"
+    B403 = "403B"
+    B457 = "457B"
+    HSA = "HSA"
+    PLAN_529 = "529"
+    CASH = "CASH"
+    OTHER = "OTHER"
+
+
+class TaxTreatment(StrEnum):
+    TAXABLE = "TAXABLE"
+    TAX_DEFERRED = "TAX_DEFERRED"
+    TAX_FREE = "TAX_FREE"
+
+
+class HoldingsSource(StrEnum):
+    SNAPSHOT = "snapshot"            # positions table is the source of truth (broker file / manual entry)
+    LEDGER = "ledger"                # positions are derived from the transaction ledger (Step 4)
+
+
+class ClassificationSource(StrEnum):
+    AUTO = "auto"
+    MANUAL = "manual"                # a person's override: automatic classification never overwrites it
+
+
+INSTRUMENT_TYPES = frozenset(m.value for m in InstrumentType)
+ASSET_CLASSES = frozenset(m.value for m in AssetClass)
+ACCOUNT_TYPES = tuple(m.value for m in AccountType)
+HOLDINGS_SOURCES = frozenset(m.value for m in HoldingsSource)
+
+# Pooled-fund types: no company fundamentals / EDGAR filings exist for them (used by Step 3 routing).
+FUND_INSTRUMENT_TYPES = frozenset({InstrumentType.ETF, InstrumentType.ETN, InstrumentType.MUTUAL_FUND,
+                                   InstrumentType.TARGET_DATE_FUND})
+RECLASSIFY_AFTER_DAYS = 30           # an automatic classification older than this is re-checked
+
+# What the prediction pipeline does with each kind of security (Step 3):
+#   NO_PREDICTION_TYPES       never predicted — there is nothing to forecast (cash, a ticker-less fund).
+#   FUND_INSTRUMENT_TYPES     predicted, but the company-fundamentals and DCF-valuation sources have weight 0 and are
+#                             never run or scored (a fund has no income statement; a 5/10 placeholder would just drag
+#                             its composite toward neutral).
+#   NO_COMPANY_FILINGS_TYPES  no EDGAR filings / 8-K guidance to fetch: the funds above plus cash and CITs.
+# A STOCK, UNKNOWN (with a price), BOND or OTHER keeps the unchanged stock path.
+NO_PREDICTION_TYPES = frozenset({InstrumentType.CASH, InstrumentType.MONEY_MARKET, InstrumentType.CIT})
+NO_COMPANY_FILINGS_TYPES = frozenset(FUND_INSTRUMENT_TYPES | NO_PREDICTION_TYPES)
+
+# Instruments with no exchange ticker (401k collective trusts) are keyed "CIT:<slug>". That key is a
+# private identifier, never a market symbol: nothing fetches prices or runs predictions for it.
+SYNTHETIC_TICKER_PREFIX = "CIT:"
+
+
+def is_synthetic_ticker(ticker: str | None) -> bool:
+    return (ticker or "").upper().startswith(SYNTHETIC_TICKER_PREFIX)
+
+
+def synthetic_cit_ticker(plan_name: str, fund_name: str) -> str:
+    """Stable synthetic key for a ticker-less fund: ``CIT:<PLAN>-<FUND>`` (upper-case slug)."""
+    def _slug(s: str) -> str:
+        return re.sub(r"[^A-Z0-9]+", "-", (s or "").upper()).strip("-")
+    plan, fund = _slug(plan_name), _slug(fund_name)
+    if not fund:
+        raise ValueError("a fund name is required to key a fund with no ticker")
+    return f"{SYNTHETIC_TICKER_PREFIX}{plan}-{fund}" if plan else f"{SYNTHETIC_TICKER_PREFIX}{fund}"
+
+
+_TAX_TREATMENT = {
+    AccountType.TAXABLE: TaxTreatment.TAXABLE,
+    AccountType.CASH: TaxTreatment.TAXABLE,
+    AccountType.TRADITIONAL_IRA: TaxTreatment.TAX_DEFERRED,
+    AccountType.ROLLOVER_IRA: TaxTreatment.TAX_DEFERRED,
+    AccountType.SEP_IRA: TaxTreatment.TAX_DEFERRED,
+    AccountType.K401: TaxTreatment.TAX_DEFERRED,
+    AccountType.B403: TaxTreatment.TAX_DEFERRED,
+    AccountType.B457: TaxTreatment.TAX_DEFERRED,
+    AccountType.ROTH_IRA: TaxTreatment.TAX_FREE,
+    AccountType.ROTH_401K: TaxTreatment.TAX_FREE,
+    AccountType.HSA: TaxTreatment.TAX_FREE,        # tax-free when used for qualified medical expenses
+    AccountType.PLAN_529: TaxTreatment.TAX_FREE,   # tax-free when used for qualified education expenses
+}
+
+
+def tax_treatment(account_type: str | None) -> TaxTreatment | None:
+    """
+    Tax treatment implied by an account type. Derived, not stored: it is a pure function of
+    account_type, so a stored copy could only ever drift from it. None for an unset/unknown type and
+    for OTHER (can't be known); callers must not assume taxable.
+    """
+    try:
+        return _TAX_TREATMENT.get(AccountType(account_type or ""))
+    except ValueError:
+        return None
+
+
+def normalize_account_type(value: Any, name: str = "", default: str | None = AccountType.TAXABLE) -> str | None:
+    """
+    Map any account-type string (a parser's output, an old free-text value, a nickname) to an
+    AccountType value. An exact enum value wins; otherwise keywords in the value or *name* decide, most
+    specific first ("Roth 401(k)" -> ROTH_401K, "Rollover IRA" -> ROLLOVER_IRA; the legacy "IRA" ->
+    TRADITIONAL_IRA). Nothing recognisable -> *default* (TAXABLE for importers; None to leave unset).
+    """
+    raw = re.sub(r"[\s\-]+", "_", str(value or "").strip().upper())
+    if raw in ACCOUNT_TYPES:
+        return raw
+    text = f"{raw} {name or ''}".upper().replace("_", " ")
+    has = lambda pat: re.search(pat, text) is not None
+    if has(r"ROTH") and has(r"\b(401|403|457)"):
+        return AccountType.ROTH_401K.value
+    if has(r"ROTH"):
+        return AccountType.ROTH_IRA.value
+    if has(r"\b403\s*\(?B"):
+        return AccountType.B403.value
+    if has(r"\b457"):
+        return AccountType.B457.value
+    if has(r"\b401"):
+        return AccountType.K401.value
+    if has(r"\bHSA\b|HEALTH SAVINGS"):
+        return AccountType.HSA.value
+    if has(r"\b529\b"):
+        return AccountType.PLAN_529.value
+    if has(r"\bSEP\b"):
+        return AccountType.SEP_IRA.value
+    if has(r"ROLLOVER"):
+        return AccountType.ROLLOVER_IRA.value
+    if has(r"\bIRA\b|TRADITIONAL|\bTRAD\b"):
+        return AccountType.TRADITIONAL_IRA.value
+    if raw in ("OTHER", "UNKNOWN"):
+        return AccountType.OTHER.value
+    return default if default is None else str(default)
+
+
+_ASSET_CLASS_KEYWORDS = (          # first match wins; checked against the lower-cased legacy text
+    (("cash", "money market", "money_market"), AssetClass.CASH),
+    (("fixed", "bond", "treasur", "debt"), AssetClass.FIXED_INCOME),
+    (("real estate", "real_estate", "reit"), AssetClass.REAL_ESTATE),
+    (("commodit", "gold", "silver", "crude"), AssetClass.COMMODITY),
+    (("multi", "allocation", "balanced", "target"), AssetClass.MULTI_ASSET),
+    (("intl", "international", "foreign", "emerging", "global ex", "ex-us", "ex us"), AssetClass.INTL_EQUITY),
+    (("us equity", "us_equity", "u.s.", "domestic", "equity", "stock", "large cap", "small cap", "mid cap"), AssetClass.US_EQUITY),
+)
+
+
+def map_legacy_asset_class(text: str | None) -> str:
+    """Free-text asset_class (any earlier value) -> AssetClass value; anything unmappable -> UNKNOWN."""
+    t = (text or "").strip()
+    if not t:
+        return AssetClass.UNKNOWN.value
+    if t.upper() in ASSET_CLASSES:
+        return t.upper()
+    low = t.lower()
+    for keys, cls in _ASSET_CLASS_KEYWORDS:
+        if any(k in low for k in keys):
+            return cls.value
+    return AssetClass.UNKNOWN.value
+
+
 @dataclass
 class Holding(_DictCompat):
     """One position row as read from the `holdings` view (id = position_id)."""
@@ -126,6 +319,12 @@ class Holding(_DictCompat):
     version: int | None = None       # optimistic-concurrency token for set_position()
     source_import_id: int | None = None
     instrument_id: int | None = None  # instruments.instrument_id — the security's permanent identity
+    instrument_type: str | None = None   # InstrumentType value (UNKNOWN until classified)
+    asset_class: str | None = None       # AssetClass value
+    sub_asset_class: str | None = None
+    leverage_factor: float | None = None  # 1.0 normal, 2.0 / 3.0 leveraged, negative = inverse
+    proxy_ticker: str | None = None       # analytics-only stand-in for a ticker-less fund; never a holding
+    classification_source: str | None = None  # 'auto' or 'manual' (a person's override)
 
     def __post_init__(self) -> None:
         self.ticker = self.ticker.upper()
@@ -154,6 +353,12 @@ class Holding(_DictCompat):
             version=_safe_int(row.get("version")),
             source_import_id=_safe_int(row.get("source_import_id")),
             instrument_id=_safe_int(row.get("instrument_id")),
+            instrument_type=row.get("instrument_type"),
+            asset_class=row.get("asset_class"),
+            sub_asset_class=row.get("sub_asset_class"),
+            leverage_factor=_safe_float(row.get("leverage_factor")),
+            proxy_ticker=row.get("proxy_ticker"),
+            classification_source=row.get("classification_source"),
         )
 
     @property
@@ -190,6 +395,12 @@ class Holding(_DictCompat):
             "price_as_of": self.price_as_of,
             "account_id": self.account_id,
             "instrument_id": self.instrument_id,
+            "instrument_type": self.instrument_type,
+            "asset_class": self.asset_class,
+            "sub_asset_class": self.sub_asset_class,
+            "leverage_factor": self.leverage_factor,
+            "proxy_ticker": self.proxy_ticker,
+            "classification_source": self.classification_source,
             "version": self.version,
             "unrealized_gain_loss": self.unrealized_gain_loss,
             "unrealized_gain_loss_pct": self.unrealized_gain_loss_pct,

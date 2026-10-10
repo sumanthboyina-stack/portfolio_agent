@@ -35,7 +35,10 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Optional
 
-from portfolio_agent.domain import LOCAL_OWNER, Holding, summarize_holdings
+from portfolio_agent.domain import (
+    ACCOUNT_TYPES, ASSET_CLASSES, LOCAL_OWNER, RECLASSIFY_AFTER_DAYS, AccountType, AssetClass, ClassificationSource,
+    Holding, InstrumentType, is_synthetic_ticker, map_legacy_asset_class, normalize_account_type, summarize_holdings,
+)
 from portfolio_agent.tools.db import db_conn, migrate_columns
 
 # Freshness fields on a position — deliberately separate, they answer different
@@ -270,11 +273,13 @@ _HOLDINGS_VIEW = """CREATE VIEW holdings AS
            a.display_name AS account_name, a.account_number, a.account_type, a.broker,
            p.sector, p.as_of_date, p.synced_at, p.price_as_of,
            p.account_id, a.portfolio_id, p.version, p.source_import_id,
-           p.instrument_id, i.name AS instrument_name
+           p.instrument_id, i.name AS instrument_name,
+           i.instrument_type, i.asset_class, i.sub_asset_class, i.leverage_factor, i.proxy_ticker,
+           i.classification_source
     FROM positions p
     JOIN accounts a ON a.account_id = p.account_id
     JOIN instruments i ON i.instrument_id = p.instrument_id
-    WHERE a.status = 'active'"""
+    WHERE a.status = 'active' AND a.is_paper = 0"""
 
 
 def _object_type(conn: sqlite3.Connection, name: str) -> str | None:
@@ -291,6 +296,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _migrate_legacy_holdings(conn)
     _migrate_positions_to_instruments(conn)
     _migrate_price_history_grain(conn)
+    _migrate_taxonomy(conn)
     # Indexes on rebuilt tables come after the migrations, once the final shape is in place.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_instrument ON positions (instrument_id)")
     conn.execute(_HOLDINGS_VIEW)
@@ -358,6 +364,44 @@ def _migrate_legacy_holdings(conn: sqlite3.Connection) -> None:
     conn.execute("DROP INDEX IF EXISTS idx_holdings_broker")
     conn.execute("DROP INDEX IF EXISTS idx_holdings_ticker")
     conn.execute("ALTER TABLE holdings RENAME TO holdings_legacy_v1")
+
+
+def _migrate_taxonomy(conn: sqlite3.Connection) -> None:
+    """
+    Idempotent: add the instrument / account taxonomy columns and normalise the free-text values that
+    were there before. Nothing is dropped — an unmappable or replaced original is kept in
+    asset_class_legacy / account_type_legacy. A second run finds nothing left to map.
+    """
+    migrate_columns(conn, "instruments", [
+        ("instrument_type",        f"TEXT NOT NULL DEFAULT '{InstrumentType.UNKNOWN}'"),
+        ("asset_class_legacy",     "TEXT"),
+        ("sub_asset_class",        "TEXT"),
+        ("leverage_factor",        "REAL NOT NULL DEFAULT 1.0"),
+        ("expense_ratio",          "REAL"),
+        ("fund_family",            "TEXT"),
+        ("category",               "TEXT"),
+        ("proxy_ticker",           "TEXT"),
+        ("classification_source",  f"TEXT NOT NULL DEFAULT '{ClassificationSource.AUTO}'"),
+        ("classified_at",          "TEXT"),
+    ])
+    migrate_columns(conn, "accounts", [
+        ("account_type_legacy", "TEXT"),
+        ("holdings_source",     "TEXT NOT NULL DEFAULT 'snapshot'"),
+        ("is_paper",            "INTEGER NOT NULL DEFAULT 0"),
+    ])
+    ph = ",".join("?" * len(ASSET_CLASSES))
+    for iid, old in conn.execute(
+            f"SELECT instrument_id, asset_class FROM instruments WHERE asset_class IS NULL OR asset_class NOT IN ({ph})",
+            sorted(ASSET_CLASSES)).fetchall():
+        conn.execute("UPDATE instruments SET asset_class = ?, asset_class_legacy = COALESCE(asset_class_legacy, ?) "
+                     "WHERE instrument_id = ?", [map_legacy_asset_class(old), old, iid])
+    ph = ",".join("?" * len(ACCOUNT_TYPES))
+    for aid, old, name in conn.execute(
+            f"SELECT account_id, account_type, display_name FROM accounts "
+            f"WHERE account_type IS NOT NULL AND account_type NOT IN ({ph})", list(ACCOUNT_TYPES)).fetchall():
+        conn.execute("UPDATE accounts SET account_type = ?, account_type_legacy = COALESCE(account_type_legacy, ?) "
+                     "WHERE account_id = ?",
+                     [normalize_account_type(old, name or "", default=AccountType.OTHER), old, aid])
 
 
 def _migrate_positions_to_instruments(conn: sqlite3.Connection) -> None:
@@ -428,7 +472,7 @@ def get_portfolio_by_owner(owner: str, *, conn: sqlite3.Connection | None = None
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
 
-_ACCOUNT_EDITABLE = frozenset({"display_name", "account_type", "status"})
+_ACCOUNT_EDITABLE = frozenset({"display_name", "account_type", "status", "holdings_source"})
 
 
 def get_account(account_id: int, *, conn: sqlite3.Connection | None = None) -> dict | None:
@@ -448,8 +492,11 @@ def find_account(portfolio_id: int, broker: str, account_number: str, *,
 
 
 def list_accounts(portfolio_id: int | None = None, *, include_archived: bool = False,
-                  conn: sqlite3.Connection | None = None) -> list[dict]:
+                  include_paper: bool = False, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Accounts, newest grouping by broker. Paper accounts are excluded unless include_paper (they are not real holdings)."""
     clauses, params = [], []
+    if not include_paper:
+        clauses.append("is_paper = 0")
     if portfolio_id is not None:
         clauses.append("portfolio_id = ?"); params.append(portfolio_id)
     if not include_archived:
@@ -462,12 +509,14 @@ def list_accounts(portfolio_id: int | None = None, *, include_archived: bool = F
 
 
 def insert_account(portfolio_id: int, broker: str, account_number: str, display_name: str | None,
-                   account_type: str | None, *, conn: sqlite3.Connection | None = None) -> dict:
+                   account_type: str | None, *, is_paper: bool = False,
+                   conn: sqlite3.Connection | None = None) -> dict:
     with _db(conn) as conn:
         cur = conn.execute(
-            "INSERT INTO accounts (portfolio_id, broker, account_number, display_name, account_type) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [portfolio_id, broker, (account_number or "").strip(), display_name, account_type])
+            "INSERT INTO accounts (portfolio_id, broker, account_number, display_name, account_type, is_paper) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [portfolio_id, broker, (account_number or "").strip(), display_name,
+             str(account_type) if account_type else None, int(bool(is_paper))])
         return get_account(cur.lastrowid, conn=conn)
 
 
@@ -500,7 +549,11 @@ def delete_account(account_id: int, *, conn: sqlite3.Connection | None = None) -
 
 # ── Instruments ───────────────────────────────────────────────────────────────
 
-_INSTRUMENT_EDITABLE = frozenset({"ticker", "name", "asset_class", "status"})
+_INSTRUMENT_EDITABLE = frozenset({
+    "ticker", "name", "asset_class", "status", "instrument_type", "sub_asset_class", "leverage_factor",
+    "expense_ratio", "fund_family", "category", "proxy_ticker", "classification_source", "classified_at",
+    "asset_class_legacy",
+})
 
 
 def _norm_ticker(ticker: str | None) -> str:
@@ -527,7 +580,9 @@ def get_or_create_instrument(ticker: str, *, name: str | None = None,
     if not t:
         raise ValueError("instrument: ticker is required")
     with _db(conn) as conn:
-        conn.execute("INSERT OR IGNORE INTO instruments (ticker, name) VALUES (?, ?)", [t, name or None])
+        conn.execute("INSERT OR IGNORE INTO instruments (ticker, name, asset_class, instrument_type) VALUES (?, ?, ?, ?)",
+                     [t, name or None, AssetClass.UNKNOWN.value,
+                      (InstrumentType.CIT if is_synthetic_ticker(t) else InstrumentType.UNKNOWN).value])
         return find_instrument(t, conn=conn)
 
 
@@ -537,9 +592,82 @@ def list_instruments(*, conn: sqlite3.Connection | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+_schema_ready: set[str] = set()
+
+
+def _ensure_schema_once() -> None:
+    """Run the idempotent schema/migration once per process per database file (see get_instrument_profiles)."""
+    key = str(_db_path())
+    if key not in _schema_ready:
+        with unit_of_work():
+            pass
+        _schema_ready.add(key)
+
+
+def _db_path():
+    from portfolio_agent.tools import db as _db_module
+    return _db_module.DB_PATH
+
+
+def get_instrument_profiles(tickers: list[str], *, conn: sqlite3.Connection | None = None) -> dict[str, dict]:
+    """
+    {ticker: {instrument_type, asset_class, leverage_factor}} for the tickers that HAVE an instrument row (others
+    are simply absent). Shared reference data — no owner, no holdings — so market-only code may read it.
+
+    A plain read: the schema check runs once per process, not on every call, because this is called from the
+    pipeline's parallel context-building threads and every connection's schema DDL would fight for the write lock.
+    """
+    ts = sorted({_norm_ticker(t) for t in tickers if t})
+    if not ts:
+        return {}
+    sql = (f"SELECT ticker, instrument_type, asset_class, leverage_factor FROM instruments "
+           f"WHERE ticker IN ({','.join('?' * len(ts))})")
+    if conn is not None:
+        rows = conn.execute(sql, ts).fetchall()
+    else:
+        _ensure_schema_once()
+        with db_conn() as c:
+            rows = c.execute(sql, ts).fetchall()
+    return {r["ticker"]: {"instrument_type": r["instrument_type"], "asset_class": r["asset_class"],
+                          "leverage_factor": r["leverage_factor"]} for r in rows}
+
+
+def list_instruments_needing_classification(*, older_than_days: int = RECLASSIFY_AFTER_DAYS,
+                                            tickers: list[str] | None = None,
+                                            conn: sqlite3.Connection | None = None) -> list[dict]:
+    """
+    Instruments whose AUTOMATIC classification is missing or stale (never classified, or classified more
+    than *older_than_days* ago). A manual classification is never listed, and neither is a synthetic
+    (ticker-less) instrument — there is nothing to look up for it. *tickers* narrows the search.
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    clauses = ["classification_source = ?", "(classified_at IS NULL OR classified_at < ?)", "status = 'active'"]
+    params: list = [ClassificationSource.AUTO.value, cutoff]
+    if tickers is not None:
+        ts = [_norm_ticker(t) for t in tickers]
+        if not ts:
+            return []
+        clauses.append(f"ticker IN ({','.join('?' * len(ts))})"); params += ts
+    with _db(conn) as conn:
+        rows = conn.execute(f"SELECT * FROM instruments WHERE {' AND '.join(clauses)} ORDER BY ticker", params).fetchall()
+    return [dict(r) for r in rows if not is_synthetic_ticker(r["ticker"])]
+
+
+def portfolio_holds_instrument(portfolio_id: int, instrument_id: int, *,
+                               conn: sqlite3.Connection | None = None) -> bool:
+    """True if any ACTIVE account in the portfolio holds a position in the instrument (ownership test for edits)."""
+    with _db(conn) as conn:
+        r = conn.execute(
+            "SELECT 1 FROM positions p JOIN accounts a ON a.account_id = p.account_id "
+            "WHERE p.instrument_id = ? AND a.portfolio_id = ? AND a.status = 'active' LIMIT 1",
+            [instrument_id, portfolio_id]).fetchone()
+    return r is not None
+
+
 def update_instrument(instrument_id: int, *, expected_version: int | None = None,
                       conn: sqlite3.Connection | None = None, **fields) -> int:
-    """Set ticker / name / asset_class / status; bumps version. Returns rows changed (0 = missing or stale)."""
+    """Set ticker / name / classification fields / status; bumps version. Returns rows changed (0 = missing or stale)."""
     bad = set(fields) - _INSTRUMENT_EDITABLE
     if bad:
         raise ValueError(f"update_instrument: cannot set column(s) {sorted(bad)}")
@@ -736,7 +864,8 @@ def get_portfolio_tickers(*, portfolio_id: int | None = None) -> list[str]:
             ).fetchall()
         else:
             rows = conn.execute("SELECT DISTINCT ticker FROM holdings ORDER BY ticker").fetchall()
-    return [r["ticker"] for r in rows]
+    # A ticker-less fund (synthetic "CIT:..." key) is not a market symbol: it never enters the pipeline universe.
+    return [r["ticker"] for r in rows if not is_synthetic_ticker(r["ticker"])]
 
 
 def get_holdings_summary(*, portfolio_id: int | None = None) -> dict:
@@ -793,7 +922,7 @@ def get_cash_balances(broker: Optional[str] = None, *, portfolio_id: int | None 
     See get_holdings() for why portfolio_id should be passed by every per-request caller."""
     sql = ("SELECT c.account_id, a.broker, a.account_number, a.display_name AS account_name, "
            "c.amount, c.as_of_date, c.detail, c.imported_at "
-           "FROM account_cash c JOIN accounts a ON a.account_id = c.account_id WHERE a.status = ?")
+           "FROM account_cash c JOIN accounts a ON a.account_id = c.account_id WHERE a.status = ? AND a.is_paper = 0")
     params: list = [ACCOUNT_ACTIVE]
     if broker:
         sql += " AND a.broker = ?"; params.append(broker)

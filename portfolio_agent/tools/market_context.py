@@ -12,6 +12,11 @@ known private term (see portfolio_agent.privacy).
 The returned MarketContext is the proof a writer needs to store a forecast as
 shared: it carries the evidence references, the history lineage and a digest
 of the exact payload the model saw.
+
+Funds (ETF / ETN / mutual fund / target-date fund — domain.FUND_INSTRUMENT_TYPES) are built differently: the
+company-fundamentals and DCF-valuation loaders are never called, neither source is listed as a data gap or given a
+"No data" score cap, their weights are 0, and the payload tells the model not to score them. A stock's payload —
+and so its digest — is exactly what it was before.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 
 from portfolio_agent.privacy import assert_market_only
+from portfolio_agent.domain import FUND_INSTRUMENT_TYPES
 from portfolio_agent.tools.weight_engine import SUPPORTED_HORIZONS, compute_dynamic_weights
 
 MARKET_CONTEXT_VERSION = "market-context/1.1"   # bumped: payload gained "technical" (see default_loaders)
@@ -40,6 +46,8 @@ class MarketContext:
     built_at: str                       # UTC ISO
     version: str = MARKET_CONTEXT_VERSION
     market_only: bool = True
+    instrument_type: str | None = None      # None = no instrument row yet (treated as a stock)
+    leverage_factor: float | None = None    # != 1.0 for a leveraged / inverse fund
 
     def to_json(self) -> str:
         return json.dumps(self.payload, default=str)
@@ -61,6 +69,7 @@ def _get(d, *keys):
 
 def default_loaders() -> dict[str, Callable]:
     from portfolio_agent.tools.fundamentals_db import get_stored_fundamentals
+    from portfolio_agent.tools.instrument_reference import get_instrument_profiles   # instruments table only
     from portfolio_agent.tools.prediction_db import SHARED_SCOPES, get_prediction_history
     from portfolio_agent.tools.reasoning_tools import _get_recent_news, get_macro_snapshot
     from portfolio_agent.tools.research_db import get_stored_research
@@ -80,7 +89,14 @@ def default_loaders() -> dict[str, Callable]:
         except Exception:
             return None
 
+    def _instrument(t: str):
+        try:
+            return get_instrument_profiles([t]).get(t.upper())
+        except Exception:
+            return None
+
     return {
+        "instrument": _instrument,
         "fundamentals": get_stored_fundamentals,
         "research": get_stored_research,
         "news": lambda t: _get_recent_news(t, days=7),
@@ -119,10 +135,17 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
         raise ValueError(f"build_market_context: unsupported horizon(s) {bad}; supported: {list(SUPPORTED_HORIZONS)}")
     L = dict(default_loaders()) if loaders is None else dict(loaders)
 
-    fundamentals = L["fundamentals"](ticker)
+    # What kind of security is this? A caller-supplied `loaders` without "instrument" (older tests) = a stock.
+    profile = L.get("instrument", lambda t: None)(ticker) or {}
+    itype = profile.get("instrument_type")
+    leverage = profile.get("leverage_factor")
+    is_fund = itype in FUND_INSTRUMENT_TYPES
+
+    # A fund has no company financials: those two loaders are not even called (nothing to fetch, no placeholder).
+    fundamentals = None if is_fund else L["fundamentals"](ticker)
     research = L["research"](ticker)
     news = L["news"](ticker) or []
-    valuation = L["valuation"](ticker)
+    valuation = None if is_fund else L["valuation"](ticker)
     macro_snapshot = (L["macro"]() or {}) if macro_snapshot is None else macro_snapshot
     # .get(), not [] -- optional: a caller-supplied `loaders` override (tests,
     # mainly) that predates this loader is still valid; "technical" simply
@@ -134,12 +157,14 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
     except Exception:
         failure_patterns = []
 
-    data_gaps = [name for name, present in (("fundamentals", fundamentals), ("research", research),
-                                             ("news", news), ("valuation", valuation)) if not present]
+    applicable = (("research", research), ("news", news)) if is_fund else (
+        ("fundamentals", fundamentals), ("research", research), ("news", news), ("valuation", valuation))
+    data_gaps = [name for name, present in applicable if not present]
 
     weight_data = compute_dynamic_weights(
         ticker=ticker, news_data=news, research_data=_to_dict(research), macro_snapshot=macro_snapshot,
         fundamentals_data=_to_dict(fundamentals), horizons=list(hz), valuation_data=_to_dict(valuation),
+        instrument_type=itype if is_fund else None,
     )
     caps = weight_data.get("data_caps", {})
     cap_lines = [f"{domain} ≤ {cap} (no data in DB — analyst must state 'No {domain} data')"
@@ -151,6 +176,15 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
         return f"{round(v * 100)}%"
 
     wbh = weight_data.get("weights_by_horizon") or {}
+    fund_note = ""
+    if is_fund:
+        lev_note = (f" It is a {leverage:g}x {'inverse ' if leverage < 0 else 'leveraged '}fund: its returns are amplified, so "
+                    "widen the return range and the probability distribution accordingly." if leverage and leverage != 1.0 else "")
+        fund_note = (
+            f"\nFUND — this is a {itype.replace('_', ' ').lower()}, not a company. There are no company fundamentals or DCF "
+            "valuation for it: their weights are 0. Do NOT score the FUNDAMENTAL or VALUATION analysts — set "
+            "fundamental_score and valuation_score to null (never a placeholder like 5) and compute each horizon_composite "
+            "from the remaining sources only, using the weights above." + lev_note)
     horizon_weight_lines = [
         f"  {h}d: News {_pct(w['news'])} · Research {_pct(w['research'])} · Macro {_pct(w['macro'])} · "
         f"Fundamentals {_pct(w['fundamentals'])} · Valuation {_pct(w['valuation'])}"
@@ -203,9 +237,15 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
         "weight_instruction": (
             f"CRITICAL: Use the exact per-horizon weights from dynamic_weights.weights_by_horizon "
             f"for each horizon's composite score. Regime: {weight_data['regime']}.\n"
-            f"Per-horizon weights:\n{horizon_weight_str}\n{cap_instruction}"
+            f"Per-horizon weights:\n{horizon_weight_str}\n{cap_instruction}{fund_note}"
         ),
     }
+    if is_fund:
+        payload["instrument"] = {"instrument_type": itype, "leverage_factor": leverage,
+                                 "asset_class": profile.get("asset_class")}
+        # TODO(fund_context): inject ETF-specific context here in a later task — top holdings, sector mix,
+        # expense ratio, concentration. Deliberately not built yet; None keeps the key stable for the prompt.
+        payload["fund_context"] = None
     text = json.dumps(payload, default=str)
     assert_market_only(text, private_terms, what=f"market context for {ticker}")
 
@@ -230,7 +270,10 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
         "failure_pattern_count": len(failure_patterns),
         "weight_regime": weight_data.get("regime"),
     }
+    if is_fund:
+        evidence_refs["instrument_type"] = itype
     return MarketContext(
         ticker=ticker, horizons=hz, payload=payload, evidence_refs=evidence_refs, history_lineage=lineage,
         digest=hashlib.sha256(text.encode()).hexdigest()[:16], built_at=built_at,
+        instrument_type=itype, leverage_factor=leverage,
     )

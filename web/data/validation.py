@@ -335,7 +335,8 @@ def _load_evaluated_predictions_df(
                    in_predicted_range, predicted_direction, actual_direction,
                    predicted_return_low, predicted_return_high,
                    p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                   conviction_score, composite_score, trigger_type, model_name, prediction_role
+                   conviction_score, composite_score, trigger_type, model_name, prediction_role,
+                   instrument_type, leverage_factor
             FROM predictions
             {where}
             ORDER BY COALESCE(evaluation_date, as_of_date) ASC

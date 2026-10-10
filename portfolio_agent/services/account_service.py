@@ -25,6 +25,12 @@ Operations
       (updates rows in place so position ids survive re-imports)
   change_instrument_ticker                            — a security's ticker
       changed; its instrument_id, positions and history stay the same
+  set_account_type                                    — an account's normalized type
+  set_instrument_classification                       — a person's manual override of what a security is
+      (instrument type, asset class, leverage, proxy); automatic classification never overwrites it
+  apply_auto_classification                           — store the classifier's result (skips manual ones)
+  create_synthetic_instrument                         — a ticker-less fund (401k CIT), keyed "CIT:<slug>"
+  set_position_price                                  — a hand-entered price (the only price source for a CIT)
 """
 
 from __future__ import annotations
@@ -32,7 +38,12 @@ from __future__ import annotations
 import sqlite3
 from datetime import date
 
-from portfolio_agent.domain import LOCAL_OWNER
+from datetime import datetime, timezone
+
+from portfolio_agent.domain import (
+    ACCOUNT_TYPES, ASSET_CLASSES, INSTRUMENT_TYPES, LOCAL_OWNER, AssetClass, ClassificationSource, InstrumentType,
+    is_synthetic_ticker, normalize_account_type, synthetic_cit_ticker,
+)
 from portfolio_agent.services.context import RequestContext, require_context
 from portfolio_agent.tools import holdings_db as repo
 
@@ -134,6 +145,7 @@ def create_account(ctx: RequestContext, *, broker: str, display_name: str | None
     """
     broker = _norm_broker(broker)
     display_name = (display_name or "").strip() or None
+    account_type = normalize_account_type(account_type, display_name or "", default=None) if account_type else None
     account_number = (account_number or "").strip() or (display_name or "")
     if not account_number:
         raise ValueError("create_account: an account needs an account number or a name")
@@ -223,7 +235,21 @@ def add_position(ctx: RequestContext, account_id: int, position: dict, *, on_dup
     ticker, reject (default) or — only when the caller explicitly asks with
     on_duplicate="update" — correct the existing position's quantity and cost
     instead. Never silently doubles up.
+
+    A new security is classified (stock / ETF / fund / ...) right after the transaction commits, best effort:
+    the lookup is a network call, so it never runs inside the transaction. When the caller passes ``conn`` the
+    transaction is theirs and so is that follow-up — call instrument_classifier.classify_new_holdings afterwards.
     """
+    result = _add_position(ctx, account_id, position, on_duplicate=on_duplicate, as_of_date=as_of_date,
+                           reason=reason, conn=conn)
+    if conn is None and not is_synthetic_ticker(result.get("ticker")):
+        from portfolio_agent.services.instrument_classifier import classify_new_holdings
+        classify_new_holdings(ctx, [result["ticker"]])
+    return result
+
+
+def _add_position(ctx: RequestContext, account_id: int, position: dict, *, on_duplicate: str,
+                  as_of_date: str | None, reason: str | None, conn: sqlite3.Connection | None) -> dict:
     if on_duplicate not in ("reject", "update"):
         raise ValueError("add_position: on_duplicate must be 'reject' or 'update'")
     fields = repo.position_fields(position, as_of_date or date.today().isoformat())
@@ -390,6 +416,206 @@ def change_instrument_ticker(ctx: RequestContext, instrument_id: int, new_ticker
                after={"ticker": new, "version": after["version"], "instrument_id": instrument_id,
                       "history_rows_moved": history["moved"], "history_rows_skipped": history["skipped"]},
                reason=reason)
+        return after
+
+
+# ── Taxonomy: account type, instrument classification, ticker-less funds, manual prices ──
+
+_UNSET = object()          # "leave this field alone" (None is a real value for several of them)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+_CLASSIFICATION_KEYS = ("instrument_type", "asset_class", "sub_asset_class", "leverage_factor", "proxy_ticker",
+                        "expense_ratio", "fund_family", "category", "classification_source", "version")
+
+
+def _classification_snapshot(i: dict) -> dict:
+    return {k: i.get(k) for k in _CLASSIFICATION_KEYS}
+
+
+def ensure_instruments(ctx: RequestContext, tickers: list[str], *, conn: sqlite3.Connection | None = None) -> list[str]:
+    """
+    Make sure each ticker has an instrument row (created UNKNOWN, to be classified). Used by the pipeline for
+    watchlist / trending tickers nobody holds, so every ticker it analyses has a type. Synthetic and blank keys
+    are ignored. One audit event lists what was created; returns the created tickers (usually empty).
+    """
+    wanted = sorted({repo._norm_ticker(t) for t in tickers if t and not is_synthetic_ticker(t)})
+    with repo.unit_of_work(conn) as c:
+        portfolio = resolve_portfolio(ctx, conn=c)
+        created = [t for t in wanted if repo.find_instrument(t, conn=c) is None]
+        for t in created:
+            repo.get_or_create_instrument(t, conn=c)
+        if created:
+            _audit(ctx, c, "create_instruments", portfolio_id=portfolio["portfolio_id"],
+                   after={"tickers": created}, reason="seen by the pipeline")
+        return created
+
+
+def set_account_type(ctx: RequestContext, account_id: int, account_type: str, *, expected_version: int | None = None,
+                     reason: str | None = None, conn: sqlite3.Connection | None = None) -> dict:
+    """Set an account's type to one of domain.ACCOUNT_TYPES (TAXABLE, TRADITIONAL_IRA, ROTH_IRA, 401K, ...)."""
+    if account_type not in ACCOUNT_TYPES:
+        raise ValueError(f"set_account_type: {account_type!r} is not one of {list(ACCOUNT_TYPES)}")
+    with repo.unit_of_work(conn) as c:
+        acct = _owned_account(ctx, account_id, c)
+        _check_version(acct, expected_version, "account")
+        repo.update_account(account_id, account_type=str(account_type), conn=c)
+        after = repo.get_account(account_id, conn=c)
+        _audit(ctx, c, "set_account_type", portfolio_id=acct["portfolio_id"], account_id=account_id,
+               before=_account_snapshot(acct), after=_account_snapshot(after), reason=reason)
+        return after
+
+
+def _owned_instrument(ctx: RequestContext, instrument_id: int, c: sqlite3.Connection) -> tuple[dict, dict]:
+    """(instrument, portfolio). Instruments are shared reference rows, so the actor must hold the security."""
+    portfolio = resolve_portfolio(ctx, conn=c)
+    inst = repo.get_instrument(instrument_id, conn=c)
+    if inst is None:
+        raise NotFound(f"instrument {instrument_id} does not exist")
+    if not repo.portfolio_holds_instrument(portfolio["portfolio_id"], instrument_id, conn=c):
+        raise NotAuthorized(f"{ctx.actor!r} holds no position in instrument {instrument_id}")
+    return inst, portfolio
+
+
+def set_instrument_classification(ctx: RequestContext, instrument_id: int, *, instrument_type=_UNSET,
+                                  asset_class=_UNSET, sub_asset_class=_UNSET, leverage_factor=_UNSET,
+                                  proxy_ticker=_UNSET, expected_version: int | None = None,
+                                  reason: str | None = None, conn: sqlite3.Connection | None = None) -> dict:
+    """
+    A person's manual override of what a security is. The row becomes classification_source='manual', so
+    automatic re-classification never overwrites it. The actor must hold the instrument in one of their
+    active accounts; note the instrument row itself is shared, so the override applies wherever it is held.
+    Only the fields passed are changed. proxy_ticker (None/"" clears) names a market symbol to use for
+    analytics on a ticker-less fund — it is never shown as the user's holding.
+    """
+    fields: dict = {}
+    if instrument_type is not _UNSET:
+        if instrument_type not in INSTRUMENT_TYPES:
+            raise ValueError(f"instrument_type must be one of {sorted(INSTRUMENT_TYPES)}, not {instrument_type!r}")
+        fields["instrument_type"] = str(instrument_type)
+    if asset_class is not _UNSET:
+        if asset_class not in ASSET_CLASSES:
+            raise ValueError(f"asset_class must be one of {sorted(ASSET_CLASSES)}, not {asset_class!r}")
+        fields["asset_class"] = str(asset_class)
+    if sub_asset_class is not _UNSET:
+        fields["sub_asset_class"] = (str(sub_asset_class).strip().upper().replace(" ", "_") or None) if sub_asset_class else None
+    if leverage_factor is not _UNSET:
+        lev = float(leverage_factor)
+        if lev == 0 or abs(lev) > 5:
+            raise ValueError("leverage_factor must be non-zero and within ±5 (1.0 normal, 2.0 / 3.0 leveraged, negative inverse)")
+        fields["leverage_factor"] = lev
+    if proxy_ticker is not _UNSET:
+        px = repo._norm_ticker(proxy_ticker) if proxy_ticker else ""
+        if is_synthetic_ticker(px):
+            raise ValueError("a proxy ticker must be a real market symbol, not another ticker-less fund")
+        fields["proxy_ticker"] = px or None
+    if not fields:
+        raise ValueError("set_instrument_classification: nothing to change")
+    with repo.unit_of_work(conn) as c:
+        inst, portfolio = _owned_instrument(ctx, instrument_id, c)
+        _check_version(inst, expected_version, "instrument")
+        repo.update_instrument(instrument_id, conn=c, classification_source=ClassificationSource.MANUAL.value,
+                               classified_at=_now_iso(), **fields)
+        after = repo.get_instrument(instrument_id, conn=c)
+        _audit(ctx, c, "set_instrument_classification", portfolio_id=portfolio["portfolio_id"],
+               before=_classification_snapshot(inst) | {"ticker": inst["ticker"], "instrument_id": instrument_id},
+               after=_classification_snapshot(after) | {"ticker": after["ticker"], "instrument_id": instrument_id},
+               reason=reason)
+        return after
+
+
+def apply_auto_classification(ctx: RequestContext, instrument_id: int, classification, *,
+                              conn: sqlite3.Connection | None = None) -> dict:
+    """
+    Store the classifier's result (an instrument_classifier.Classification). A manual classification is
+    returned untouched. A FAILED lookup writes nothing — it never wipes a good classification, and leaving
+    classified_at empty makes the next run retry. An audit event is written only when something changed.
+    """
+    with repo.unit_of_work(conn) as c:
+        portfolio = resolve_portfolio(ctx, conn=c)
+        inst = repo.get_instrument(instrument_id, conn=c)
+        if inst is None:
+            raise NotFound(f"instrument {instrument_id} does not exist")
+        if inst.get("classification_source") == ClassificationSource.MANUAL.value or is_synthetic_ticker(inst["ticker"]):
+            return inst
+        if not classification.lookup_ok:
+            return inst
+        fields = {
+            "instrument_type": classification.instrument_type, "asset_class": classification.asset_class,
+            "sub_asset_class": classification.sub_asset_class, "leverage_factor": classification.leverage_factor,
+            "expense_ratio": classification.expense_ratio, "fund_family": classification.fund_family,
+            "category": classification.category,
+        }
+        changed = any(inst.get(k) != v for k, v in fields.items())
+        repo.update_instrument(instrument_id, conn=c, classification_source=ClassificationSource.AUTO.value,
+                               classified_at=_now_iso(), **fields)
+        after = repo.get_instrument(instrument_id, conn=c)
+        if changed:
+            _audit(ctx, c, "classify_instrument", portfolio_id=portfolio["portfolio_id"],
+                   before=_classification_snapshot(inst) | {"ticker": inst["ticker"], "instrument_id": instrument_id},
+                   after=_classification_snapshot(after) | {"ticker": after["ticker"], "instrument_id": instrument_id},
+                   reason=classification.basis or None)
+        return after
+
+
+def create_synthetic_instrument(ctx: RequestContext, *, plan_name: str, fund_name: str,
+                                asset_class: str = AssetClass.UNKNOWN.value, sub_asset_class: str | None = None,
+                                proxy_ticker: str | None = None, reason: str | None = None,
+                                conn: sqlite3.Connection | None = None) -> dict:
+    """
+    Create (or return, if it already exists) the instrument for a fund with no ticker — typically a 401(k)
+    collective investment trust. Its key is the synthetic "CIT:<PLAN>-<FUND>": never priced from the market and
+    never predicted. Its price is entered by hand (set_position_price); proxy_ticker (e.g. VOO for an S&P 500
+    CIT) is for analytics only. The new row is a manual classification of type CIT.
+    """
+    ticker = synthetic_cit_ticker(plan_name, fund_name)
+    if asset_class not in ASSET_CLASSES:
+        raise ValueError(f"asset_class must be one of {sorted(ASSET_CLASSES)}, not {asset_class!r}")
+    proxy = repo._norm_ticker(proxy_ticker) if proxy_ticker else None
+    if proxy and is_synthetic_ticker(proxy):
+        raise ValueError("a proxy ticker must be a real market symbol, not another ticker-less fund")
+    with repo.unit_of_work(conn) as c:
+        portfolio = resolve_portfolio(ctx, conn=c)
+        existing = repo.find_instrument(ticker, conn=c)
+        if existing is not None:
+            return existing
+        inst = repo.get_or_create_instrument(ticker, name=f"{fund_name.strip()} ({plan_name.strip()})" if plan_name.strip()
+                                             else fund_name.strip(), conn=c)
+        repo.update_instrument(inst["instrument_id"], conn=c, instrument_type=InstrumentType.CIT.value,
+                               asset_class=str(asset_class),
+                               sub_asset_class=(sub_asset_class or "").strip().upper().replace(" ", "_") or None,
+                               proxy_ticker=proxy, classification_source=ClassificationSource.MANUAL.value,
+                               classified_at=_now_iso())
+        after = repo.get_instrument(inst["instrument_id"], conn=c)
+        _audit(ctx, c, "create_synthetic_instrument", portfolio_id=portfolio["portfolio_id"],
+               after=_classification_snapshot(after) | {"ticker": ticker, "instrument_id": after["instrument_id"]},
+               reason=reason)
+        return after
+
+
+def set_position_price(ctx: RequestContext, position_id: int, price: float, *, as_of_date: str | None = None,
+                       expected_version: int | None = None, reason: str | None = None,
+                       conn: sqlite3.Connection | None = None) -> dict:
+    """
+    Record a hand-entered price (and the resulting value) for one position. For a ticker-less fund this is the
+    only price source — price refreshes skip it. For a market-priced position the next refresh overwrites it.
+    """
+    price = float(price)
+    if not price > 0:
+        raise ValueError("set_position_price: price must be positive")
+    as_of = as_of_date or date.today().isoformat()
+    with repo.unit_of_work(conn) as c:
+        pos, acct = _owned_position(ctx, position_id, c)
+        _check_version(pos, expected_version, "position")
+        shares = pos.get("shares")
+        repo.update_position(position_id, conn=c, touch=False, current_price=round(price, 4),
+                             current_value=round(price * shares, 2) if shares else None, price_as_of=as_of)
+        after = repo.get_position(position_id, conn=c)
+        _audit(ctx, c, "set_position_price", portfolio_id=acct["portfolio_id"], account_id=pos["account_id"],
+               position_id=position_id, before=_position_snapshot(pos), after=_position_snapshot(after), reason=reason)
         return after
 
 

@@ -19,7 +19,7 @@ A personal investment research assistant that runs a structured multi-analyst pi
 
 - **No order execution.** The system never connects to a broker, never places trades, and has no access to your brokerage accounts. All output is read-only research.
 - **No real-time price feeds.** Prices are fetched from Yahoo Finance on a delayed basis (typically 15–20 minutes during market hours). Intraday precision is not available.
-- **No options, derivatives, or alternatives.** Coverage is equities only.
+- **No options, derivatives, or alternatives.** Coverage is stocks and funds (ETFs, ETNs, mutual funds, target-date funds). Cash, money-market funds and ticker-less funds are held but never forecast.
 - **No tax advice.** The system has no knowledge of your cost basis, holding periods, wash-sale rules, or tax situation.
 - **No guarantee of accuracy.** The validation layer exists precisely because forecasts are unreliable. Past accuracy in the validation database does not predict future accuracy.
 - **Not a registered investment adviser.** See the disclaimer at the bottom of this file.
@@ -122,6 +122,20 @@ Notes only — no infra is set up by this repo.
 
 ---
 
+## Holdings taxonomy: what each holding is, and what each account is
+
+**Instruments.** Every security carries an `instrument_type` (`STOCK`, `ETF`, `ETN`, `MUTUAL_FUND`, `MONEY_MARKET`, `TARGET_DATE_FUND`, `BOND`, `CIT`, `CASH`, `OTHER`, `UNKNOWN`), an `asset_class` (`US_EQUITY`, `INTL_EQUITY`, `FIXED_INCOME`, `REAL_ESTATE`, `COMMODITY`, `CASH`, `MULTI_ASSET`, `UNKNOWN`), an optional `sub_asset_class` (e.g. `LARGE_CAP_GROWTH`, `EMERGING_MARKETS`, `TREASURY`, `HIGH_YIELD`), a `leverage_factor` (1.0 normal, 2.0 / 3.0 leveraged, negative = inverse) and, for funds, `expense_ratio` (a fraction), `fund_family` and `category`. The vocabularies are defined once in `portfolio_agent/domain.py`.
+
+- **Automatic classification** (`portfolio_agent/services/instrument_classifier.py`) uses Yahoo Finance's `quoteType` first, then name/category keywords (leveraged/inverse, target-date, money market, ETN). "Short-Term Treasury" and "Ultra-Short Bond" funds are *not* flagged inverse. It runs after an import or a manual add commits — never inside a database transaction — and a failed lookup leaves the instrument as it was (it never raises into an import or the pipeline). Automatic classifications older than 30 days are re-checked.
+- **Manual override** (Accounts → *What each holding is*): a classification you set is never overwritten by the automatic check. The instrument row is shared, so an override applies in every account that holds that security. Every change is recorded in the audit log.
+- **Backfill** existing holdings once: `python -m scripts.backfill_instrument_classification --dry-run`, then without `--dry-run`. Safe to re-run.
+- **Funds with no ticker** (a 401(k) collective investment trust): add them under Accounts → *Add a fund with no ticker*. They are keyed `CIT:<PLAN>-<FUND>`, priced by hand, and never sent to a price provider or the prediction pipeline. An optional **proxy ticker** (e.g. `VOO` for an S&P 500 CIT) is used for analytics only and is never shown as your holding.
+- **Portfolio page** shows type, asset class and leverage columns, filters by type / asset class, and groups the allocation chart by sector, asset class or instrument type.
+
+**Accounts.** `account_type` is one of `TAXABLE`, `TRADITIONAL_IRA`, `ROTH_IRA`, `ROLLOVER_IRA`, `SEP_IRA`, `401K`, `ROTH_401K`, `403B`, `457B`, `HSA`, `529`, `CASH`, `OTHER`; every importer maps its output to these (the old `IRA` became `TRADITIONAL_IRA`, and the previous value is kept in `account_type_legacy`). The **tax treatment** shown on each account (taxable / tax-deferred / tax-free) is derived from the type, not stored. Two columns are reserved for later work: `holdings_source` (`snapshot`, today's behaviour, or `ledger`) and `is_paper` — paper accounts are excluded from your holdings, totals, cash and the pipeline universe.
+
+---
+
 ## Data sources
 
 | Source | What it provides | Notes |
@@ -145,7 +159,7 @@ Each morning run executes in sequence:
 1. **News** — pulls and triages headlines from RSS + Finnhub; runs a batched LLM news-scoring pass on material items; stores in `news_daily` table
 2. **Short Interest Check** — computes the current FINRA settlement date (deterministic, no network); if new data is due, pulls it in one paginated batch and writes to `short_interest` table; otherwise skips (cheap single DB query)
 3. **Research** — fetches Finnhub analyst consensus, price targets, and recent rating changes; injects pre-computed short interest trend summary per ticker; stores in `research` table
-4. **Fundamentals** — extracts revenue, net margin, FCF, debt/equity from the latest EDGAR filing; fetches the latest 8-K EX-99.1 exhibit and extracts the guidance/outlook section; passes guidance text and financial data together to the LLM, which outputs `guidance_direction`; stores in `fundamentals` table
+4. **Fundamentals** — (funds, money market and cash are left out first — they file nothing with the SEC; see [Instrument routing](#instrument-routing-funds-vs-stocks)) extracts revenue, net margin, FCF, debt/equity from the latest EDGAR filing; fetches the latest 8-K EX-99.1 exhibit and extracts the guidance/outlook section; passes guidance text and financial data together to the LLM, which outputs `guidance_direction`; stores in `fundamentals` table
 5. **APEX** — runs the 4-analyst panel for each portfolio ticker on today's scheduled horizons; reads macro snapshot live at prediction time; stores recommendations in `predictions` table
 
 **Event detection** runs at the start of the APEX phase. `detect_material_news` reads the news filter log and fires event-driven predictions for high-severity items. `detect_earnings`, `detect_sec_8k`, `detect_rating_changes`, and `detect_macro_events` are implemented as stubs and return no events today.
@@ -207,6 +221,23 @@ Keys for unused providers can be omitted; those models are skipped. The macro sn
 
 ---
 
+## Instrument routing: funds vs stocks
+
+What the pipeline does with a ticker depends on its `instrument_type` (see [Holdings taxonomy](#holdings-taxonomy-what-each-holding-is-and-what-each-account-is)). Tickers nobody holds — watchlist, trending, extras — are classified at the start of each phase too.
+
+| Type | EDGAR / 8-K guidance | Fundamentals + DCF valuation | APEX forecast |
+|---|---|---|---|
+| `STOCK`, `UNKNOWN` (priced), `BOND`, `OTHER` | fetched | run, weighted as before | yes — unchanged path |
+| `ETF`, `ETN`, `MUTUAL_FUND`, `TARGET_DATE_FUND` | skipped cleanly (no error noise) | not run; weight 0 | yes — Research, Macro, News only |
+| `MONEY_MARKET`, `CASH`, `CIT` (ticker-less) | skipped | not run | no — logged as `[skip] … nothing to forecast` |
+| `UNKNOWN` with no price | — | — | no — logged as `type unknown and no price available` |
+
+Each stored prediction records the `instrument_type` and `leverage_factor` it was made under (older rows show as *Unclassified* in validation until you run `python -m scripts.backfill_instrument_classification --stamp-predictions`).
+
+**Not built yet:** ETF-specific context (top holdings, sector mix, expense ratio, concentration). The hook is a `fund_context: null` field in the fund's context payload (`tools/market_context.py`, marked `TODO(fund_context)`).
+
+---
+
 ## Short interest (FINRA)
 
 FINRA publishes settlement-date short interest data twice per month: approximately the 15th and the last business day of each month. Data is available ~8 business days after the settlement date.
@@ -246,6 +277,7 @@ The four analyst scores are not combined with fixed weights. The weight engine a
 - **Yield curve** — an inverted curve shifts additional weight to Macro
 - **S&P trend** — strong 1-month momentum tilts toward News and Research
 - **Event type** — earnings releases boost Fundamental and Research weights; macro surprises boost Macro weight
+- **Instrument type** — for an ETF, ETN, mutual fund or target-date fund the Fundamentals and Valuation weights are exactly 0 on every horizon and the remaining sources (Research, Macro, News) are renormalised to sum to 1.0, each still subject to the floor. Stocks are unaffected.
 
 The actual weights used for each prediction are stored in the database alongside the recommendation and are visible in the Predictions page.
 
@@ -264,7 +296,7 @@ Every prediction is evaluated when its horizon matures:
 
 **Layer 2 — Rolling metrics** (nightly, incremental)
 - Aggregates L1 outcomes into directional accuracy, high/low conviction accuracy, Brier score, and log-loss
-- Broken down by horizon, ticker segment, model, and prediction role (champion / fallback / challenger / legacy)
+- Broken down by horizon, ticker segment, model, prediction role (champion / fallback / challenger / legacy) and instrument type (stock vs ETF vs mutual fund …, with leveraged funds counted separately — Validation QA → *Instrument types*)
 - Baseline for Brier score is 0.25 (coin-flip); baseline for log-loss is ln(2) ≈ 0.693
 
 **Layer 3 — Pattern analysis** (weekly, LLM-assisted)
@@ -291,6 +323,8 @@ The system outputs one of five labels: **STRONG\_BUY**, **BUY**, **HOLD**, **SEL
 **Conviction score** per horizon reflects how decisive the model was within that time window. Low conviction with a spread probability distribution means the model is uncertain — treat those predictions as noise.
 
 **Probability distribution** — each prediction includes a 5-bucket probability distribution over return ranges. A distribution that is spread across all five buckets (e.g., 20/20/20/20/20) means the model has essentially no view. A distribution concentrated in one or two buckets (e.g., 5/10/15/45/25) is a stronger signal, all else equal.
+
+**Funds** — an ETF or fund is forecast from Research, Macro and News only; there is no Fundamental or Valuation score for it (stored as empty, never a 5/10 placeholder) and "no fundamentals" is not counted as a data gap. A leveraged or inverse fund (2x, 3x, −1x…) is flagged in its prompt and record (`leverage_factor`); expect its realised returns to be amplified.
 
 **Data gaps** — if fundamentals or research data is missing for a ticker, the analyst for that domain is score-capped (typically at 5/10) and states "No data." A recommendation generated with two or more data gaps is substantially less reliable.
 

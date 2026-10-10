@@ -54,7 +54,9 @@ class PriceCache:
         simply absent from the result (same "best-effort" contract every
         caller of this already expected from its own inline fetch).
         """
-        tickers = sorted({str(t).upper() for t in tickers if t})
+        from portfolio_agent.domain import is_synthetic_ticker
+        # A ticker-less fund ("CIT:..." key) is not a market symbol: never sent to the provider.
+        tickers = sorted({str(t).upper() for t in tickers if t and not is_synthetic_ticker(str(t))})
         now = time.monotonic()
 
         def _key(t: str) -> tuple:

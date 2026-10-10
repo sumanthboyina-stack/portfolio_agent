@@ -417,7 +417,20 @@ async def _run_daily_fundamentals(
         _log_skip("fundamentals", _skipped_restricted)
         all_tickers = [t for t in all_tickers if t not in _fs]
 
-    yesterday_pending = pending_from_yesterday("fundamentals")
+    # Funds / money market / cash have no company filings: leave them out BEFORE the EDGAR check, the prefetch and the
+    # 8-K guidance fetch so none of those run (or log an error) for them. Their absence is routing, not a data gap.
+    from portfolio_agent.services.context import system_context
+    from portfolio_agent.services.instrument_classifier import split_company_filers
+    all_tickers, _no_filings = split_company_filers(system_context("fundamentals"), list(all_tickers))
+    if _no_filings:
+        log.info(
+            f"  [skip] {len(_no_filings)} fund / non-company ticker(s) — no EDGAR filings or 8-K guidance expected: "
+            f"{', '.join(sorted(_no_filings)[:8])}{'…' if len(_no_filings) > 8 else ''}",
+            event_type="summary",
+        )
+        always_run = {t for t in always_run if t not in _no_filings}
+
+    yesterday_pending = [t for t in pending_from_yesterday("fundamentals") if t not in _no_filings]
     if yesterday_pending:
         log.info(
             f"  [resume] {len(yesterday_pending)} tickers carried over from previous run: "

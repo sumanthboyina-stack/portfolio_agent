@@ -9,12 +9,17 @@ database transaction opens, so the write lock is never held on the network.
     refresh_holding_prices()             — UI "Refresh prices" button
     snapshot_portfolio_prices(date)      — evening batch, one row per position
     backfill_missing_price_snapshots()   — morning/intraday batch, fill gaps
+
+A ticker-less fund (synthetic "CIT:..." key, see domain.is_synthetic_ticker) is not a market symbol: it is
+never sent to the market-data provider. Its price is entered by hand, so a refresh leaves it alone, the daily
+snapshot records the price on file, and history is never back-filled or invented for it.
 """
 
 from __future__ import annotations
 
 from datetime import date as _date, timedelta
 
+from portfolio_agent.domain import is_synthetic_ticker
 from portfolio_agent.services.context import system_context
 from portfolio_agent.tools.holdings_db import (
     HISTORY_SOURCE_BACKFILL, HISTORY_SOURCE_SNAPSHOT,
@@ -31,7 +36,7 @@ def refresh_holding_prices() -> dict:
     statement prices go stale silently otherwise. All rows update in one
     transaction, so a portfolio is never half-repriced.
     """
-    holdings = get_holdings()
+    holdings = [h for h in get_holdings() if not is_synthetic_ticker(h.get("ticker"))]
     tickers = sorted({h["ticker"] for h in holdings if h.get("ticker")})
     if not tickers:
         return {"updated": 0, "failed": [], "price_as_of": None}
@@ -67,9 +72,11 @@ def snapshot_portfolio_prices(as_of_date: str | None = None) -> dict:
     if not holdings:
         return {"snapped": 0, "date": today}
 
-    tickers = sorted({h["ticker"] for h in holdings if h.get("ticker")})
-    prices, _ = fetch_last_closes(tickers)
-    rows = [history_row(today, h, prices.get(h["ticker"]), HISTORY_SOURCE_SNAPSHOT)
+    tickers = sorted({h["ticker"] for h in holdings if h.get("ticker") and not is_synthetic_ticker(h["ticker"])})
+    prices, _ = fetch_last_closes(tickers) if tickers else ({}, None)
+    # A ticker-less fund has no market price: record the hand-entered price on file (None if never entered).
+    rows = [history_row(today, h, h.get("current_price") if is_synthetic_ticker(h["ticker"]) else prices.get(h["ticker"]),
+                        HISTORY_SOURCE_SNAPSHOT)
             for h in holdings if h.get("ticker")]
     insert_price_history(rows, replace=True)
     return {"snapped": len(rows), "date": today}
@@ -101,7 +108,7 @@ def backfill_missing_price_snapshots() -> dict:
     Safe to call from any batch — it is a no-op when history is complete.
     """
     empty = {"backfilled": 0, "missing_days": 0, "missing_rows": 0}
-    holdings = get_holdings()
+    holdings = [h for h in get_holdings() if not is_synthetic_ticker(h.get("ticker"))]
     if not holdings:
         return empty
 

@@ -61,6 +61,14 @@ async def _run_daily_valuation(all_tickers: list[str], tracker=None) -> None:
             event_type="info",
         )
 
+    # A DCF needs a company's financials: funds, money market and cash are left out before any EDGAR call is made.
+    from portfolio_agent.services.context import system_context
+    from portfolio_agent.services.instrument_classifier import split_company_filers
+    all_tickers, _no_filings = split_company_filers(system_context("valuation"), list(dict.fromkeys(all_tickers)))
+    if _no_filings:
+        log.info(f"  [skip] {len(_no_filings)} fund / non-company ticker(s) — no DCF valuation applies: "
+                 f"{', '.join(sorted(_no_filings)[:8])}{'…' if len(_no_filings) > 8 else ''}", event_type="summary")
+
     to_refresh = [t for t in dict.fromkeys(all_tickers) if needs_refresh(t)]
     if not to_refresh:
         log.info("  All tickers have current valuation data.", event_type="info")

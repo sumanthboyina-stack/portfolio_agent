@@ -73,7 +73,7 @@ def test_qa_page_renders_all_tabs_with_empty_data():
     labels = " ".join(t.label for t in at.tabs)
     for name in OLD_TABS + NEW_TABS:
         assert name in labels, name
-    assert len(at.tabs) == 13                                       # + Roles (champion / fallback / challenger)
+    assert len(at.tabs) == 14                          # + Roles (champion / fallback / challenger) + Instrument types
 
 
 def test_qa_page_hosts_the_components_removed_from_the_user_page():

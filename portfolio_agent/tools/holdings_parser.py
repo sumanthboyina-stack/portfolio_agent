@@ -4,6 +4,7 @@ import csv
 import io
 import re
 from typing import Optional
+from portfolio_agent.domain import normalize_account_type
 
 
 def _clean_float(s: str) -> Optional[float]:
@@ -77,18 +78,7 @@ def _is_invalid_ticker(ticker: str) -> bool:
 
 
 def _fidelity_account_type(account_name: str) -> str:
-    name = account_name.upper()
-    if "ROTH" in name:
-        return "ROTH_IRA"
-    if "ROLLOVER" in name:
-        return "ROLLOVER_IRA"
-    if "IRA" in name or "TRADITIONAL" in name:
-        return "IRA"
-    if "401" in name:
-        return "401K"
-    if "HSA" in name:
-        return "HSA"
-    return "TAXABLE"
+    return normalize_account_type("", account_name)
 
 
 def _flex_header(headers: list[str], *candidates: str) -> Optional[int]:
@@ -257,16 +247,7 @@ def parse_fidelity_csv(content: str | bytes) -> list[dict]:
 
 
 def _vanguard_account_type(account_number: str, description: str) -> str:
-    combined = (account_number + " " + description).upper()
-    if "ROTH" in combined:
-        return "ROTH_IRA"
-    if "TRAD" in combined or "IRA" in combined:
-        return "IRA"
-    if "BROKERAGE" in combined or "INDIVIDUAL" in combined:
-        return "TAXABLE"
-    if "401" in combined:
-        return "401K"
-    return "TAXABLE"
+    return normalize_account_type("", f"{account_number} {description}")
 
 
 def parse_vanguard_csv(content: str | bytes) -> list[dict]:

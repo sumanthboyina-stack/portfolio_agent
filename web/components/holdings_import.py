@@ -27,8 +27,10 @@ sys.path.insert(0, str(_ROOT))
 from web.styles import material, fmt_money, SUCCESS, DANGER, WARNING
 from web.components.portfolio_cards import _fmt_shares
 from web.data.portfolio import _enrich_prices
+from portfolio_agent.domain import ACCOUNT_TYPES, ASSET_CLASSES
 from portfolio_agent.services.account_service import (
-    DuplicateAccount, DuplicatePosition, add_position, create_account, delete_account_permanently,
+    DuplicateAccount, DuplicatePosition, add_position, create_account, create_synthetic_instrument,
+    delete_account_permanently,
 )
 from portfolio_agent.tools.holdings_import import (
     BROKER_LABELS, ImportPlan, ImportResult, ParsedUpload, build_plan, commit_plan, parse_upload,
@@ -45,7 +47,6 @@ BROKER_META = {
                                   "Holdings / Positions page, look for Download or Export (CSV or Excel), upload it here. "
                                   "It is read automatically; cash, money-market and total rows are handled.")},
 }
-ACCOUNT_TYPES = ["TAXABLE", "IRA", "ROTH_IRA", "401K", "HSA"]
 _STEPS = ["Choose file", "Map accounts", "Preview changes", "Confirm"]
 
 
@@ -256,6 +257,50 @@ def render_add_position_form(accounts: list[dict], key: str = "add", on_close: C
         st.rerun()
     if on_close and b2.button("Cancel", key=f"{key}_cancel"):
         on_close(); st.rerun()
+
+
+def render_add_cit_form(accounts: list[dict], key: str = "add_cit") -> None:
+    """
+    Add a fund that has no ticker — typically a 401(k) collective investment trust — to an existing account.
+    It is keyed by a synthetic "CIT:..." identifier, never priced from the market and never predicted; the
+    price is entered here by hand. An optional proxy ticker (e.g. VOO for an S&P 500 CIT) is used for
+    analytics only and is never shown as a holding.
+    """
+    if not accounts:
+        st.info("Add or import an account first, then add its ticker-less funds here.", icon=material("account_balance"))
+        return
+    by_id = {a["account_id"]: a for a in accounts}
+    chosen = st.selectbox("Account", sorted(by_id, key=lambda k: account_option_label(by_id[k])), key=f"{key}_acct",
+                          format_func=lambda k: account_option_label(by_id[k]))
+    c1, c2 = st.columns(2)
+    plan = c1.text_input("Plan name", placeholder="e.g. Acme Corp 401(k)", key=f"{key}_plan").strip()
+    fund = c2.text_input("Fund name", placeholder="e.g. S&P 500 Index Fund (CIT)", key=f"{key}_fund").strip()
+    c3, c4, c5, c6 = st.columns(4)
+    klass = c3.selectbox("Asset class", sorted(ASSET_CLASSES), index=sorted(ASSET_CLASSES).index("UNKNOWN"), key=f"{key}_class")
+    proxy = c4.text_input("Proxy ticker (optional)", placeholder="VOO", key=f"{key}_proxy",
+                          help="Analytics only — a market symbol that behaves like this fund. Never shown as your holding.").upper().strip()
+    shares = c5.number_input("Units", min_value=0.0, step=0.001, format="%.3f", key=f"{key}_units")
+    price = c6.number_input("Unit price ($)", min_value=0.0, step=0.01, key=f"{key}_price",
+                            help="Entered by hand — update it from your plan statement when it changes.")
+    if st.button("Add fund", type="primary", key=f"{key}_submit", icon=material("add")):
+        if not fund:
+            st.warning("Enter the fund name."); return
+        ctx = current_context("web:add_cit")
+        try:
+            inst = create_synthetic_instrument(ctx, plan_name=plan, fund_name=fund, asset_class=klass,
+                                               proxy_ticker=proxy or None, reason="added from Accounts page")
+            add_position(ctx, by_id[chosen]["account_pk"],
+                         {"ticker": inst["ticker"], "description": inst["name"], "shares": float(shares) or None,
+                          "current_price": float(price) or None,
+                          "current_value": round(shares * price, 2) if shares and price else None},
+                         as_of_date=date.today().isoformat(), reason="added manually (no ticker)")
+        except DuplicatePosition:
+            st.error("That fund is already in this account.", icon=material("error")); return
+        except ValueError as exc:
+            st.error(str(exc), icon=material("error")); return
+        bump_holdings_version()
+        st.session_state["holdings_flash"] = f"Added {fund} to {by_id[chosen]['account_name'] or 'account'}."
+        st.rerun()
 
 
 @st.dialog("Remove account?")

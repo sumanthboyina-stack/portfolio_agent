@@ -114,12 +114,18 @@ def _build_plan(ticker: str) -> dict:
         from portfolio_agent.tools.weight_engine import compute_dynamic_weights
         import json as _json
         macro = _json.loads(get_macro_snapshot())
+        try:                                     # a fund's weights exclude fundamentals / valuation
+            from portfolio_agent.tools.instrument_reference import get_instrument_profiles
+            _itype = (get_instrument_profiles([ticker]).get(ticker.upper()) or {}).get("instrument_type")
+        except Exception:
+            _itype = None
         weight_data = compute_dynamic_weights(
             ticker=ticker,
             news_data=news_data,
             research_data=res or {},
             macro_snapshot=macro,
             fundamentals_data=fund or {},
+            instrument_type=_itype,
         )
         plan["weight_data"] = weight_data
     except Exception:

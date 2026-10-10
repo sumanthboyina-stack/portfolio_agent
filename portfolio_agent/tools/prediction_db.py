@@ -17,7 +17,10 @@ Schema (predictions table):
   guardrail_flags (deterministic post-hoc caps applied before storage, e.g.
   'no_news_bullish_capped', 'bounce_thesis_capped'),
   prediction_role (champion | fallback | challenger | legacy_random | interactive —
-  see ROLE_* below; challenger rows are evaluated but never shown to users)
+  see ROLE_* below; challenger rows are evaluated but never shown to users),
+  instrument_type (domain.InstrumentType of the ticker when the forecast was made; NULL = before this column,
+  shown as "Unclassified"), leverage_factor (1.0 normal, 2.0 / 3.0 leveraged, negative inverse — a column rather
+  than reasoning metadata so validation can filter and group on it)
 """
 
 from __future__ import annotations
@@ -320,11 +323,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # pre-existing (randomly-selected) row as champion. insert_prediction always
         # writes the role explicitly instead.
         ("prediction_role",             "TEXT"),
+        # What the security is (Step 3): rows before this stay NULL ("Unclassified") until the optional
+        # backfill_instrument_types() below stamps them from the instruments table.
+        ("instrument_type",             "TEXT"),
+        ("leverage_factor",             "REAL"),
     ])
     # Rows that predate prediction_role came from random per-run model selection.
     # Idempotent: once backfilled, no row is NULL again.
     conn.execute("UPDATE predictions SET prediction_role = ? WHERE prediction_role IS NULL", [ROLE_LEGACY_RANDOM])
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_role ON predictions(prediction_role, horizon_days)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_itype ON predictions(instrument_type, horizon_days)")
     # Rows that predate scopes stay unclassified: they are never promoted to shared
     # by default and only reach readers through the restricted legacy path.
     conn.execute("UPDATE predictions SET scope = ? WHERE scope IS NULL", [SCOPE_LEGACY])
@@ -558,6 +566,9 @@ def insert_prediction(
     context_digest: Optional[str] = None,
     # Which model-selection path produced the row (see ROLE_* above). Always written.
     prediction_role: str = ROLE_CHAMPION,
+    # What kind of security the ticker was at forecast time (None = unknown / pre-taxonomy) and its leverage.
+    instrument_type: Optional[str] = None,
+    leverage_factor: Optional[float] = None,
 ) -> dict:
     """
     Insert a new prediction row (append-only). One row per horizon per ticker per date.
@@ -624,12 +635,12 @@ def insert_prediction(
                         weight_regime, weights_used, valuation_score, guardrail_flags, raw_conviction_score,
                         scope, origin, origin_run_id, origin_time_utc, owner_scope, evidence_refs,
                         policy_version, model_used, guardrail_version, history_lineage, context_digest,
-                        prediction_role)
+                        prediction_role, instrument_type, leverage_factor)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -659,13 +670,35 @@ def insert_prediction(
                     policy_version, model_used, guardrail_version,
                     json.dumps(history_lineage, default=str) if history_lineage else None,
                     context_digest,
-                    prediction_role,
+                    prediction_role, instrument_type, leverage_factor,
                 ],
             )
             c.commit()
         return {"saved": True, "ticker": ticker, "changed": bool(changed), "previous": prev_pred}
     except Exception as exc:
         return {"saved": False, "ticker": ticker, "error": str(exc)}
+
+
+def backfill_instrument_types() -> int:
+    """
+    Optional one-off: stamp predictions that predate the instrument_type column with the ticker's CURRENT type from
+    the instruments table, so older rows show up under their real type instead of "Unclassified". Only NULL rows
+    whose instrument is classified (not UNKNOWN) are touched; nothing already stamped is changed. Returns rows updated.
+    """
+    with _db() as c:
+        try:
+            n = c.execute(
+                """UPDATE predictions
+                   SET instrument_type = (SELECT i.instrument_type FROM instruments i WHERE i.ticker = predictions.ticker),
+                       leverage_factor = COALESCE(leverage_factor,
+                                                  (SELECT i.leverage_factor FROM instruments i WHERE i.ticker = predictions.ticker))
+                   WHERE instrument_type IS NULL
+                     AND EXISTS (SELECT 1 FROM instruments i WHERE i.ticker = predictions.ticker
+                                 AND i.instrument_type <> 'UNKNOWN')""").rowcount
+        except sqlite3.OperationalError:          # no instruments table yet: nothing to stamp from
+            return 0
+        c.commit()
+    return n
 
 
 def get_latest_prediction(ticker: str, horizon_days: Optional[int] = None, *,

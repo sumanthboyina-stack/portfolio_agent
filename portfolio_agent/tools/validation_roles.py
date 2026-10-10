@@ -71,6 +71,28 @@ def role_breakdown(df: pd.DataFrame, closes_by_symbol: Optional[dict] = None) ->
     return out
 
 
+def instrument_type_breakdown(df: pd.DataFrame, closes_by_symbol: Optional[dict] = None) -> list[dict]:
+    """
+    One row per (horizon, instrument_type) with the same yardsticks as role_breakdown — n, accuracy, best naive
+    baseline, Brier skill — so an ETF's record is read against ITS baselines, not the stock record. `leveraged` counts
+    the leveraged / inverse fund rows in the group. A missing type is "UNCLASSIFIED".
+    """
+    if df is None or df.empty or "horizon_days" not in df.columns:
+        return []
+    from portfolio_agent.tools.validation_engine import UNCLASSIFIED
+    d = df.assign(_itype=(df["instrument_type"] if "instrument_type" in df.columns else pd.Series(None, index=df.index))
+                  .fillna(UNCLASSIFIED))
+    out: list[dict] = []
+    for (h, itype), sub in d.dropna(subset=["horizon_days"]).groupby(["horizon_days", "_itype"]):
+        sub = sub.drop(columns="_itype").reset_index(drop=True)
+        s = _score(sub, closes_by_symbol)
+        lev = sub["leverage_factor"].fillna(1.0).ne(1.0).sum() if "leverage_factor" in sub.columns else 0
+        out.append({"horizon_days": int(h), "instrument_type": itype, "leveraged": int(lev),
+                    **{k: v for k, v in s.items() if k not in ("comparison", "probability")}})
+    out.sort(key=lambda r: (r["horizon_days"], -r["n"]))
+    return out
+
+
 def _latest_per_key(sub: pd.DataFrame) -> pd.DataFrame:
     """One row per (ticker, as_of_date, horizon) — the latest (highest id) — mirroring the
     evaluation-cohort rule recompute_rolling_metrics uses for same-day regenerations."""

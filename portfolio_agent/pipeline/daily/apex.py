@@ -89,6 +89,9 @@ async def _run_daily_apex(
     )
     from portfolio_agent.tools.apex_dual_run import run_apex as _run_apex
     from portfolio_agent.tools.apex_dual_run import challenger_selected, load_model_plan, run_challenger
+    from portfolio_agent.domain import FUND_INSTRUMENT_TYPES, NO_PREDICTION_TYPES, InstrumentType
+    from portfolio_agent.services.context import system_context
+    from portfolio_agent.services.instrument_classifier import ensure_classified
 
     if trigger_map is None:
         trigger_map = {}
@@ -125,12 +128,26 @@ async def _run_daily_apex(
              challenger=model_plan.challenger[2] if model_plan.challenger else None,
              challenger_pct=model_plan.challenger_pct)
 
+    # What kind of security is each ticker? Watchlist / trending tickers nobody holds get an instrument row and a type
+    # here too (lookups run before any transaction). The type decides routing: cash and ticker-less funds are never
+    # predicted, funds are predicted without company fundamentals / valuation, everything else is the stock path.
+    itypes = ensure_classified(system_context("apex"), list(portfolio_tickers))
+    skipped_by_type: list[str] = []
+
+    def _skip(t: str, reason: str) -> None:
+        skipped_by_type.append(t)
+        log.info(f"  [skip] {t} — {reason}", event_type="apex_skip", ticker=t, reason=reason,
+                 instrument_type=itypes.get(t))
+
     seen_pt: set[str] = set()
     to_predict = []
     for ticker in portfolio_tickers:
         if ticker in seen_pt:
             continue
         seen_pt.add(ticker)
+        if itypes.get(ticker) in NO_PREDICTION_TYPES:
+            _skip(ticker, f"{str(itypes[ticker]).replace('_', ' ').lower()} — nothing to forecast")
+            continue
         _trig_type, _trig_event_id = trigger_map.get(ticker, (None, None))
 
         if _trig_event_id is not None:
@@ -171,16 +188,12 @@ async def _run_daily_apex(
             to_predict.append(ticker)
 
     if not to_predict:
-        log.info(
-            f"  All {len(portfolio_tickers)} portfolio tickers already predicted today.",
-            event_type="info",
-        )
+        _why = (f"all {len(portfolio_tickers)} tickers already predicted today"
+                + (f" ({len(skipped_by_type)} skipped: cash / no-ticker funds)" if skipped_by_type else ""))
+        log.info(f"  {_why[0].upper()}{_why[1:]}.", event_type="info")
         if tracker:
             tracker.start_phase("apex", total=0)
-            tracker.finish_phase(
-                "apex", 0, 0,
-                note=f"all {len(portfolio_tickers)} tickers already predicted today",
-            )
+            tracker.finish_phase("apex", 0, 0, note=_why)
         return
 
     log.info(
@@ -238,6 +251,12 @@ async def _run_daily_apex(
                 )
                 ctx_failed.append(t)
 
+    # A ticker whose type is still unknown AND that has no price cannot be forecast or later scored: skip it.
+    for _t in [t for t in to_predict if t in ctx_map and t not in price_map
+               and itypes.get(t) in (None, InstrumentType.UNKNOWN.value)]:
+        _skip(_t, "type unknown and no price available")
+        ctx_map.pop(_t, None)
+        mctx_map.pop(_t, None)
     has_ctx = [t for t in to_predict if t in ctx_map]
     log.info(
         f"  Pre-fetch done — {len(has_ctx)} ready, {len(ctx_failed)} failed",
@@ -256,6 +275,9 @@ async def _run_daily_apex(
         data             = result.merged
         model_label_used = "+".join(result.model_sources)
         model_prov_used  = result.model_sources[0].split("-")[0].lower()
+        _mctx            = mctx_map[ticker]
+        _itype           = getattr(_mctx, "instrument_type", None)
+        _is_fund         = _itype in FUND_INSTRUMENT_TYPES
 
         _ctx_res = {}
         try:
@@ -269,7 +291,8 @@ async def _run_daily_apex(
             recommendation=data.get("recommendation", "HOLD"),
             confidence=data.get("confidence"),
             target_price=data.get("target_price"),
-            fundamental_score=data.get("fundamental_score"),
+            # A fund has no company fundamentals or DCF: whatever the model wrote, no placeholder score is stored.
+            fundamental_score=None if _is_fund else data.get("fundamental_score"),
             research_score=data.get("research_score"),
             macro_score=data.get("macro_score"),
             news_score=data.get("news_score"),
@@ -287,8 +310,11 @@ async def _run_daily_apex(
             used_fallback=result.used_fallback,
             prediction_role=result.role,
             weight_regime=data.get("weight_regime"),
-            weights_used=data.get("weights_used"),
-            valuation_score=data.get("valuation_score"),
+            # For a fund the engine's own weights (fundamentals / valuation exactly 0) are the record, not the model's echo.
+            weights_used=(_mctx.payload.get("dynamic_weights", {}).get("weights") if _is_fund else data.get("weights_used")),
+            valuation_score=None if _is_fund else data.get("valuation_score"),
+            instrument_type=_itype,
+            leverage_factor=getattr(_mctx, "leverage_factor", None),
         )
 
         horizons_data    = data.get("horizons") or []
@@ -500,6 +526,7 @@ async def _run_daily_apex(
         tracker.finish_phase("apex", len(completed), len(failed))
     log.info(
         f"\n  APEX phase done — {len(completed)} tickers · {len(failed)} failed"
+        f"{f' · {len(skipped_by_type)} skipped by type' if skipped_by_type else ''}"
         f"  ({len(has_ctx)} per-ticker model-plan calls, horizons {scheduled_horizons}"
         f"{f', {challenger_rows} challenger row(s)' if challenger_rows else ''})",
         event_type="phase_end", saved=len(completed), failed=len(failed),
