@@ -76,6 +76,7 @@ _FUND_QUOTE_TYPES = {"ETF": InstrumentType.ETF, "MUTUALFUND": InstrumentType.MUT
 _FUNDISH = {InstrumentType.ETF, InstrumentType.ETN, InstrumentType.MUTUAL_FUND}
 
 _MONEY_MARKET_RE = re.compile(r"money\s*(market|mkt)", re.I)
+_STABLE_VALUE_RE = re.compile(r"stable\s+(value|income)", re.I)
 _TARGET_DATE_RE = re.compile(r"target[\s-]*(date|retirement)|lifepath|lifecycle|\bage[\s-]based\b", re.I)
 _TARGET_YEAR_RE = re.compile(r"target.*\b(19|20)\d{2}\b|\b(19|20)\d{2}\b.*target", re.I)
 _ETN_RE = re.compile(r"\bETN\b|exchange[\s-]traded\s+note", re.I)
@@ -118,6 +119,8 @@ def _asset_class_for(category: str, name: str, instrument_type: InstrumentType,
                      country: str | None) -> tuple[AssetClass, str | None]:
     if instrument_type == InstrumentType.MONEY_MARKET:
         return AssetClass.CASH, "MONEY_MARKET"
+    if instrument_type == InstrumentType.STABLE_VALUE:
+        return AssetClass.FIXED_INCOME, "STABLE_VALUE"          # cash-like, but it is a fixed-income wrapper
     if instrument_type == InstrumentType.TARGET_DATE_FUND:
         return AssetClass.MULTI_ASSET, "TARGET_DATE"
     if instrument_type == InstrumentType.BOND:
@@ -167,6 +170,8 @@ def classify_from_info(ticker: str, info: dict | None, name: str | None = None) 
     # Secondary: name / category keywords refine (or, with no quoteType, supply) the type.
     if itype != InstrumentType.MONEY_MARKET and (_MONEY_MARKET_RE.search(full_name) or _MONEY_MARKET_RE.search(category)):
         itype, basis = InstrumentType.MONEY_MARKET, "keyword: money market"
+    elif itype != InstrumentType.STABLE_VALUE and (_STABLE_VALUE_RE.search(full_name) or _STABLE_VALUE_RE.search(category)):
+        itype, basis = InstrumentType.STABLE_VALUE, "keyword: stable value"
     elif itype in (None, InstrumentType.ETF, InstrumentType.MUTUAL_FUND) and (
             _TARGET_DATE_RE.search(category) or _TARGET_DATE_RE.search(full_name)
             and (_TARGET_YEAR_RE.search(full_name) or re.search(r"target[\s-]*date|retirement", full_name, re.I))):

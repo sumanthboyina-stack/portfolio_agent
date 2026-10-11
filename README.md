@@ -221,6 +221,78 @@ Keys for unused providers can be omitted; those models are skipped. The macro sn
 
 ---
 
+## Investor profile, target allocation and emergency reserve
+
+Everything here is **optional** and everyone starts with zero input: a **Moderate** profile and a **$3,000 emergency cash reserve**. Edit it on the **Profile** page. (This is an educational tool, not investment advice.)
+
+- **Three profiles** — Conservative, Moderate, Aggressive — each with a target allocation (US stocks / international stocks / bonds / cash, with a band around each target), concentration limits (position, issuer, sector, share of new cash per candidate), a limit on leveraged/inverse funds, and the instrument types it allows.
+- **The quiz** is three optional questions: *when will you need most of this money*, *how would you react to a 20% drop*, *what matters most*. The first sets a **ceiling** (under 3 years → Conservative, 3–10 → Moderate, 10+ → Aggressive); the other two set a **preference** (points 0/1/2 each; 0–1 Conservative, 2–3 Moderate, 4 Aggressive). You get the more careful of the two. A skipped question counts as the middle answer, so skipping the whole quiz is Moderate.
+- **Or just pick** a profile. If you answered the time-horizon question and pick something riskier than it suggests, you tick a one-line acknowledgment; that is recorded, audited, and shown as a small flag on your profile.
+- **Emergency cash reserve** is one **dollar amount**: yours if you set it, otherwise the global default ($3,000). Only cash in taxable and cash accounts counts toward it — cash inside a 401(k) or IRA isn't available in an emergency without penalties or taxes. It is not a goal and not a number of months. USD only.
+- **Custom allocation** (optional) replaces your profile's targets with your own (targets must add up to 100, each band must contain its target). *Use profile default* switches back.
+- **Concentration limits** come from your profile (`limits_source = profile`, the default for new users) or from your own numbers on the profile page (`custom`). Everyone who existed before this feature was set to `custom`, so no existing limit changed.
+- **Goals** (retirement, house, education, other) are optional notes; nothing reads them yet.
+
+**Where it lives.** No config files: all of it is in the database. The global tables — `risk_quiz_settings` (questions, options, points, cap rule, thresholds), `risk_profile_settings` (one row per profile) and `portfolio_settings` (the default reserve) — are seeded from code constants, versioned (`version`, `updated_at`, `updated_by`), updated with `expected_version`, and can be reset to defaults. They are **admin-only**, enforced in the service (an enabled `auth_users` admin) and not just hidden in the UI; admins edit them under **Profile → Investor settings**. A person's own profile, reserve, custom allocation and goals are private, owner-scoped tables (`investor_profile` keeps history; `target_allocation_custom`; `investment_goals`), written only through `services/investor_service.py` with an audit event per change.
+
+**Effective policy.** `tools/portfolio_policy.py` combines all of the above into one fingerprinted `EffectivePolicy` (the four original limits in the same units, plus profile, source, target bands, leveraged/inverse limit, allowed types, reserve and its source, limits source, and the settings versions used). The fingerprint changes with anything that changes a computation — including the reserve and the settings behind it — and never with your name, employer, notification settings or goals.
+
+**Privacy.** None of this is ever read by the shared market forecasts or the prediction pipeline; a test enforces that boundary.
+
+---
+
+## Fund data and look-through
+
+A fund is not one thing you own — it is a basket. The app opens the baskets so concentration checks count what you really hold.
+
+**Data.** `tools/fund_data_providers.py` defines a `FundDataProvider` interface (profile, holdings, sector weights, asset-class weights, optional country weights). `YFinanceFundProvider` is the one implemented: it exposes only a fund's **top 10 holdings**, so each fund records its `holdings_coverage`; `IssuerCSVProvider` and `NPortProvider` are stubs for fuller data. A failed or missing piece becomes a reason code on the fund, never an exception. Shared tables (market data, no owner): `fund_profiles` (expense ratio for the **exact share class**, family, category, AUM, share class and `share_class_group`, coverage, `as_of`, `source`, `fetched_at`), `fund_holdings`, `fund_sector_weights`, `fund_asset_class_weights`. Refresh (`services/fund_data_service.py`) happens outside any transaction, four funds at a time, guarded by a TTL (ETFs 24 h, mutual funds 168 h by default), and runs in the daily APEX phase.
+
+**Funds with no data** (a 401(k) collective trust, a stable value fund): your own **manual breakdown** (asset-class mix, optional sector mix, from a plan fact sheet) wins, else the data of the instrument's `proxy_ticker` (labeled "via proxy X", analytics only, never a holding), else **UNKNOWN**. A fund's own provider data always comes first. The manual breakdown is private and owner-scoped (`fund_manual_breakdown`, history kept, audited).
+
+**The engine** (`tools/lookthrough.py`, pure and deterministic): per scope (household, each account, each tax treatment; paper accounts excluded) it computes issuer exposure with the funds it came *via*, sector and asset-class weights, international share, coverage %, an overlap report, leveraged/inverse exposure (× `leverage_factor`), and concentration (top 1/5/10, HHI, effective N, normalized by coverage). Whatever a fund's named holdings don't explain stays in a `<FUND>_other` bucket; a fund with no data is `<FUND>_unknown`. Funds inside funds (target-date funds) are opened up to `lookthrough_max_depth` with a cycle guard; missing levels, cycles and depth limits are reason codes.
+
+**In the assessment.** Issuer and sector checks use look-through when it explains at least `lookthrough_min_coverage_pct` (default 80 %) of your money, and each check's `detail` says how the number splits ("87.50% = 75.00% direct + 12.50% via funds"). Below that they use the direct numbers and carry `LOOKTHROUGH_PARTIAL`: over the limit is still reported as breached, but under it is **never** reported as "not breached" — it is UNKNOWN, and sizing is withheld. Two new advisory checks: leveraged/inverse share vs your profile's limit, and whether the instrument type is allowed by your profile. A portfolio with no funds is computed exactly as before. Fund-data fetch times and your manual breakdowns are part of the cache key.
+
+**Staleness.** `tools/price_freshness.py`: a mutual fund prices once a day (NAV posts around 21:00 ET), so yesterday's NAV is current until then; a stock or ETF is judged against the 16:00 close. A missing price date is unknown, never fresh.
+
+**Settings** (all in `portfolio_settings`, admin-only, versioned, reset to defaults — **Profile → Investor settings → Fund data & health**): `etf_data_ttl_hours`, `mutual_fund_data_ttl_hours`, `lookthrough_min_coverage_pct`, `lookthrough_max_depth`, `high_expense_ratio_pct`, `health_snapshot_enabled`.
+
+**Privacy.** The shared fund tables hold market data about the fund only. The module that reads them for the forecast path (`tools/instrument_reference.py`) never imports the private manual-breakdown or proxy logic; a test enforces it. Look-through itself runs on your holdings and is private.
+
+---
+
+## Portfolio Health
+
+A checkup of **your own** portfolio against **your own** profile and limits — the **Health** page (and a card on Today). Educational, not investment, tax or legal advice; it never tells you to trade.
+
+**No single score.** Each check is one of four statuses, and the page shows how many are **ACTION / WATCH / UNKNOWN / GOOD**:
+
+| Status | Meaning |
+|---|---|
+| **GOOD** | inside your limit or band |
+| **WATCH** | close to a limit (default: at 80% of it) or outside a band |
+| **ACTION** | over a limit, or far outside a band (default: more than 2 band-widths from the target) |
+| **UNKNOWN** | the data to judge it is missing or too partial — **never** shown as GOOD |
+
+**The checks** (household-wide unless noted): *stock / other allocation*, *bonds and international*, *excess cash* (each against your profile's target bands); *emergency reserve*; *concentration* (largest single security, largest issuer and sector **counting what your funds hold**, against your profile's limits); *diversification* (effective number of holdings and average correlation); *leveraged / inverse funds*; *fund fees*; *risk profile* (still on the default → a nudge to take the quiz; above-cap pick acknowledged → WATCH); *restricted list*; *data quality* (unpriced or unclassified holdings, out-of-date prices, stale or missing fund data, CITs / stable value with no breakdown or proxy, partial look-through).
+
+- **Emergency reserve** counts **only** cash and money-market holdings in **taxable and cash accounts** — never a 401(k), IRA, HSA, 529 or paper account. ACTION with the dollar shortfall if below your reserve (your own amount or the default, and it says which); GOOD at or above; UNKNOWN when no cash balance is known (or the only cash is in an account whose type isn't set).
+- **Fund fees** show the weighted expense ratio, funds above the "high" line, and the **estimated** annual fund expenses in dollars (labeled as estimated). A cheaper-class note appears only for the **same fund** in another share class we have data for — never a different product, and never a recommendation.
+- **Position concentration** looks at single securities; an index fund's own weight is judged through what it holds (issuer / sector look-through). When fund contents are only partly known, a check that would be GOOD becomes UNKNOWN (and a breach is still reported as a breach).
+- If too much of the portfolio can't be classified, an "under the band" verdict is UNKNOWN rather than a false alarm (over the band is still over).
+
+**Scopes.** *Household*, each *account*, and each *tax treatment* (taxable / tax-deferred / tax-free). A slice gets the checks that make sense on a slice (concentration, diversification, leveraged / inverse, fees, data quality), judged on its own value against the same limits; targets, the reserve, profile and restricted list belong to the whole household. Paper accounts are excluded everywhere.
+
+**History.** One snapshot per day (taken the first time you open the page or the Today card that day, and by the evening batch), shown as *what changed since the last snapshot* and *since about 30 days ago*. Stored in `health_snapshots` (private, owner-scoped); each new day's snapshot writes an audit event. Turn snapshots off with the `health_snapshot_enabled` setting.
+
+**Notifications.** A check that **becomes ACTION** notifies once — only ACTION, never WATCH, at severity 4, through your own notification settings (channel, minimum severity, quiet hours). The de-duplication key is `health:<check>:<date the run of ACTION began>`, so an ongoing problem doesn't repeat daily; if it clears and comes back it notifies again. (Delivery is the existing structured-log hook.)
+
+**Chat.** The `get_portfolio_health` tool is read-only and owner-scoped: it returns your statuses and summaries, never anyone else's, and takes no snapshot and sends nothing.
+
+**Where the numbers live.** Everything is in the database, none in config files. Your profile, reserve and limits are yours (Profile page). The shared rules — the band multiple, the WATCH fraction, effective-holdings and correlation levels, the unknown-share tolerance, the unpriced and stale-fund-data levels — are columns of `portfolio_settings` (versioned, admin-only, reset to defaults), edited under **Profile → Investor settings → Health thresholds**. All logic is in `tools/portfolio_health.py` (pure checks over gathered inputs); no language model decides any number, label or status. History and notifications go through `services/health_service.py`.
+
+---
+
 ## Instrument routing: funds vs stocks
 
 What the pipeline does with a ticker depends on its `instrument_type` (see [Holdings taxonomy](#holdings-taxonomy-what-each-holding-is-and-what-each-account-is)). Tickers nobody holds — watchlist, trending, extras — are classified at the start of each phase too.
@@ -229,12 +301,14 @@ What the pipeline does with a ticker depends on its `instrument_type` (see [Hold
 |---|---|---|---|
 | `STOCK`, `UNKNOWN` (priced), `BOND`, `OTHER` | fetched | run, weighted as before | yes — unchanged path |
 | `ETF`, `ETN`, `MUTUAL_FUND`, `TARGET_DATE_FUND` | skipped cleanly (no error noise) | not run; weight 0 | yes — Research, Macro, News only |
-| `MONEY_MARKET`, `CASH`, `CIT` (ticker-less) | skipped | not run | no — logged as `[skip] … nothing to forecast` |
+| `MONEY_MARKET`, `CASH`, `CIT` (ticker-less), `STABLE_VALUE` | skipped | not run | no — logged as `[skip] … nothing to forecast` |
 | `UNKNOWN` with no price | — | — | no — logged as `type unknown and no price available` |
 
 Each stored prediction records the `instrument_type` and `leverage_factor` it was made under (older rows show as *Unclassified* in validation until you run `python -m scripts.backfill_instrument_classification --stamp-predictions`).
 
-**Not built yet:** ETF-specific context (top holdings, sector mix, expense ratio, concentration). The hook is a `fund_context: null` field in the fund's context payload (`tools/market_context.py`, marked `TODO(fund_context)`).
+**Which horizons each type gets** is a database setting (`engine_settings.instrument_type_horizons_json`, admin-editable under **Profile → Investor settings → Horizons by type**, versioned, reset to defaults). Seeded: stocks / ETFs / ETNs / bonds / other / unknown 5, 21, 63, 250 days; mutual funds and target-date funds 63 and 250 (they price once a day); CITs, stable value, cash and money market none. The daily phase intersects this with the day's scheduled horizons per ticker, and skips a ticker (with a logged reason) when nothing is left.
+
+**Fund context.** A fund's forecast context carries `fund_context`: a compact summary of its top holdings, sector and asset-class mix, expense ratio and the concentration of what is known (top-10 %, HHI, effective N), read from the **shared** fund tables only (see below). With no stored data it is `{"status": "UNKNOWN", "reason_code": "FUND_DATA_UNAVAILABLE"}`.
 
 ---
 

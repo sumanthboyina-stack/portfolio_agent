@@ -188,9 +188,21 @@ def _model_result(ticker: str) -> ModelResult:
                        model_sources=["Claude-Sonnet"], used_fallback=False)
 
 
-def _run_apex(monkeypatch, tickers, *, no_price=()):
+def _run_apex(monkeypatch, tickers, *, no_price=(), horizons=(5,)):
     from portfolio_agent.tools import apex_dual_run as adr
     from portfolio_agent.tools import yfinance_tools as yft
+    # In production the engine_settings table already exists. On a brand-new test DB, six pool threads would race to
+    # create and migrate it on first touch (and a failed setup leaves a connection holding the write lock), so touch it
+    # once, serially, first — exactly the state the real pipeline runs in.
+    # The pipeline builds contexts in parallel threads and each calls effective_settings(), whose connection setup
+    # (create/migrate/seed) races on a brand-new test DB — and a failed setup leaves a connection holding the write
+    # lock. Production's table already exists; here, resolve the settings once, serially, and serve them from memory.
+    from portfolio_agent.tools import engine_settings_db as _esdb, weight_engine as _we
+    _settings = _esdb.get_engine_settings()
+    pdb.get_today_horizons("WARMUP", "2000-01-01")       # prediction_db's create/migrate setup runs on EVERY connection (an UPDATE
+    monkeypatch.setattr(pdb, "_migrate", lambda conn: None)   # takes the write lock): run it once, serially, then not in the threads
+    monkeypatch.setattr(pdb, "_create_schema", lambda conn: None)
+    monkeypatch.setattr(_we, "effective_settings", lambda: _settings)
     monkeypatch.setattr(market_context_mod, "default_loaders", _full_loaders)
     monkeypatch.setattr(rt_mod, "get_macro_snapshot", lambda: '{"vix": 20.0}')
     monkeypatch.setattr(pdb, "is_trading_day", lambda d: True)
@@ -203,7 +215,7 @@ def _run_apex(monkeypatch, tickers, *, no_price=()):
         return _model_result(ticker)
     monkeypatch.setattr(adr, "run_apex", _fake_run_apex)
     import portfolio_agent.pipeline.daily.apex as apex_mod
-    asyncio.run(apex_mod._run_daily_apex(tickers, scheduled_horizons_override=[5]))
+    asyncio.run(apex_mod._run_daily_apex(tickers, scheduled_horizons_override=list(horizons)))
     return called
 
 

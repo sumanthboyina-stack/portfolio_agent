@@ -127,6 +127,21 @@ async def run_batch_evening(
         if tracker:
             tracker.finish_phase("l4_screener_outcomes", 0, 1, note=str(e)[:120])
 
+    log.info("\n── Layer 5: Portfolio Health Snapshots ─────────────────────────", event_type="phase_start")
+    if tracker:
+        tracker.start_phase("l5_health", total=1)
+    try:
+        from portfolio_agent.services.health_service import snapshot_all_owners
+        r5 = snapshot_all_owners(today=today_date)
+        _l5_note = ("  ".join(f"{k} {v}" for k, v in r5.items() if v) or "no portfolios")
+        log.info(f"  L5: {_l5_note}", event_type="summary")
+        if tracker:
+            tracker.finish_phase("l5_health", 1, r5.get("failed", 0), note=_l5_note)
+    except Exception as e:
+        log.warning(f"  L5: Portfolio health snapshots failed — {e}", event_type="warning")
+        if tracker:
+            tracker.finish_phase("l5_health", 0, 1, note=str(e)[:120])
+
     if tracker:
         tracker.finish_run("completed")
     log.info("\nEvening batch complete.", event_type="phase_end")

@@ -204,6 +204,9 @@ def test_policy_limit_change_invalidates_cached_exposures(monkeypatch):
     ctx = local_context("test")
     _seed_holding(ctx, "AAPL", shares=10, current_price=100.0)
     cache = pa._get_default_cache()
+    # New users take their limits from their investor profile by default; this test is about a user who set their OWN
+    # numbers, so say so (every pre-existing user is 'custom').
+    user_profile_db.update_user_profile_for(ctx, limits_source="custom")
 
     e1 = pa.get_portfolio_exposures(ctx, cache=cache)
     user_profile_db.update_user_profile_for(ctx, max_sector_pct=40.0)

@@ -16,6 +16,10 @@ Columns:
   blackout_start / blackout_end (ISO dates), disclaimer_accepted_at
   Horizons:   preferred_horizons (JSON list, default all of 5d/21d/63d/250d)
   Ownership:  owner (the verified identity this row belongs to — see below)
+  Limits:     limits_source 'profile' | 'custom' — whether the four numeric limits above are the user's own
+              ('custom') or come from risk_profile_settings for their investor profile ('profile', the default for
+              NEW rows). Every row that existed when the column was added is 'custom', so nobody's limits changed
+              silently. See tools.portfolio_policy for how the effective limits are resolved.
 
 Ownership / scoping
 --------------------
@@ -47,7 +51,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from portfolio_agent.domain import ALL_HORIZON_LABELS, LOCAL_OWNER, UserProfile
+from portfolio_agent.domain import ALL_HORIZON_LABELS, LIMITS_SOURCES, LOCAL_OWNER, UserProfile
 from portfolio_agent.tools.db import db_conn, migrate_columns, to_json_list
 
 _LIST_FIELDS = frozenset({"sector_exclusions", "preferred_horizons"})
@@ -73,6 +77,8 @@ _UPDATABLE_FIELDS = frozenset({
     "disclaimer_accepted_at",
     # horizons
     "preferred_horizons",
+    # where the numeric limits come from
+    "limits_source",
 })
 
 # Columns added after the first release — applied to existing tables via
@@ -85,6 +91,7 @@ _MIGRATED_COLUMNS: list[tuple[str, str]] = [
     ("disclaimer_accepted_at", "TEXT"),
     ("preferred_horizons",     f"TEXT NOT NULL DEFAULT '{_DEFAULT_HORIZONS_JSON}'"),
     ("owner",                  "TEXT"),
+    ("limits_source",          "TEXT NOT NULL DEFAULT 'profile'"),
 ]
 
 
@@ -123,7 +130,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             blackout_start                TEXT,
             blackout_end                  TEXT,
             disclaimer_accepted_at        TEXT,
-            preferred_horizons            TEXT NOT NULL DEFAULT '{_DEFAULT_HORIZONS_JSON}'
+            preferred_horizons            TEXT NOT NULL DEFAULT '{_DEFAULT_HORIZONS_JSON}',
+            limits_source                 TEXT NOT NULL DEFAULT 'profile'
         )
     """)
 
@@ -132,7 +140,7 @@ _LEGACY_COLUMNS = [
     "id", "display_name", "base_currency", "timezone", "max_sector_pct", "max_issuer_pct",
     "max_per_candidate_pct_of_cash", "max_post_trade_position_pct", "sector_exclusions",
     "created_at", "updated_at", "employer", "pre_clearance_required", "blackout_start",
-    "blackout_end", "disclaimer_accepted_at", "preferred_horizons", "owner",
+    "blackout_end", "disclaimer_accepted_at", "preferred_horizons", "owner", "limits_source",
 ]
 
 
@@ -165,7 +173,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     backfill ownership on any pre-existing row (idempotent: a no-op once
     owner is set), then rebuild the table from the old CHECK(id = 1) shape to
     a real per-owner one — see _migrate_owner_scoping()."""
+    had_limits_source = "limits_source" in {r[1] for r in conn.execute("PRAGMA table_info(user_profile)")}
     migrate_columns(conn, "user_profile", _MIGRATED_COLUMNS)
+    if not had_limits_source:
+        # The column was JUST added: every row that exists predates it and keeps the numbers it has — 'custom'.
+        # (Fresh tables are created with the column, so this never runs for them; new rows default to 'profile'.)
+        conn.execute("UPDATE user_profile SET limits_source = 'custom'")
     conn.execute("UPDATE user_profile SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
     # One-time rename: LOCAL_OWNER was the placeholder "local" before this
     # deployment's single user was named "sumanth_b" ahead of registration/
@@ -215,6 +228,10 @@ def _normalize_fields(fields: dict) -> dict:
             values[key] = to_json_list(val)
         elif key in _BOOL_FIELDS:
             values[key] = 1 if val else 0
+        elif key == "limits_source":
+            if val not in LIMITS_SOURCES:
+                raise ValueError(f"limits_source must be one of {sorted(LIMITS_SOURCES)}, got {val!r}")
+            values[key] = val
         else:
             values[key] = val
     values["updated_at"] = _now()

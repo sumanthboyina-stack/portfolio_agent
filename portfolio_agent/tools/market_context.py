@@ -69,7 +69,7 @@ def _get(d, *keys):
 
 def default_loaders() -> dict[str, Callable]:
     from portfolio_agent.tools.fundamentals_db import get_stored_fundamentals
-    from portfolio_agent.tools.instrument_reference import get_instrument_profiles   # instruments table only
+    from portfolio_agent.tools.instrument_reference import get_fund_context, get_instrument_profiles   # instruments + shared fund tables only
     from portfolio_agent.tools.prediction_db import SHARED_SCOPES, get_prediction_history
     from portfolio_agent.tools.reasoning_tools import _get_recent_news, get_macro_snapshot
     from portfolio_agent.tools.research_db import get_stored_research
@@ -95,8 +95,15 @@ def default_loaders() -> dict[str, Callable]:
         except Exception:
             return None
 
+    def _fund_context(t: str):
+        try:
+            return get_fund_context(t)
+        except Exception:
+            return None
+
     return {
         "instrument": _instrument,
+        "fund_context": _fund_context,
         "fundamentals": get_stored_fundamentals,
         "research": get_stored_research,
         "news": lambda t: _get_recent_news(t, days=7),
@@ -243,9 +250,9 @@ def build_market_context(ticker: str, horizons: list[int] | tuple[int, ...], *,
     if is_fund:
         payload["instrument"] = {"instrument_type": itype, "leverage_factor": leverage,
                                  "asset_class": profile.get("asset_class")}
-        # TODO(fund_context): inject ETF-specific context here in a later task — top holdings, sector mix,
-        # expense ratio, concentration. Deliberately not built yet; None keeps the key stable for the prompt.
-        payload["fund_context"] = None
+        # Shared fund data only (top holdings, sector / asset-class mix, expense ratio, concentration of what is known).
+        # A caller-supplied `loaders` without "fund_context" (older tests) = None, the key stays stable for the prompt.
+        payload["fund_context"] = L.get("fund_context", lambda t: None)(ticker)
     text = json.dumps(payload, default=str)
     assert_market_only(text, private_terms, what=f"market context for {ticker}")
 

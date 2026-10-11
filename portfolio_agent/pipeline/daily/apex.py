@@ -134,6 +134,21 @@ async def _run_daily_apex(
     itypes = ensure_classified(system_context("apex"), list(portfolio_tickers))
     skipped_by_type: list[str] = []
 
+    # Shared fund data (holdings / sector mix / expense ratio) is kept fresh here, TTL-guarded and outside any
+    # transaction; a failure is a reason code on the fund, never a reason to stop the phase.
+    _fund_tickers = [t for t in portfolio_tickers if itypes.get(t) in {x.value for x in FUND_INSTRUMENT_TYPES}]
+    if _fund_tickers:
+        try:
+            from portfolio_agent.services.fund_data_service import refresh_fund_data
+            refresh_fund_data(system_context("apex"), _fund_tickers)
+        except Exception as _exc:
+            log.warning(f"  [warn] fund data refresh skipped ({type(_exc).__name__})", event_type="warning")
+
+    # Which horizons each kind of security gets is a global setting (engine_settings.instrument_type_horizons).
+    from portfolio_agent.tools.engine_settings_db import get_engine_settings, horizons_for_instrument_type
+    _eng_settings = get_engine_settings()
+    ticker_horizons: dict[str, list[int]] = {}
+
     def _skip(t: str, reason: str) -> None:
         skipped_by_type.append(t)
         log.info(f"  [skip] {t} — {reason}", event_type="apex_skip", ticker=t, reason=reason,
@@ -148,6 +163,13 @@ async def _run_daily_apex(
         if itypes.get(ticker) in NO_PREDICTION_TYPES:
             _skip(ticker, f"{str(itypes[ticker]).replace('_', ' ').lower()} — nothing to forecast")
             continue
+        _allowed = horizons_for_instrument_type(itypes.get(ticker), _eng_settings)
+        _th = [h for h in scheduled_horizons if h in _allowed]
+        if not _th:
+            _skip(ticker, f"no scheduled horizon is enabled for {str(itypes.get(ticker) or 'UNKNOWN').replace('_', ' ').lower()}"
+                          f" (scheduled {scheduled_horizons}, enabled {sorted(_allowed)})")
+            continue
+        ticker_horizons[ticker] = _th
         _trig_type, _trig_event_id = trigger_map.get(ticker, (None, None))
 
         if _trig_event_id is not None:
@@ -171,11 +193,11 @@ async def _run_daily_apex(
             continue
 
         done_horizons = get_today_horizons(ticker, today, scopes=SHARED_SCOPES)   # private rows never suppress shared generation
-        missing       = [h for h in scheduled_horizons if h not in done_horizons]
+        missing       = [h for h in ticker_horizons[ticker] if h not in done_horizons]
         if not missing:
             latest = get_latest_prediction(ticker, scopes=SHARED_SCOPES)
             log.info(
-                f"  [skip] {ticker} — all horizons {scheduled_horizons} already saved today "
+                f"  [skip] {ticker} — all horizons {ticker_horizons[ticker]} already saved today "
                 f"({latest['recommendation'] if latest else '?'})",
                 event_type="info",
             )
@@ -225,7 +247,7 @@ async def _run_daily_apex(
         price = None
         err   = None
         try:
-            ctx = build_market_context(t, horizons=scheduled_horizons,
+            ctx = build_market_context(t, horizons=ticker_horizons.get(t, scheduled_horizons),
                                        macro_snapshot=shared_macro or None)
         except Exception as exc:              # includes PrivateDataLeak: the ticker is skipped, never degraded to shared
             err = type(exc).__name__
@@ -413,7 +435,7 @@ async def _run_daily_apex(
             ticker=ticker,
             ctx_json=ctx_map[ticker],
             macro_section=_build_macro_section(_macro_snap),
-            horizons_instruction=horizons_instr,
+            horizons_instruction=_build_horizons_instruction(ticker_horizons.get(ticker, scheduled_horizons)),
         )
 
         result = await _run_apex(ticker, prompt)
@@ -443,7 +465,7 @@ async def _run_daily_apex(
             # unrelated row exists for the same horizon. Non-event-driven
             # tickers keep the original per-horizon dedup.
             done_today_for_save = set() if _trig_ev_id is not None else done_today
-            horizons_needed = [h for h in scheduled_horizons if h not in done_today_for_save]
+            horizons_needed = [h for h in ticker_horizons.get(ticker, scheduled_horizons) if h not in done_today_for_save]
 
             try:
                 _trailing_10d = _get_trailing_return(ticker, today)

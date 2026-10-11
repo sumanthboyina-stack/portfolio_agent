@@ -930,6 +930,7 @@ _NAV_PRIMARY = [
     ("portfolio",         "work",          "Portfolio",         "pages/5_💼_Portfolio.py"),
 ]
 _NAV_SECONDARY = [
+    ("health",      "monitor_heart", "Health",        "pages/3_🩺_Portfolio_Health.py"),
     ("validation",  "track_changes", "Validation",    "pages/6_🎯_Validation.py"),
     ("chat",        "smart_toy",     "Chat",          "pages/4_🤖_Chat.py"),
     ("valuation",   "calculate",     "Valuation",     "pages/10_📐_Valuation.py"),

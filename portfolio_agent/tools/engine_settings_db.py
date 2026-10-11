@@ -13,6 +13,11 @@ runtime now come from this table, so an administrator can tune them without a
 code change or deploy. Nothing here is user-scoped: this is global, admin-only
 configuration for the shared, market-only generation path.
 
+instrument_type_horizons_json decides which prediction horizons the pipeline generates for each instrument type
+(see SEED_INSTRUMENT_TYPE_HORIZONS): stocks and ETFs get all four, mutual funds / target-date funds only the long
+ones (their NAV posts once a day and 401(k) frequent-trading rules make a 5-day call unactionable), cash-like
+instruments none. The pipeline intersects this with the day's scheduled horizons.
+
 The APEX model columns are seeded from apex_dual_run.DEFAULT_CHAMPION /
 DEFAULT_FALLBACKS (column DEFAULTs, so an existing row picks them up when the
 columns are added) and hold model DISPLAY LABELS ("Claude-Sonnet"), resolved
@@ -31,6 +36,16 @@ from datetime import datetime, timezone
 from portfolio_agent.tools.db import db_conn, migrate_columns
 
 _SOURCES = ("news", "research", "macro", "fundamentals", "valuation")
+
+_ALL_HORIZONS = [5, 21, 63, 250]
+_LONG_HORIZONS = [63, 250]
+# Seed defaults: {instrument_type: [horizon_days]} — an empty list means "never predicted".
+SEED_INSTRUMENT_TYPE_HORIZONS: dict[str, list[int]] = {
+    "STOCK": _ALL_HORIZONS, "ETF": _ALL_HORIZONS, "ETN": _ALL_HORIZONS, "BOND": _ALL_HORIZONS,
+    "OTHER": _ALL_HORIZONS, "UNKNOWN": _ALL_HORIZONS,
+    "MUTUAL_FUND": _LONG_HORIZONS, "TARGET_DATE_FUND": _LONG_HORIZONS,
+    "CIT": [], "STABLE_VALUE": [], "CASH": [], "MONEY_MARKET": [],
+}
 _UNSET = object()   # distinguishes "leave apex_challenger_model alone" from "clear it (None)"
 
 
@@ -82,6 +97,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("apex_fallback_models",       f"TEXT NOT NULL DEFAULT {_lit(json.dumps(list(DEFAULT_FALLBACKS)))}"),
         ("apex_challenger_model",      "TEXT"),                         # NULL = challenger off
         ("apex_challenger_sample_pct", "REAL NOT NULL DEFAULT 0"),      # 0–100, % of tickers
+        ("instrument_type_horizons_json", f"TEXT NOT NULL DEFAULT {_lit(json.dumps(SEED_INSTRUMENT_TYPE_HORIZONS))}"),
     ])
 
 
@@ -112,6 +128,12 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         d["apex_fallback_models"] = list(json.loads(d.get("apex_fallback_models") or "[]"))
     except (TypeError, ValueError):
         d["apex_fallback_models"] = []      # apex_dual_run.build_model_plan falls back to the code defaults
+    try:
+        stored = json.loads(d.get("instrument_type_horizons_json") or "{}")
+    except (TypeError, ValueError):
+        stored = {}
+    # A type missing from the stored map (e.g. one added after it was saved) takes its seed default, never a guess.
+    d["instrument_type_horizons"] = {t: list(stored.get(t, h)) for t, h in SEED_INSTRUMENT_TYPE_HORIZONS.items()}
     return d
 
 
@@ -137,6 +159,34 @@ def _normalize_weights(weights: dict, *, what: str) -> dict:
     return {k: round(float(v) / total, 4) for k, v in weights.items()}
 
 
+def _validate_horizons(horizons: dict) -> dict[str, list[int]]:
+    """{instrument_type: [horizon_days]}: known types, supported horizons only, no duplicates; [] = never predicted."""
+    from portfolio_agent.domain import INSTRUMENT_TYPES
+    from portfolio_agent.tools.weight_engine import SUPPORTED_HORIZONS
+    if not isinstance(horizons, dict) or not horizons:
+        raise ValueError("instrument_type_horizons: expected {instrument_type: [horizon_days]}")
+    clean: dict[str, list[int]] = {}
+    for itype, hs in horizons.items():
+        if itype not in INSTRUMENT_TYPES:
+            raise ValueError(f"instrument_type_horizons: unknown instrument type {itype!r}")
+        try:
+            vals = [int(h) for h in hs]
+        except (TypeError, ValueError):
+            raise ValueError(f"instrument_type_horizons[{itype}]: must be a list of horizon days")
+        bad = sorted(set(vals) - set(SUPPORTED_HORIZONS))
+        if bad:
+            raise ValueError(f"instrument_type_horizons[{itype}]: unsupported horizon(s) {bad}; supported: {list(SUPPORTED_HORIZONS)}")
+        clean[itype] = sorted(set(vals))
+    return clean
+
+
+def horizons_for_instrument_type(instrument_type: str | None, settings: dict | None = None) -> list[int]:
+    """The horizons the pipeline may generate for this instrument type. None / unclassified = the stock path."""
+    settings = settings or get_engine_settings()
+    table = settings["instrument_type_horizons"]
+    return list(table.get(instrument_type or "UNKNOWN", table["UNKNOWN"]))
+
+
 def _check_model_label(label: str, what: str) -> str:
     from portfolio_agent.tools.apex_dual_run import known_model_labels
     label = (label or "").strip()
@@ -157,7 +207,8 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
                            apex_champion_model: str | None = None,
                            apex_fallback_models: list[str] | None = None,
                            apex_challenger_model=_UNSET,
-                           apex_challenger_sample_pct: float | None = None) -> dict:
+                           apex_challenger_sample_pct: float | None = None,
+                           instrument_type_horizons: dict | None = None) -> dict:
     """
     Update one or more settings groups. Every weight dict is validated (exactly
     the five sources, non-negative) and normalized to sum to 1.0 so an admin's
@@ -199,6 +250,9 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
         if not (0.0 <= float(apex_challenger_sample_pct) <= 100.0):
             raise ValueError(f"apex_challenger_sample_pct must be between 0 and 100, got {apex_challenger_sample_pct}")
         fields["apex_challenger_sample_pct"] = float(apex_challenger_sample_pct)
+    if instrument_type_horizons is not None:
+        merged = {**get_engine_settings()["instrument_type_horizons"], **_validate_horizons(instrument_type_horizons)}
+        fields["instrument_type_horizons_json"] = json.dumps(merged)
     if not fields:
         return get_engine_settings()
 
@@ -220,11 +274,12 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
 
 
 def reset_engine_settings_to_defaults(*, updated_by: str) -> dict:
-    """Restore the exact weight_engine module defaults (undoes every weight / guardrail
-    override). APEX model selection is a separate choice and is left as it is."""
+    """Restore the exact weight_engine module defaults (undoes every weight / guardrail override) and the seeded
+    per-instrument-type horizons. APEX model selection is a separate choice and is left as it is."""
     from portfolio_agent.tools.weight_engine import BASE, DEFAULT_BASE_WEIGHTS, HORIZON_BASE_WEIGHTS, WEIGHT_FLOOR
     return update_engine_settings(
         updated_by=updated_by, base_weights=dict(BASE), default_base_weights=dict(DEFAULT_BASE_WEIGHTS),
         horizon_base_weights={k: dict(v) for k, v in HORIZON_BASE_WEIGHTS.items()}, weight_floor=WEIGHT_FLOOR,
         no_news_conviction_threshold=7.0, no_news_cap=5.0, bounce_return_threshold=-0.05, bounce_cap=5.0,
+        instrument_type_horizons={t: list(h) for t, h in SEED_INSTRUMENT_TYPE_HORIZONS.items()},
     )

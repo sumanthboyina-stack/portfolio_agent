@@ -698,6 +698,12 @@ if _fired:
             st.markdown(f'<div style="padding:2px 4px 4px">{_fired_html}</div>', unsafe_allow_html=True)
 
 
+# ── Portfolio Health (your own checkup; never blocks the home page) ───────────
+
+from web.components.portfolio_health import render_health_home_card
+render_health_home_card(current_context("dashboard"))
+
+
 # ── Two-column layout ─────────────────────────────────────────────────────────
 
 left, right = st.columns([3, 2], gap="large")

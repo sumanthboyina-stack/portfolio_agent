@@ -18,6 +18,8 @@ def _reset_shared_price_cache():
     price_acquisition._default_cache.invalidate_all()
     technical_features._default_history_cache.invalidate_all()
     portfolio_assessment._get_default_cache().invalidate_all()
+    from portfolio_agent.tools import portfolio_health
+    portfolio_health.clear_health_cache()
     yield
     price_acquisition._default_cache.invalidate_all()
     technical_features._default_history_cache.invalidate_all()
@@ -36,3 +38,16 @@ def _no_live_instrument_lookups(monkeypatch):
     instrument_classifier._reset_failed_lookups()       # the failed-lookup memo is per process: don't leak between tests
     yield
     instrument_classifier._reset_failed_lookups()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_fund_lookups(monkeypatch):
+    """
+    Fund data (holdings, sector mix, expense ratio) is fetched through yfinance by the default provider. No test may
+    reach the network: unless a test passes its own provider, every fetch comes back empty with a reason code
+    (a failed lookup — nothing raises, nothing is stored).
+    """
+    from portfolio_agent.tools import fund_data_providers as fdp
+    monkeypatch.setattr(fdp.YFinanceFundProvider, "fetch",
+                        lambda self, ticker: fdp.FundData(ticker=ticker.upper(), source="yfinance",
+                                                          reason_codes=[fdp.RC_FUND_FETCH_FAILED]))

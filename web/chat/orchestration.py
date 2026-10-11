@@ -89,6 +89,7 @@ These query the local portfolio database and return real pipeline results:
 | Specific ticker momentum/trend/RSI/moving averages/"technical setup" | `get_technical_snapshot` |
 | "sector allocation", "diversification", "what sectors am I in" | `get_portfolio_sector_allocation` |
 | "am I too concentrated", "correlated holdings", "risk flags", "beta vs the market" | `get_portfolio_risk_flags` |
+| "how healthy is my portfolio", "what needs attention", "is my emergency fund enough", "portfolio checkup" | `get_portfolio_health` |
 
 ### Broad screening questions (no single ticker in mind)
 Questions like "what's the most opportunistic stock right now", "what looks undervalued", \

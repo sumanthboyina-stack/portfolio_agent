@@ -401,6 +401,21 @@ _CHAT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_portfolio_health",
+            "description": (
+                "Get the user's own Portfolio Health checkup (read-only): one status per check -- GOOD, WATCH, ACTION or UNKNOWN "
+                "(UNKNOWN = not enough data to judge, never good) -- for allocation, bonds/international, excess cash, emergency "
+                "reserve, concentration (looking through funds), diversification, leveraged/inverse funds, fund fees, risk profile, "
+                "restricted list and data quality, plus per-account and per-tax-bucket counts and what changed since the last "
+                "snapshot. There is no overall score. Use for 'how healthy is my portfolio', 'what needs attention', 'is my "
+                "emergency fund enough'. Report the statuses and summaries as given; do not invent numbers or advice."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -1055,6 +1070,36 @@ def _chat_tool_get_portfolio_risk_flags(ticker: str = "", owner: str | None = No
         return {"ticker": ticker.upper() if ticker else None, "note": f"DB query failed: {exc}"}
 
 
+def _chat_tool_get_portfolio_health(owner: str | None = None) -> dict:
+    """Owner-scoped and read-only: no owner -> nothing (never someone else's checkup); takes no snapshot, sends nothing."""
+    if not owner:
+        return {"note": "No signed-in account, so there is no portfolio health to show."}
+    try:
+        from portfolio_agent.services.health_service import get_health_view_for_owner
+
+        view = get_health_view_for_owner(owner, take_snapshot=False)
+        if view is None:
+            return {"note": "No portfolio found for this account yet."}
+        h = view["health"]
+        hh = h.household
+        diff = view["vs_last"]
+        return {
+            "as_of": h.as_of, "counts": hh.counts, "total_value": hh.total_value,
+            "profile": h.profile,
+            "checks": [{"check": c.key, "title": c.title, "status": c.status, "summary": c.summary,
+                        "reason_codes": list(c.reason_codes)} for c in hh.checks],
+            "accounts": {sc.label: sc.counts for sc in h.by_account.values()},
+            "tax_buckets": {sc.label: sc.counts for sc in h.by_tax_treatment.values()},
+            "changes_since_last_snapshot": ([{"check": ch["title"], "scope": ch["label"], "from": ch["from"], "to": ch["to"],
+                                              "direction": ch["direction"]} for ch in diff["changes"][:12]]
+                                            if diff["has_previous"] else None),
+            "last_snapshot_date": view["last_date"],
+            "note": "Statuses come from fixed rules against the user's own profile; UNKNOWN means data is missing. Not advice.",
+        }
+    except Exception as exc:
+        return {"note": f"Portfolio health unavailable: {exc}"}
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 def _execute_chat_tool(name: str, args: dict, owner: str | None = None) -> str:
@@ -1114,6 +1159,8 @@ def _execute_chat_tool(name: str, args: dict, owner: str | None = None) -> str:
             result = _chat_tool_get_portfolio_sector_allocation(owner)
         elif name == "get_portfolio_risk_flags":
             result = _chat_tool_get_portfolio_risk_flags(args.get("ticker", ""), owner)
+        elif name == "get_portfolio_health":
+            result = _chat_tool_get_portfolio_health(owner)
         else:
             result = {"error": f"Unknown tool: {name}"}
         return json.dumps(result, default=str)

@@ -118,6 +118,7 @@ class InstrumentType(StrEnum):
     TARGET_DATE_FUND = "TARGET_DATE_FUND"
     BOND = "BOND"
     CIT = "CIT"                      # collective investment trust (e.g. 401k fund with no ticker)
+    STABLE_VALUE = "STABLE_VALUE"    # 401(k) stable value fund: usually no ticker, cash-like, asset class FIXED_INCOME
     CASH = "CASH"
     OTHER = "OTHER"
     UNKNOWN = "UNKNOWN"
@@ -166,6 +167,55 @@ class ClassificationSource(StrEnum):
     MANUAL = "manual"                # a person's override: automatic classification never overwrites it
 
 
+class RiskProfile(StrEnum):
+    """The three investor profiles. Everyone starts as MODERATE; the quiz and a direct pick are both optional."""
+    CONSERVATIVE = "CONSERVATIVE"
+    MODERATE = "MODERATE"
+    AGGRESSIVE = "AGGRESSIVE"
+
+
+class ProfileSource(StrEnum):
+    DEFAULT = "DEFAULT"              # nothing chosen: MODERATE
+    QUIZ = "QUIZ"                    # the 3-question quiz decided it
+    PICKED = "PICKED"                # the user chose a profile directly
+
+
+class LimitsSource(StrEnum):
+    PROFILE = "profile"              # numeric limits come from risk_profile_settings for the user's profile
+    CUSTOM = "custom"                # the user's own user_profile numbers win (what every existing user has)
+
+
+class GoalType(StrEnum):
+    RETIREMENT = "RETIREMENT"
+    HOUSE = "HOUSE"
+    EDUCATION = "EDUCATION"
+    OTHER = "OTHER"                  # the emergency reserve is deliberately NOT a goal: it is one dollar amount
+
+
+class GoalStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    DONE = "DONE"
+
+
+class HealthStatus(StrEnum):
+    """Result of one Portfolio Health check. UNKNOWN means the data to judge it is missing — never read as GOOD."""
+    GOOD = "GOOD"
+    WATCH = "WATCH"
+    ACTION = "ACTION"
+    UNKNOWN = "UNKNOWN"
+
+
+HEALTH_STATUSES = tuple(m.value for m in HealthStatus)
+
+RISK_PROFILES = tuple(m.value for m in RiskProfile)            # ordered most conservative -> most aggressive
+PROFILE_SOURCES = frozenset(m.value for m in ProfileSource)
+LIMITS_SOURCES = frozenset(m.value for m in LimitsSource)
+GOAL_TYPES = frozenset(m.value for m in GoalType)
+GOAL_STATUSES = frozenset(m.value for m in GoalStatus)
+# Asset classes a target allocation may use. MULTI_ASSET and UNKNOWN are "looked through" (a target-date fund is
+# counted by what it holds), never targeted themselves.
+ALLOCATION_ASSET_CLASSES = tuple(m.value for m in AssetClass if m not in (AssetClass.MULTI_ASSET, AssetClass.UNKNOWN))
+
 INSTRUMENT_TYPES = frozenset(m.value for m in InstrumentType)
 ASSET_CLASSES = frozenset(m.value for m in AssetClass)
 ACCOUNT_TYPES = tuple(m.value for m in AccountType)
@@ -183,7 +233,8 @@ RECLASSIFY_AFTER_DAYS = 30           # an automatic classification older than th
 #                             its composite toward neutral).
 #   NO_COMPANY_FILINGS_TYPES  no EDGAR filings / 8-K guidance to fetch: the funds above plus cash and CITs.
 # A STOCK, UNKNOWN (with a price), BOND or OTHER keeps the unchanged stock path.
-NO_PREDICTION_TYPES = frozenset({InstrumentType.CASH, InstrumentType.MONEY_MARKET, InstrumentType.CIT})
+NO_PREDICTION_TYPES = frozenset({InstrumentType.CASH, InstrumentType.MONEY_MARKET, InstrumentType.CIT,
+                                 InstrumentType.STABLE_VALUE})
 NO_COMPANY_FILINGS_TYPES = frozenset(FUND_INSTRUMENT_TYPES | NO_PREDICTION_TYPES)
 
 # Instruments with no exchange ticker (401k collective trusts) are keyed "CIT:<slug>". That key is a
@@ -436,6 +487,9 @@ class UserProfile(_DictCompat):
     # horizons the user wants generated/shown; default = all four (no filtering)
     preferred_horizons: list = field(default_factory=lambda: list(ALL_HORIZON_LABELS))
     owner: str | None = None
+    # Where the numeric limits above come from: 'profile' (risk_profile_settings for the user's investor profile) or
+    # 'custom' (the max_* numbers on this row). A bare UserProfile() is 'custom': its numbers are the ones in force.
+    limits_source: str = "custom"
 
     @classmethod
     def from_db_row(cls, row: dict) -> "UserProfile":
@@ -478,6 +532,7 @@ class UserProfile(_DictCompat):
                 else _parse_json_list(row.get("preferred_horizons"))
             ),
             owner=row.get("owner"),
+            limits_source=row.get("limits_source") or defaults.limits_source,
         )
 
     def to_dict(self) -> dict:
@@ -500,6 +555,7 @@ class UserProfile(_DictCompat):
             "disclaimer_accepted_at": self.disclaimer_accepted_at,
             "preferred_horizons": self.preferred_horizons,
             "owner": self.owner,
+            "limits_source": self.limits_source,
         }
 
 

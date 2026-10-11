@@ -491,6 +491,13 @@ def find_account(portfolio_id: int, broker: str, account_number: str, *,
     return dict(r) if r else None
 
 
+def list_portfolio_owners(*, conn: sqlite3.Connection | None = None) -> list[str]:
+    """Every owner that has a portfolio. For system-wide batch jobs only (the evening health snapshots) — a per-request
+    caller already knows its own owner."""
+    with _db(conn) as conn:
+        return [r["owner"] for r in conn.execute("SELECT owner FROM portfolios ORDER BY owner").fetchall()]
+
+
 def list_accounts(portfolio_id: int | None = None, *, include_archived: bool = False,
                   include_paper: bool = False, conn: sqlite3.Connection | None = None) -> list[dict]:
     """Accounts, newest grouping by broker. Paper accounts are excluded unless include_paper (they are not real holdings)."""

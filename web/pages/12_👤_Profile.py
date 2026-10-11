@@ -30,6 +30,8 @@ from portfolio_agent.tools.user_notifications_db import (
     get_user_notifications_for, update_user_notifications_for,
 )
 
+from portfolio_agent.tools.portfolio_policy import get_effective_policy
+from web.components.investor_profile import render_investor_admin, render_investor_profile
 from web.auth import current_context, current_user, require_login
 
 st.set_page_config(
@@ -164,6 +166,14 @@ with c4:
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
+# ── Investor profile (optional; everyone starts Moderate with the default emergency reserve) ──────────────────────
+section_title("Investor profile", badge_text="optional · starts Moderate")
+render_investor_profile(_ctx, profile)
+_policy = get_effective_policy(_ctx)
+_limits_locked = profile.limits_source == "profile"      # numbers come from the investor profile, not this form
+
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
 # ── Form ──────────────────────────────────────────────────────────────────────
 
 with st.form("profile_form"):
@@ -186,25 +196,29 @@ with st.form("profile_form"):
                 "Concentration thresholds are percentages of total portfolio value; cash caps are fractions. "
                 "The defaults (25 / 15 / 0.40 / 0.15) match the optimizer's built-in fallbacks."
             )
+            if _limits_locked:
+                st.info(f"These are your {_policy.profile.title()} profile's limits (read-only). To set your own, "
+                        "choose “My own numbers” under Investor profile → Concentration limits.",
+                        icon=material("lock"))
             m1, m2, m3, m4 = st.columns(4)
             max_sector_pct = m1.number_input(
-                "Max sector concentration (%)", min_value=0.0, step=1.0, format="%.1f",
-                value=float(profile.max_sector_pct),
+                "Max sector concentration (%)", min_value=0.0, step=1.0, format="%.1f", disabled=_limits_locked,
+                value=float(_policy.max_sector_pct if _limits_locked else profile.max_sector_pct),
                 help="Holdings pushing a sector past this share are flagged for trimming and penalised as top-up candidates.",
             )
             max_issuer_pct = m2.number_input(
-                "Max issuer concentration (%)", min_value=0.0, step=1.0, format="%.1f",
-                value=float(profile.max_issuer_pct),
+                "Max issuer concentration (%)", min_value=0.0, step=1.0, format="%.1f", disabled=_limits_locked,
+                value=float(_policy.max_issuer_pct if _limits_locked else profile.max_issuer_pct),
                 help="Same as sector, but for a single issuer across share classes.",
             )
             max_per_candidate = m3.number_input(
-                "Max share of new cash per candidate", min_value=0.0, step=0.05, format="%.2f",
-                value=float(profile.max_per_candidate_pct_of_cash),
+                "Max share of new cash per candidate", min_value=0.0, step=0.05, format="%.2f", disabled=_limits_locked,
+                value=float(_policy.max_candidate_pct_of_cash / 100 if _limits_locked else profile.max_per_candidate_pct_of_cash),
                 help="Fraction 0–1. 0.40 = no single allocation exceeds 40% of the new cash.",
             )
             max_post_trade = m4.number_input(
-                "Max post-trade position", min_value=0.0, step=0.01, format="%.2f",
-                value=float(profile.max_post_trade_position_pct),
+                "Max post-trade position", min_value=0.0, step=0.01, format="%.2f", disabled=_limits_locked,
+                value=float(_policy.max_position_pct / 100 if _limits_locked else profile.max_post_trade_position_pct),
                 help="Fraction 0–1 of post-trade total value any one position may reach.",
             )
             sector_options = sorted(set(_GICS_SECTORS) | set(profile.sector_exclusions or []))
@@ -283,10 +297,11 @@ if submitted:
         "display_name": display_name.strip() or None,
         "base_currency": base_currency.strip().upper(),
         "timezone": tz_name.strip(),
-        "max_sector_pct": float(max_sector_pct),
-        "max_issuer_pct": float(max_issuer_pct),
-        "max_per_candidate_pct_of_cash": float(max_per_candidate),
-        "max_post_trade_position_pct": float(max_post_trade),
+        # While the limits come from the investor profile the inputs are read-only: keep the user's stored numbers.
+        "max_sector_pct": float(profile.max_sector_pct if _limits_locked else max_sector_pct),
+        "max_issuer_pct": float(profile.max_issuer_pct if _limits_locked else max_issuer_pct),
+        "max_per_candidate_pct_of_cash": float(profile.max_per_candidate_pct_of_cash if _limits_locked else max_per_candidate),
+        "max_post_trade_position_pct": float(profile.max_post_trade_position_pct if _limits_locked else max_post_trade),
         "sector_exclusions": [s.strip() for s in sector_exclusions if s and s.strip()],
         "employer": employer.strip() or None,
         "pre_clearance_required": bool(pre_clearance_required),
@@ -346,6 +361,7 @@ if current_user().is_admin:
     from portfolio_agent.tools.auth_users_db import disable_user, invite_user, list_users
 
     st.divider()
+    render_investor_admin(_ctx)
     _tile_users = section_tile("Users", badge_text="admin", badge_color=PRIMARY, expanded=True, key="admin_users")
     if _tile_users:
         with _tile_users:

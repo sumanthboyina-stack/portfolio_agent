@@ -112,6 +112,24 @@ def disable_user(email: str) -> bool:
     return n > 0
 
 
+def is_admin_owner(owner: str) -> bool:
+    """
+    Server-side admin test for the services: True only if an ENABLED auth_users row with role 'admin' maps to *owner*.
+    The UI's current_user().is_admin only decides what to show; anything that changes a global setting asks THIS, so a
+    non-admin who reaches a service function some other way is still refused. Never raises; unknown owner -> False.
+    """
+    if not owner:
+        return False
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM auth_users WHERE owner = ? AND role = 'admin' AND enabled = 1 LIMIT 1", (owner,)
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 def list_users() -> list[AuthUser]:
     with _db() as conn:
         rows = conn.execute(
