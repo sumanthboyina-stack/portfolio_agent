@@ -130,22 +130,33 @@ def test_should_notify_trigger_only_for_event_triggers(tmp_path, monkeypatch):
 
 
 def test_detector_notification_hook_respects_filter(tmp_path, monkeypatch):
+    # Rewritten in the notifications task: the detector hook now offers each event to the OWNERS who hold or watch the ticker,
+    # and each owner's own routing / contacts / severity filter decides (it no longer reads the legacy single channel).
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    from portfolio_agent.domain import LOCAL_OWNER
     from portfolio_agent.events import detector
+    from portfolio_agent.services import account_service, notification_service as ns
+    from portfolio_agent.services.context import local_context
+    from portfolio_agent.tools import auth_users_db, notification_settings_db as nsdb
 
-    emitted: list[tuple[str, dict]] = []
-    monkeypatch.setattr(detector, "_emit", lambda ch, ev: emitted.append((ch, ev)))
+    ctx = local_context("test")
     event = {"id": 1, "ticker": "AAPL", "event_type": "material_news", "severity": 4, "summary": "x"}
 
-    # channel 'none' by default → suppressed
+    # nobody holds or watches AAPL → nobody is told
     assert detector._maybe_notify(event) is False
-    assert emitted == []
 
-    update_user_notifications(channel="email", min_severity_threshold=3,
-                              quiet_hours_start=None, quiet_hours_end=None)
+    acct = account_service.create_account(ctx, broker="manual", display_name="b", account_type="TAXABLE")
+    account_service.add_position(ctx, acct["account_id"], {"ticker": "AAPL", "shares": 1, "current_price": 100.0})
+    assert detector._maybe_notify(event) is False            # holds it, but email is not set up (no verified contact / from-address)
+
+    auth_users_db.invite_user("owner@example.com", LOCAL_OWNER, "member")
+    nsdb.update_notification_settings(updated_by="t", email_from_address="apex@example.com")
+    ns.ensure_contacts(ctx)
     assert detector._maybe_notify(event) is True
-    assert emitted[-1][0] == "email"
 
-    update_user_notifications(min_severity_threshold=5)
-    assert detector._maybe_notify(event) is False
-    assert len(emitted) == 1
+    ns.update_preferences(ctx, min_severity_threshold=5)
+    assert detector._maybe_notify({**event, "id": 2}) is False   # below this owner's own severity bar
+
+    ns.update_preferences(ctx, min_severity_threshold=3)
+    ns.set_routing(ctx, "MARKET_EVENT", "EMAIL", False)
+    assert detector._maybe_notify({**event, "id": 3}) is False   # routed off for this category

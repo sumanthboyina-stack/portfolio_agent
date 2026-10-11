@@ -557,26 +557,46 @@ def test_evening_batch_snapshots_every_owner_and_one_failure_does_not_stop_the_r
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
+# (Rewritten in the notifications task: health alerts now go through notification_service.notify into the outbox, judged by
+#  the person's routing / contacts / quiet hours instead of the legacy single channel. The intent of each test is unchanged.)
+
+def _notif_world():
+    """LOCAL_OWNER has a verified login-email contact and email is on globally (no rate limit in the way)."""
+    from portfolio_agent.services import notification_service as nsvc
+    from portfolio_agent.tools import notification_settings_db as nsdb
+    auth_users_db.invite_user("owner@example.com", LOCAL_OWNER, "member")
+    nsdb.update_notification_settings(updated_by="t", email_from_address="apex@example.com", max_messages_per_user_per_hour=1000)
+    nsvc.ensure_contacts(ME)
+
+
 def _prefs(**kw):
-    notif.update_user_notifications_for(ME, **{"channel": "email", "min_severity_threshold": 3, **kw})
+    from portfolio_agent.services import notification_service as nsvc
+    nsvc.update_preferences(ME, **{"min_severity_threshold": 3, **kw})
 
 
-def _delivered(check="emergency_reserve"):
+def _outbox_rows(check="emergency_reserve"):
     with sqlite3.connect(str(db_module.DB_PATH)) as c:
+        c.row_factory = sqlite3.Row
         try:
-            return [r[0] for r in c.execute("SELECT dedup_key FROM notification_log WHERE dedup_key LIKE ?", [f"health:{check}:%"])]
-        except sqlite3.OperationalError:                                                    # nothing has ever been delivered
+            return [dict(r) for r in c.execute("SELECT * FROM notification_outbox WHERE dedup_key LIKE ? ORDER BY id", [f"health:{check}:%"])]
+        except sqlite3.OperationalError:                                                    # nothing has ever been queued
             return []
 
 
+def _delivered(check="emergency_reserve"):
+    """Dedup keys of health alerts actually queued to SEND (suppressed ones are recorded but never sent)."""
+    return [r["dedup_key"] for r in _outbox_rows(check) if r["status"] in ("PENDING", "DEFERRED", "SENDING", "SENT")]
+
+
 def test_a_new_action_notifies_once_per_run_and_again_after_it_clears_and_returns():
+    _notif_world()
     acct = _account()
     _hold(acct, "AAA", 5000.0)
     _cash(acct, 100.0)
     _prefs()
     r = _snap(date(2026, 10, 7))
     assert "health:emergency_reserve:2026-10-07" in r["notified"]
-    assert _snap(date(2026, 10, 8))["notified"] == [] or "health:emergency_reserve:2026-10-07" not in _snap(date(2026, 10, 8))["notified"]
+    assert "health:emergency_reserve:2026-10-07" not in _snap(date(2026, 10, 8))["notified"]
     assert _delivered() == ["health:emergency_reserve:2026-10-07"]                          # same run: no second notification
     _cash(acct, 5000.0)
     _snap(date(2026, 10, 9))                                                                # cleared (GOOD)
@@ -584,23 +604,38 @@ def test_a_new_action_notifies_once_per_run_and_again_after_it_clears_and_return
     r = _snap(date(2026, 10, 10))
     assert "health:emergency_reserve:2026-10-10" in r["notified"]
     assert sorted(_delivered()) == ["health:emergency_reserve:2026-10-07", "health:emergency_reserve:2026-10-10"]
+    row = _outbox_rows()[0]
+    assert row["category"] == "PORTFOLIO_HEALTH" and row["severity"] == 4 and row["channel"] == "EMAIL"
+    assert "$" not in row["body_brief"] and "AAA" not in row["body_brief"]                  # the brief text carries no amounts
 
 
 def test_watch_never_notifies_and_the_users_preferences_are_respected():
+    from portfolio_agent.services import notification_service as nsvc
+    _notif_world()
     acct = _account()
     _hold(acct, "AAA", 5000.0); _cash(acct, 100.0)
-    # channel 'none' (the default) -> nothing at all
-    assert _snap(date(2026, 10, 7))["notified"] == [] and _delivered() == []
+    nsvc.set_routing(ME, "PORTFOLIO_HEALTH", "EMAIL", False)                                 # routing off -> nothing at all
+    assert _snap(date(2026, 10, 7))["notified"] == [] and _outbox_rows() == []
+    nsvc.set_routing(ME, "PORTFOLIO_HEALTH", "EMAIL", True)
     _prefs(min_severity_threshold=5)                                                        # ACTION is severity 4: below their bar
-    assert _snap(date(2026, 10, 8))["notified"] == [] and _delivered() == []
-    _prefs(min_severity_threshold=3, quiet_hours_start="00:00", quiet_hours_end="23:59")
-    assert _snap(date(2026, 10, 9))["notified"] == [] and _delivered() == []                # quiet hours: suppressed, not recorded
-    _prefs(quiet_hours_start=None, quiet_hours_end=None)
-    r = _snap(date(2026, 10, 10))
-    assert r["notified"] and all("health:" in k for k in r["notified"])                     # retried and delivered once quiet hours end
+    assert _snap(date(2026, 10, 8))["notified"] == [] and _outbox_rows() == []
+    _prefs(min_severity_threshold=3, quiet_hours_start="00:00", quiet_hours_end="23:59", quiet_hours_mode="SUPPRESS")
+    assert _snap(date(2026, 10, 9))["notified"]                                              # recorded...
+    assert _delivered() == [] and {r["status"] for r in _outbox_rows()} == {"SUPPRESSED"}   # ...but suppressed by quiet hours, not sent
+    assert {r["reason_code"] for r in _outbox_rows()} == {"QUIET_HOURS"}
     keys = _delivered("profile") + _delivered("data_quality") + _delivered("compliance")
     assert keys == []                                                                       # UNKNOWN / WATCH / GOOD checks never notified
-    assert _delivered("diversification")                                                    # one holding is ACTION on diversification, so it did
+    assert _outbox_rows("diversification")                                                  # one holding is ACTION on diversification, so it did
+
+
+def test_quiet_hours_defer_holds_a_health_alert_until_they_end():
+    _notif_world()
+    acct = _account()
+    _hold(acct, "AAA", 5000.0); _cash(acct, 100.0)
+    _prefs(quiet_hours_start="00:00", quiet_hours_end="23:59", quiet_hours_mode="DEFER")
+    assert _snap(date(2026, 10, 9))["notified"]
+    rows = _outbox_rows()
+    assert {r["status"] for r in rows} == {"DEFERRED"} and all(r["next_attempt_at"] for r in rows)
 
 
 def test_action_streak_start_walks_back_over_consecutive_action_snapshots_only():

@@ -130,6 +130,20 @@ def is_admin_owner(owner: str) -> bool:
         return False
 
 
+def login_email_for_owner(owner: str) -> str | None:
+    """The sign-in email of the ENABLED auth_users row that maps to *owner* (the address Entra already verified), or None.
+    Used to create a person's verified EMAIL notification contact. Never raises."""
+    if not owner:
+        return None
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT email FROM auth_users WHERE owner = ? AND enabled = 1 ORDER BY id LIMIT 1", (owner,)).fetchone()
+        return row["email"] if row else None
+    except Exception:
+        return None
+
+
 def list_users() -> list[AuthUser]:
     with _db() as conn:
         rows = conn.execute(

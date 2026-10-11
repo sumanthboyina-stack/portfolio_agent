@@ -293,6 +293,86 @@ A checkup of **your own** portfolio against **your own** profile and limits — 
 
 ---
 
+## Notifications: channels, contacts, routing and settings
+
+*(Complete: the data model, the outbox, the delivery worker, the email / phone-push senders, the alert sources — market events, Portfolio Health, compliance and the daily digest — and the screens. WhatsApp and SMS are reserved, with no sender.)*
+
+**Channels.** `EMAIL` (Gmail SMTP) and `PUSH` (phone push through [ntfy](https://ntfy.sh)) are the only channels that can ever deliver. `WHATSAPP` and `SMS` exist in the code as stubs and cannot be turned on; `SLACK` is kept only so the old `slack` value still reads. **Alert categories:** `MARKET_EVENT`, `PORTFOLIO_HEALTH`, `COMPLIANCE`, `DAILY_DIGEST`, `SYSTEM`.
+
+**Contacts** (private, per person). Your sign-in email becomes a **verified** email contact automatically (your identity provider already verified it). You may add **one** alternate email, which receives nothing until it is verified by a code (next step). Push gets an unguessable topic, `apex-` plus 32 random characters — on a public ntfy server the topic *is* the password, so treat it like one: it is shown only to you, never logged, and you can replace it if it leaks. Addresses are personal data and never appear raw in logs, audit events or error messages — only as a short tag.
+
+**Routing** (private, per person): a grid of category × channel. A new person gets: market events → push + email; portfolio health → email; compliance → push + email; daily digest → email, **off**; system → every active channel. A channel receives a message only if **all five** hold: it is an active channel and switched on globally (email also needs an SMTP host and a from-address), routing is on for that category, you have a contact on it, that contact is verified, and it is not opted out.
+
+**Your preferences:** content level (`BRIEF` — no amounts, position sizes or portfolio values, safe on a lock screen — or `DETAILED`; push is always brief), what to do with alerts in your quiet hours (`DEFER` until they end, or `SUPPRESS`), and the digest time (default 07:30 in your profile timezone), alongside the existing severity and conviction thresholds.
+
+**Upgrading.** The old single `channel` setting is kept (deprecated, still readable) and was migrated once: `email` → email routing on for exactly what it covered (market events, portfolio health); `none` or `slack` → everything off. Anyone added after this release gets the defaults above. Re-running the migration never changes a choice you made since.
+
+**Global settings** (admin only; versioned, reset-to-defaults; **Profile → Investor settings** gets its editor in a later step): which channels are on, the SMTP server and sender, the ntfy server, rate and retry limits, verification-code rules, the public app URL, and a dry-run switch. WhatsApp / SMS cannot be enabled, and email cannot be enabled without an SMTP host and a from-address.
+
+**Secrets live only in environment variables — never in the database, a file, a log or a screen.** The database stores just the variable *name*; the admin screen shows each as *present* or *missing*, never the value:
+
+| Variable (default name) | Used for |
+|---|---|
+| `APEX_SMTP_USERNAME`, `APEX_SMTP_PASSWORD` | Gmail SMTP login (an *app password*, not your Google password) |
+| `APEX_NTFY_TOKEN` | optional ntfy access token (for a protected or self-hosted server) |
+| `APEX_NOTIFY_SIGNING_KEY` | signs the one-click unsubscribe links in emails |
+
+**How delivery works.** A producer calls `notification_service.notify(owner, category, dedup_key=…, title=…, brief=…)`. That applies the person's filters (minimum severity / conviction, quiet hours in *their* timezone), fans out to every deliverable channel and **only writes rows to the outbox** — no network call, and it never raises into the caller. A separate worker (`python -m scripts.send_notifications`) claims due rows, sends them with no database connection open, and records the result. Quiet hours either **defer** the message until they end or **suppress** it, as the person chose. Over `max_messages_per_user_per_hour` a message is **folded into the next digest, not dropped**. A transient failure is retried after `retry_backoff_seconds × 2^(attempt−1)` (capped at a day); after `retry_max_attempts` — or at once for a permanent error such as a bad login — the row is `FAILED` and an administrator can requeue it. The same thing is never enqueued twice for the same person and channel, and an opt-out made *after* a message was queued is honoured at send time. With the global `dry_run` setting on, the worker only logs what it would send.
+
+### Where you manage it
+**Profile → Notifications** (everyone): your contacts — the verified sign-in email, **one** alternate email (verified with a 6-digit code), and phone push (your private topic, a QR code, *Send test*, and *I got it* to verify it); the grid of which alert types go to which channel (Email and Phone push are live; WhatsApp and SMS are shown disabled, "Coming later"); brief or detailed messages; quiet hours and whether to hold or drop what arrives in them; your digest time; the severity and conviction thresholds; *Send test* buttons; and your own last 50 notifications. Each part saves with its own button (not "Save profile"). The old single "Channel" dropdown is gone — routing replaces it.
+
+**Profile → Notification settings** (administrators only): the channel switches, SMTP and ntfy servers, sender, limits and a **dry-run** switch; each secret environment variable shown only as *present* or *missing* (never its value); and the outbox — counts by status, and recent failures with the recipient **masked**, the error, and a *Retry* button.
+
+**Unsubscribe link.** Every email ends with a signed link to the **Unsubscribe** page, which needs no login. It asks for one click to confirm (so mail scanners that open links cannot opt anyone out by accident) and stops emails to that one address only; you can opt back in under *Profile → Notifications*.
+
+### What sends a notification
+
+| Category | Trigger | Who is told | Text |
+|---|---|---|---|
+| `MARKET_EVENT` | an event the detector finds (material news, …) | **every person who holds the ticker in a real (non-paper) account or watches it** — nobody else, each judged by their own routing, severity, quiet hours and content level | "APEX: NVDA - material news (severity 4). Open APEX for details." plus, if their clearance says so, "[BLOCKED: no new trade currently permitted]" — information only, it never stops the alert |
+| `PORTFOLIO_HEALTH` | a Portfolio Health check *becomes* ACTION (once per run of ACTION; never WATCH) | that person | the check's name only — no amounts, no account names; the email's detailed text adds the full summary |
+| `COMPLIANCE` | a pre-clearance approval recorded or withdrawn · an approval expiring within 24 hours · your restricted list changed for a ticker you **hold** | that person | informational: "…was recorded", "…was withdrawn; no new trade is currently permitted", "…expires within 24 hours" |
+| `DAILY_DIGEST` | at each person's digest time, in their timezone | that person, **email only**, **off by default** | one email: the Health checks needing action or a watch, the day's events on tickers they hold or watch, and anything held back by the hourly limit. **Skipped when there is nothing to say**, and at most one per person per day |
+| `SYSTEM` | reserved | every active channel | — |
+
+Every notification is **informational** — never phrased as a trade instruction — and the brief text (always used for push) has **no amounts, position sizes or portfolio values**. De-duplication keys: `event:<event id>`, `health:<check>:<date the ACTION run began>` (with the account for an account-level check), `approval:<id>:<event>`, `approval:<id>:expiring:<expiry>`, `restricted:<ticker>:<added|removed>:<time>`, `digest:<local date>`. A notification failure never breaks the detector, a health run, a page, or a compliance record (the approval and restricted-list stores notify best-effort *after* their own commit).
+
+The clock-driven alerts (expiring approvals, digests) are queued by `python -m scripts.send_notifications` (run it from cron every few minutes) and by the evening batch, just before delivery.
+
+### Setting up email (Gmail)
+1. Use a Google account with **2-Step Verification** on (Google Account → Security).
+2. Create an **app password**: Google Account → Security → 2-Step Verification → *App passwords* → name it "APEX" → copy the 16-character password. (It is *not* your Google password, and it can be revoked any time.)
+3. Put the secrets in the environment of whatever runs the pipeline and the web app — a `.env` file next to `main.py` works locally, App Settings on Azure. **Never** in the database or a committed file:
+   ```
+   APEX_SMTP_USERNAME=you@gmail.com
+   APEX_SMTP_PASSWORD=<the 16-character app password>
+   APEX_NOTIFY_SIGNING_KEY=<a long random string, e.g. from: python -c "import secrets; print(secrets.token_urlsafe(32))">
+   ```
+4. In the settings (admin) set `email_from_address` to the **same Gmail address** (Gmail rewrites any other From address) and `app_base_url` to where APEX is reachable (e.g. `https://apex.example.com`) — it is used for "Open in APEX", "Manage notifications" and the unsubscribe link. Gmail's free limit is about 500 messages a day.
+5. Turn email on, send yourself a test notification, then switch off `dry_run`.
+
+### Setting up phone push (ntfy)
+1. Install the **ntfy** app — iOS (App Store) or Android (Google Play / F-Droid).
+2. In APEX, open your notification settings → *Phone push*. APEX generates your private topic (`apex-` plus 32 random characters) and shows it with a QR code.
+3. In the ntfy app tap **+**, choose *Subscribe to topic*, and enter the topic (or scan the QR code). If you use a self-hosted server, set the server URL in the app too.
+4. Tap *Send test* in APEX, then **I got it** once it appears on the phone — that verifies the contact.
+5. Push text is always the brief form: no amounts, position sizes or portfolio values, so it is safe on a lock screen.
+
+On the public server **ntfy.sh the topic is the only thing keeping others out** — anyone who learns it can read your pushes. Keep it private; *Replace topic* generates a new one if it leaks. For stronger protection run your own ntfy server, protect it with access control, set `ntfy_base_url` to it and put its access token in `APEX_NTFY_TOKEN`.
+
+### Scheduling the worker
+Run the worker every few minutes — it is safe to run concurrently and at any time:
+```cron
+*/5 * * * *   /path/to/portfolio-agent/run_notifications.sh
+```
+The evening batch also delivers whatever is due at its end. `python -m scripts.send_notifications --status` prints the outbox counts by status.
+
+### Enabling WhatsApp or SMS later
+Both are stubs today (`WhatsAppSender`, `SmsSender` in `services/notification_senders.py`) and return "skipped: channel not implemented". Each class's `TODO` lists what a real one needs — Twilio or the Meta Cloud API; phone numbers in E.164 form verified by a code; approved WhatsApp message templates; SMS A2P 10DLC registration; STOP handling. To enable one later: implement its `send()`, lift the "cannot be turned on" validation in `notification_settings_db` and the "not available yet" refusal in `notification_contacts_db`, and add the channel to `domain.ACTIVE_CHANNELS`.
+
+---
+
 ## Instrument routing: funds vs stocks
 
 What the pipeline does with a ticker depends on its `instrument_type` (see [Holdings taxonomy](#holdings-taxonomy-what-each-holding-is-and-what-each-account-is)). Tickers nobody holds — watchlist, trending, extras — are classified at the start of each phase too.

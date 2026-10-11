@@ -253,6 +253,13 @@ def list_goals(owner: str, *, include_done: bool = True, conn: sqlite3.Connectio
         return [dict(r) for r in c.execute(sql + " ORDER BY goal_id", [_owner(owner)]).fetchall()]
 
 
+def list_all_goal_names() -> list[str]:
+    """Every member's goal names (a private phrase like "Emma's college fund"). System-wide on purpose, for ONE caller:
+    privacy.collect_private_terms(), which must know every private phrase to keep it out of shared content."""
+    with _conn(None) as c:
+        return [r["name"] for r in c.execute("SELECT name FROM investment_goals").fetchall()]
+
+
 def update_goal(owner: str, goal_id: int, *, conn: sqlite3.Connection | None = None, **fields) -> int:
     """Rows changed (0 = no such goal for this owner)."""
     f = _clean_goal_fields(fields)

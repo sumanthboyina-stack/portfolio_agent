@@ -54,6 +54,19 @@ def collect_private_terms() -> frozenset[str]:
                     terms.add(t)
     except Exception:
         pass
+    try:
+        # Goal names ("Emma's college fund") are private. A name that is just the goal's type word ("Retirement",
+        # "House") is an ordinary word that appears in market news all the time, so it is not a private term: listing it
+        # would make shared content refuse to build.
+        from portfolio_agent.domain import GOAL_TYPES
+        from portfolio_agent.tools.investor_profile_db import list_all_goal_names
+        generic = {g.lower() for g in GOAL_TYPES} | {"emergency fund", "savings", "other"}
+        for name in list_all_goal_names():
+            t = _clean(name)
+            if t and t.lower() not in generic:
+                terms.add(t)
+    except Exception:
+        pass
     return frozenset(terms)
 
 

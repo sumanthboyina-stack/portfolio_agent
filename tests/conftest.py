@@ -1,7 +1,17 @@
 """Session-wide test fixtures."""
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
+
+# SAFETY NET: the default database for the WHOLE test session is a throwaway file, set before any test runs. Individual tests
+# still point DB_PATH at their own tmp file; but if one ever undoes that (monkeypatch.undo(), a fixture mistake), it falls back
+# to THIS file — never to the real data/portfolio.db. (This guard exists because exactly that once wrote test rows into it.)
+import portfolio_agent.tools.db as _apex_db_module
+
+_apex_db_module.DB_PATH = Path(tempfile.mkdtemp(prefix="apex-tests-")) / "session.db"
 
 
 @pytest.fixture(autouse=True)

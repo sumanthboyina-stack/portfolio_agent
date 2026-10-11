@@ -343,15 +343,15 @@ def reset_portfolio_settings(ctx: RequestContext, *, reason: str | None = None) 
 
 def update_instrument_type_horizons(ctx: RequestContext, horizons: dict, *, expected_version: int | None = None,
                                     reason: str | None = None) -> dict:
-    """Admin: which forecast horizons (days) each instrument type gets — stored in engine_settings. The engine-settings
-    store opens its own connection, so the change commits first and its audit event right after (two short
-    transactions, not one); the audit row records before and after."""
+    """Admin: which forecast horizons (days) each instrument type gets — stored in engine_settings. One transaction with
+    its audit event (the change and its before/after record land together or not at all)."""
     require_admin(ctx)
     from portfolio_agent.tools import engine_settings_db as esdb
-    before = dict(esdb.get_engine_settings()["instrument_type_horizons"])
-    after = esdb.update_engine_settings(updated_by=ctx.actor, expected_version=expected_version,
-                                        instrument_type_horizons=horizons)["instrument_type_horizons"]
+    esdb.get_engine_settings()                       # make sure the table exists BEFORE the write transaction opens
     with _uow() as c:
+        before = dict(esdb.get_engine_settings(conn=c)["instrument_type_horizons"])
+        after = esdb.update_engine_settings(updated_by=ctx.actor, expected_version=expected_version,
+                                            instrument_type_horizons=horizons, conn=c)["instrument_type_horizons"]
         _audit(ctx, c, "update_instrument_type_horizons", before=before, after=after, reason=reason)
     return after
 

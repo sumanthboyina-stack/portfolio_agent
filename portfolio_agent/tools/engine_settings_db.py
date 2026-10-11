@@ -53,14 +53,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_schema_ready: set[str] = set()
+
+
 @contextmanager
 def _db():
+    """A connection to the engine-settings table. Create + migrate + seed run once per process per DB file, not on
+    every connection (parallel pipeline threads each open one; per-connection DDL fought for the write lock)."""
+    from portfolio_agent.tools import db as _db_module
+    key = str(_db_module.DB_PATH)
+
     def _setup(conn: sqlite3.Connection) -> None:
         _create_schema(conn)
         _migrate(conn)
         _seed(conn)
         conn.commit()
-    with db_conn(setup=_setup) as conn:
+        _schema_ready.add(key)
+    with db_conn(setup=None if key in _schema_ready else _setup) as conn:
         yield conn
 
 
@@ -137,10 +146,13 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
-def get_engine_settings() -> dict:
-    """The current effective settings (seeded from weight_engine's defaults on first use)."""
-    with _db() as conn:
-        row = conn.execute("SELECT * FROM engine_settings WHERE id = 1").fetchone()
+def get_engine_settings(*, conn: sqlite3.Connection | None = None) -> dict:
+    """The current effective settings (seeded from weight_engine's defaults on first use). Pass *conn* to read inside
+    the caller's own transaction (it then sees that transaction's uncommitted changes)."""
+    if conn is not None:
+        return _row_to_dict(conn.execute("SELECT * FROM engine_settings WHERE id = 1").fetchone())
+    with _db() as c:
+        row = c.execute("SELECT * FROM engine_settings WHERE id = 1").fetchone()
     return _row_to_dict(row)
 
 
@@ -208,7 +220,8 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
                            apex_fallback_models: list[str] | None = None,
                            apex_challenger_model=_UNSET,
                            apex_challenger_sample_pct: float | None = None,
-                           instrument_type_horizons: dict | None = None) -> dict:
+                           instrument_type_horizons: dict | None = None,
+                           conn: sqlite3.Connection | None = None) -> dict:
     """
     Update one or more settings groups. Every weight dict is validated (exactly
     the five sources, non-negative) and normalized to sum to 1.0 so an admin's
@@ -216,6 +229,10 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
     apex_dual_run.APEX_MODELS; apex_challenger_model=None turns the challenger
     off; apex_challenger_sample_pct is a percentage 0–100. Raises ValueError on
     bad input, VersionConflict-style RuntimeError if expected_version is stale.
+
+    conn: join the caller's transaction (nothing is committed here, so a settings change and its audit event can land
+    together). The caller must have touched the engine-settings table once beforehand (get_engine_settings()) so its
+    schema exists — creating it from inside someone else's write transaction would block.
     """
     fields: dict = {}
     if base_weights is not None:
@@ -251,10 +268,10 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
             raise ValueError(f"apex_challenger_sample_pct must be between 0 and 100, got {apex_challenger_sample_pct}")
         fields["apex_challenger_sample_pct"] = float(apex_challenger_sample_pct)
     if instrument_type_horizons is not None:
-        merged = {**get_engine_settings()["instrument_type_horizons"], **_validate_horizons(instrument_type_horizons)}
+        merged = {**get_engine_settings(conn=conn)["instrument_type_horizons"], **_validate_horizons(instrument_type_horizons)}
         fields["instrument_type_horizons_json"] = json.dumps(merged)
     if not fields:
-        return get_engine_settings()
+        return get_engine_settings(conn=conn)
 
     fields["updated_at"] = _now()
     fields["updated_by"] = updated_by
@@ -265,9 +282,14 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
     if expected_version is not None:
         sql += " AND version = ?"
         params.append(expected_version)
-    with _db() as conn:
+    if conn is not None:
         n = conn.execute(sql, params).rowcount
-        conn.commit()       # db_conn() never commits on exit; without this every update was silently rolled back
+        if n == 0 and expected_version is not None:
+            raise RuntimeError("engine settings changed since you loaded them; reload and retry")
+        return get_engine_settings(conn=conn)
+    with _db() as c:
+        n = c.execute(sql, params).rowcount
+        c.commit()          # db_conn() never commits on exit; without this every update was silently rolled back
     if n == 0 and expected_version is not None:
         raise RuntimeError("engine settings changed since you loaded them; reload and retry")
     return get_engine_settings()

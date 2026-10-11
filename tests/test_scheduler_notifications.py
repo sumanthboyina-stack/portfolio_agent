@@ -15,8 +15,8 @@ WHAT THIS PHASE BUILT / FIXED
    (owner_scope, dedup_key, channel), so the same event/decision is never
    delivered twice to the same recipient on the same channel even if the
    detector runs again (morning self-heal, an intraday re-run, etc).
-3. events.detector._maybe_notify / _emit — now dedup-gated via
-   notification_log_db, and enriched with the ticker's current private
+3. events.detector._maybe_notify / _emit — dedup-gated (since the notifications task: per owner, through the notification
+   outbox; originally via notification_log_db), and enriched with the ticker's current private
    ActionPermission (tools.clearance) purely as informational content on
    the notification — NEVER used to suppress delivery. This is the direct
    expression of "a blackout must not disable monitoring existing holdings":
@@ -181,84 +181,88 @@ def test_event_already_processed_helper_is_scope_and_ticker_specific():
 
 
 # ── Notification dedup by recipient/event/channel; snapshots and alerts stay private ──
+# (Rewritten in the notifications task: events now fan out per OWNER through notification_service.notify into the outbox,
+#  where the dedup is (owner, event id, channel). The intent of each test is unchanged.)
 
-def _enable_notifications(monkeypatch):
-    from portfolio_agent.tools.user_notifications_db import update_user_notifications
-    update_user_notifications(channel="email", min_severity_threshold=3,
-                              quiet_hours_start=None, quiet_hours_end=None)
+def _world():
+    """LOCAL_OWNER holds AAPL and has a verified email contact with email switched on globally."""
+    from portfolio_agent.domain import LOCAL_OWNER
+    from portfolio_agent.services import account_service, notification_service as ns
+    from portfolio_agent.services.context import local_context
+    from portfolio_agent.tools import auth_users_db, notification_settings_db as nsdb
+    ctx = local_context("test")
+    auth_users_db.invite_user("owner@example.com", LOCAL_OWNER, "member")
+    nsdb.update_notification_settings(updated_by="t", email_from_address="apex@example.com", max_messages_per_user_per_hour=1000)
+    ns.ensure_contacts(ctx)
+    acct = account_service.create_account(ctx, broker="manual", display_name="b", account_type="TAXABLE")
+    account_service.add_position(ctx, acct["account_id"], {"ticker": "AAPL", "shares": 1, "current_price": 100.0})
+    return ctx
+
+
+def _outbox(**where):
+    import sqlite3
+    with sqlite3.connect(str(db_module.DB_PATH)) as c:
+        c.row_factory = sqlite3.Row
+        sql = "SELECT * FROM notification_outbox" + (" WHERE " + " AND ".join(f"{k} = ?" for k in where) if where else "") + " ORDER BY id"
+        try:
+            return [dict(r) for r in c.execute(sql, list(where.values()))]
+        except sqlite3.OperationalError:
+            return []
 
 
 def test_notification_delivery_is_deduplicated_by_event_and_channel(monkeypatch):
     from portfolio_agent.events import detector
-    _enable_notifications(monkeypatch)
-    emitted = []
-    monkeypatch.setattr(detector, "_emit", lambda ch, ev: emitted.append((ch, ev["ticker"])))
+    _world()
     event = {"id": 77, "ticker": "AAPL", "event_type": "material_news", "severity": 4, "summary": "x"}
 
     assert detector._maybe_notify(event) is True
-    assert detector._maybe_notify(event) is False   # same event id, same channel -- not redelivered
-    assert len(emitted) == 1
+    assert detector._maybe_notify(event) is False   # same event id, same owner, same channel -- not queued again
+    rows = _outbox(dedup_key="event:77")
+    assert [(r["channel"], r["category"]) for r in rows] == [("EMAIL", "MARKET_EVENT")]
 
 
 def test_a_different_event_id_for_the_same_ticker_still_delivers(monkeypatch):
     from portfolio_agent.events import detector
-    _enable_notifications(monkeypatch)
-    emitted = []
-    monkeypatch.setattr(detector, "_emit", lambda ch, ev: emitted.append((ch, ev["ticker"])))
+    _world()
 
     assert detector._maybe_notify({"id": 1, "ticker": "AAPL", "event_type": "material_news",
                                    "severity": 4, "summary": "x"}) is True
     assert detector._maybe_notify({"id": 2, "ticker": "AAPL", "event_type": "material_news",
                                    "severity": 4, "summary": "y"}) is True
-    assert len(emitted) == 2
+    assert {r["dedup_key"] for r in _outbox()} == {"event:1", "event:2"}
 
 
 def test_notification_log_is_private_and_never_touches_shared_prediction_tables(monkeypatch):
-    from portfolio_agent.events import detector
-    from portfolio_agent.tools.notification_log_db import was_delivered
-    _enable_notifications(monkeypatch)
-    monkeypatch.setattr(detector, "_emit", lambda ch, ev: None)
-    detector._maybe_notify({"id": 5, "ticker": "AAPL", "event_type": "material_news",
-                            "severity": 4, "summary": "x"})
-
     from portfolio_agent.domain import LOCAL_OWNER
-    assert was_delivered(f"user:{LOCAL_OWNER}", "event:5", "email") is True
-    assert was_delivered("user:someone-else", "event:5", "email") is False   # scoped, not global
+    from portfolio_agent.events import detector
+    from portfolio_agent.services import notification_senders as snd, notification_worker as worker
+    from portfolio_agent.tools.notification_log_db import was_delivered
+    _world()
+    detector._maybe_notify({"id": 5, "ticker": "AAPL", "event_type": "material_news", "severity": 4, "summary": "x"})
+    assert {r["owner"] for r in _outbox()} == {LOCAL_OWNER}                       # queued for the owner who holds it, nobody else
+    worker.run_once(registry={"EMAIL": snd.FakeSender("EMAIL")})                  # once SENT, the legacy delivery record is written too
+    assert was_delivered(f"user:{LOCAL_OWNER}", "event:5", "EMAIL") is True
+    assert was_delivered("user:someone-else", "event:5", "EMAIL") is False   # scoped, not global
     assert pdb.get_prediction_history("AAPL", scopes=pdb.SHARED_SCOPES) == []   # a notification never writes a forecast
 
 
-def test_unevaluatable_action_permission_still_notifies_monitoring_is_not_disabled(monkeypatch):
+def test_a_restricted_or_unevaluatable_action_permission_still_notifies_monitoring_is_not_disabled(monkeypatch):
     """
-    The core 'a non-ALLOWED action permission must not disable monitoring'
-    proof: the notification still fires, it's just annotated. events/
-    detector.py's _action_permission_note() calls evaluate_clearance() with
-    no owner_scope (it isn't threaded with a RequestContext — a separate,
-    deferred finding: notifications need a per-user scheduler loop, not just
-    a query filter). restricted_list is personal-only with no shared/global
-    scope now, so a restricted-list check with no owner can never be answered
-    and this caller always gets UNKNOWN here (never silently "not restricted"
-    — see test_no_owner_scope_makes_the_restricted_list_check_unknown_not_skipped
-    in test_clearance_gate.py) — proving the annotation doesn't gate delivery
-    holds regardless of which non-ALLOWED status it is.
+    The core 'a non-ALLOWED action permission must not disable monitoring' proof: the notification is still queued, it is
+    just annotated. The permission is now evaluated for the OWNER being notified (their own restricted list, approvals and
+    profile) — the old version evaluated no owner at all and always got UNKNOWN. A restricted ticker is the clearest case:
+    the event still reaches the person who holds it, and says plainly that no new trade is currently permitted.
     """
-    _enable_notifications(monkeypatch)
-
-    import logging
+    from portfolio_agent.domain import LOCAL_OWNER
     from portfolio_agent.events import detector
-    records = []
-    handler = logging.Handler()
-    handler.emit = records.append
-    logger = logging.getLogger("portfolio_agent.events.detector")
-    logger.addHandler(handler)
+    from portfolio_agent.tools.restricted_list_db import add_restricted
+    _world()
+    add_restricted("AAPL", "pending M&A", LOCAL_OWNER)
     event = {"id": 9, "ticker": "AAPL", "event_type": "material_news", "severity": 4, "summary": "big news"}
 
-    try:
-        delivered = detector._maybe_notify(event)
-    finally:
-        logger.removeHandler(handler)
-    logged = [r.getMessage() for r in records]
-    assert delivered is True   # NOT suppressed by the non-ALLOWED status
-    assert any("UNKNOWN" in m for m in logged)   # but it is noted
+    assert detector._maybe_notify(event) is True   # NOT suppressed by the non-ALLOWED status
+    [row] = _outbox(dedup_key="event:9")
+    assert "BLOCKED: no new trade currently permitted" in row["body_brief"]   # but it is noted
 
 
 # ── Missed-morning recovery is deduplicated ───────────────────────────────────

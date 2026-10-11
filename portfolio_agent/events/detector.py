@@ -14,25 +14,20 @@ Detectors:
 
 run_all_detectors(tickers, today, config) — convenience wrapper.
 
-Notifications: every detected event is also offered to _maybe_notify(), which
-applies the user's personal filter (user_notifications: channel, min severity,
-min conviction, quiet hours) via scheduler.should_notify_trigger. The pipeline
-run triggered by the event is unaffected by that filter — only whether a
-notification is emitted.
+Notifications: every detected event is offered to _maybe_notify(), which fans it out to EVERY owner who holds the ticker
+(real, non-paper accounts) or watches it. Each owner is judged by their own settings — notification routing, minimum severity,
+quiet hours in their own timezone, content level — through services.notification_service.notify, which only ENQUEUES; the
+delivery worker sends. The pipeline run triggered by the event is unaffected by any of this.
 
-Delivery is private and deduplicated (tools.notification_log_db) by
-(owner, this exact event, channel) — a detector re-run (self-healed missed
-morning, an intraday re-scan that rediscovers the same trigger_events row)
-never re-delivers the same notification. Delivery is enriched with the
-ticker's current private ActionPermission (tools.clearance) as INFORMATION
-ONLY — never as a filter: a blacked-out or restricted-list ticker's event
-still notifies if the user holds it or is watching it, because monitoring an
-existing position is not the same thing as being allowed to trade it (a
-blackout must not disable monitoring). The enrichment just says plainly
-that no new trade is currently permitted, alongside the event itself.
+De-duplication is per owner, per event id (dedup key event:<trigger_event_id>) and per channel, enforced by the notification
+outbox, so a detector re-run (self-healed missed morning, an intraday re-scan that rediscovers the same trigger_events row)
+never queues the same notification twice. Each notification is enriched with THAT owner's private ActionPermission
+(tools.clearance) as INFORMATION ONLY — never as a filter: a blacked-out or restricted-list ticker's event still notifies if
+the owner holds it or is watching it, because monitoring an existing position is not the same thing as being allowed to
+trade it. The text just says plainly that no new trade is currently permitted, alongside the event itself.
 
-Delivery is a structured "notification" log record carrying the channel —
-the single hook where a real email/slack sender attaches (_emit()).
+The brief text (always used for push) has no amounts, position sizes or portfolio values. Notification text is informational
+and never a trade instruction.
 """
 
 from __future__ import annotations
@@ -42,17 +37,33 @@ from portfolio_agent.log import get_logger as _get_logger
 _log = _get_logger("events.detector")
 
 
-def _action_permission_note(ticker: str) -> str:
-    """Best-effort, informational only — never gates delivery (see module docstring)."""
+def _affected_owners(ticker: str) -> dict[str, set[str]]:
+    """{owner: {"hold" and/or "watch"}} — everyone who HOLDS the ticker in a real (non-paper) account or WATCHES it.
+    Nobody else is ever told: an event on a ticker you neither own nor watch is not yours to hear about."""
+    from portfolio_agent.tools.holdings_db import list_owners_holding
+    from portfolio_agent.tools.watchlist_db import list_owners_watching
+    owners: dict[str, set[str]] = {}
+    for kind, getter in (("hold", list_owners_holding), ("watch", list_owners_watching)):
+        try:
+            for owner in getter(ticker):
+                owners.setdefault(owner, set()).add(kind)
+        except Exception as exc:
+            _log.warning(f"  [notify] could not list who {kind}s {ticker}: {type(exc).__name__}", event_type="warning")
+    return owners
+
+
+def _action_permission_note(ticker: str, owner: str | None = None) -> str:
+    """Best-effort, informational only — never gates delivery (see module docstring). Evaluated for THIS owner: their own
+    restricted list, approvals and profile (the old version evaluated the local owner's for everyone)."""
     try:
         from portfolio_agent.clearance import evaluate_clearance
         from portfolio_agent.domain import UserProfile
-        from portfolio_agent.tools.user_profile_db import get_user_profile
+        from portfolio_agent.tools.user_profile_db import get_user_profile, get_user_profile_by_owner
         try:
-            profile = get_user_profile()
+            profile = get_user_profile_by_owner(owner) if owner else get_user_profile()
         except Exception:
             profile = UserProfile()
-        decision = evaluate_clearance(ticker, profile)
+        decision = evaluate_clearance(ticker, profile, owner_scope=f"user:{owner}" if owner else None)
         if decision.decision == "ALLOWED_BY_RULES":
             return ""
         return f" [{decision.decision}: no new trade currently permitted]"
@@ -60,61 +71,47 @@ def _action_permission_note(ticker: str) -> str:
         return ""   # never let enrichment break delivery
 
 
-def _emit(channel: str, event: dict) -> None:
-    """Deliver one notification. Currently a structured log record tagged with
-    the channel — the single hook where a real email/slack sender attaches."""
-    summary = (event.get("summary") or "")[:120]
-    note = _action_permission_note(event["ticker"])
+def _emit(owner: str, event: dict, note: str = "", relation: set[str] | None = None) -> dict:
+    """Deliver one notification to ONE owner: write the structured log record (as before) and hand the message to
+    notification_service.notify, which applies that person's own filters and routing and enqueues it for the delivery worker.
+    The brief text carries no amounts or position sizes (it may sit on a lock screen); the detailed text, for email, adds the
+    event's summary. Never raises."""
+    from portfolio_agent.services.notification_service import notify
+    ticker, severity = event["ticker"], event.get("severity")
+    summary = (event.get("summary") or "")[:300]
+    label = str(event["event_type"]).replace("_", " ")
     _log.info(
-        f"  [notify:{channel}] {event['ticker']} {event['event_type']} "
-        f"severity={event.get('severity')}: {summary}{note}",
-        event_type="notification", channel=channel,
-        ticker=event["ticker"], trigger_event_id=event.get("id"),
+        f"  [notify] {ticker} {event['event_type']} severity={severity}: {summary[:120]}{note}",
+        event_type="notification", ticker=ticker, trigger_event_id=event.get("id"),
     )
+    brief = f"APEX: {ticker} - {label} (severity {severity}).{note} Open APEX for details."
+    why = " and ".join(sorted({"hold": "you hold it", "watch": "you watch it"}[k] for k in (relation or set()) if k in ("hold", "watch")))
+    detailed = f"{brief}\n\n{summary}" + (f"\n\nYou are getting this because {why}." if why else "")
+    return notify(owner, "MARKET_EVENT", dedup_key=f"event:{event['id']}", title=f"APEX: {ticker} - {label}", brief=brief,
+                  detailed=detailed, severity=severity, link="/Predictions")
 
 
 def _maybe_notify(event: dict) -> bool:
     """
-    Personal notification filter for one detected event. Returns True when a
-    notification was emitted. Never raises — a failure here must not stop the
-    detector from returning its events to the pipeline.
+    Offer one detected event to every owner who holds or watches its ticker. Each owner's own preferences, routing,
+    quiet hours and per-event dedup (event:<trigger_event_id>) apply — nothing is shared between owners, and a ticker nobody
+    holds or watches notifies nobody. Returns True when at least one notification was enqueued. Never raises: a failure
+    here must not stop the detector from returning its events to the pipeline.
     """
-    from portfolio_agent.events.scheduler import should_notify_trigger
+    if event.get("id") is None:
+        return False
     try:
-        ok, detail = should_notify_trigger(
-            f"event_{event['event_type']}",
-            severity=event.get("severity"),
-            conviction=event.get("conviction"),
-        )
+        enqueued = False
+        for owner, relation in _affected_owners(event["ticker"]).items():
+            try:
+                result = _emit(owner, event, _action_permission_note(event["ticker"], owner), relation)
+                enqueued = enqueued or bool(result.get("enqueued"))
+            except Exception as exc:
+                _log.warning(f"  [notify] event {event.get('id')} not offered to one owner ({type(exc).__name__})", event_type="warning")
+        return enqueued
     except Exception as exc:
-        _log.warning(f"  [notify] filter failed for {event.get('ticker')}: {exc}",
-                     event_type="warning")
+        _log.warning(f"  [notify] event {event.get('id')} not offered ({type(exc).__name__})", event_type="warning")
         return False
-    if not ok:
-        _log.info(f"  [notify] {event['ticker']} suppressed — {detail}",
-                  event_type="notification_suppressed", ticker=event["ticker"])
-        return False
-
-    channel = detail
-    event_id = event.get("id")
-    if event_id is not None:
-        from portfolio_agent.services.context import system_context
-        from portfolio_agent.tools.notification_log_db import record_if_new
-        owner_scope = f"user:{system_context('events.detector').actor}"
-        dedup_key = f"event:{event_id}"
-        try:
-            is_new = record_if_new(owner_scope, dedup_key, channel)
-        except Exception as exc:
-            _log.warning(f"  [notify] dedup check failed for {event['ticker']}: {exc} — delivering anyway",
-                         event_type="warning")
-            is_new = True
-        if not is_new:
-            _log.info(f"  [notify] {event['ticker']} already delivered — {dedup_key}/{channel}",
-                      event_type="notification_suppressed", ticker=event["ticker"])
-            return False
-
-    _emit(channel, event)
-    return True
 
 
 def detect_material_news(

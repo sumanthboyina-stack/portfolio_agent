@@ -197,15 +197,6 @@ def _result(rec: str, label: str, role: str, horizons=(5, 21)) -> ModelResult:
 
 
 def _patch_pipeline(monkeypatch, *, champion: ModelResult, challenger=None):
-    # The pipeline builds contexts in parallel threads and each calls effective_settings(), whose connection setup
-    # (create/migrate/seed) races on a brand-new test DB — and a failed setup leaves a connection holding the write
-    # lock. Production's table already exists; here, resolve the settings once, serially, and serve them from memory.
-    from portfolio_agent.tools import engine_settings_db as _esdb, weight_engine as _we
-    _settings = _esdb.get_engine_settings()
-    pdb.get_today_horizons("WARMUP", "2000-01-01")       # prediction_db's create/migrate setup runs on EVERY connection (an UPDATE
-    monkeypatch.setattr(pdb, "_migrate", lambda conn: None)   # takes the write lock): run it once, serially, then not in the threads
-    monkeypatch.setattr(pdb, "_create_schema", lambda conn: None)
-    monkeypatch.setattr(_we, "effective_settings", lambda: _settings)
     monkeypatch.setattr(market_context_mod, "default_loaders", _fake_loaders)
     monkeypatch.setattr(rt_mod, "get_macro_snapshot", lambda: '{"vix": 20.0}')
     monkeypatch.setattr(pdb, "is_trading_day", lambda d: True)

@@ -2,7 +2,8 @@
 Structural checks for the web login gate — the properties B4/B5 depend on
 that a unit test of any one function can't see:
 
-  - every page calls require_login() before touching portfolio_agent data
+  - every page calls require_login() before touching portfolio_agent data — except the ONE public page, the email Unsubscribe
+    link, whose signed token is its authentication (see PUBLIC_PAGES and test_the_only_public_page_...)
   - nothing under web/ still uses the pre-auth local_context() path
   - portfolio_agent/ stays Streamlit-free (auth lives in web/ only)
   - identity_from_verified_login() is reachable only from web/auth.py
@@ -16,6 +17,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGES = [ROOT / "web" / "app.py"] + sorted((ROOT / "web" / "pages").glob("*.py"))
+
+# The ONLY pages reachable without signing in. The Unsubscribe landing page of the link at the bottom of every APEX email: a
+# person must be able to stop emails without logging in, and the signed token in the link is what proves who may stop which
+# address. It is held to a much stricter rule below than "calls require_login()".
+PUBLIC_PAGES = {"14_✉️_Unsubscribe.py"}
+LOGIN_PAGES = [p for p in PAGES if p.name not in PUBLIC_PAGES]
 
 
 def _imported_names(tree: ast.Module, module_prefix: str) -> set[str]:
@@ -52,7 +59,7 @@ def _calls_before(node: ast.AST, names: set[str], found: list[str]) -> None:
         _calls_before(child, names, found)
 
 
-@pytest.mark.parametrize("path", PAGES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", LOGIN_PAGES, ids=lambda p: p.name)
 def test_page_calls_require_login_before_any_portfolio_agent_call(path):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     pa_names = _imported_names(tree, "portfolio_agent")
@@ -66,6 +73,20 @@ def test_page_calls_require_login_before_any_portfolio_agent_call(path):
     assert not found, (
         f"{path.relative_to(ROOT)} calls {found} from portfolio_agent before require_login()"
     )
+
+
+def test_the_only_public_page_is_the_unsubscribe_link_and_it_can_do_nothing_else():
+    """A page without a login gate must be tiny and inert: it may import exactly one thing from portfolio_agent — the function
+    that verifies a signed token and opts that ONE contact out — and must never ask who is signed in or render the nav."""
+    assert {p.name for p in PAGES if p.name in PUBLIC_PAGES} == PUBLIC_PAGES            # the allow-list names a real page
+    for path in PAGES:
+        if path.name not in PUBLIC_PAGES:
+            continue
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        assert _imported_names(tree, "portfolio_agent") == {"unsubscribe_with_token"}, path.name
+        for forbidden in ("current_context", "current_user", "require_login", "top_nav", "get_", "local_context"):
+            assert forbidden not in src, f"{path.name} must not use {forbidden}"
 
 
 def test_no_file_under_web_calls_local_context():

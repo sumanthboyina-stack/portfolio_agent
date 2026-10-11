@@ -34,7 +34,15 @@ def db_conn(path: Path | None = None, *, setup: Callable[[sqlite3.Connection], N
     conn = sqlite3.connect(str(p), timeout=10)
     conn.row_factory = sqlite3.Row
     if setup:
-        setup(conn)
+        try:
+            setup(conn)
+        except BaseException:
+            # A failed setup must not leave this connection open holding a write lock for every other thread.
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+            raise
     try:
         yield conn
     finally:

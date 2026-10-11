@@ -25,6 +25,7 @@ python-dotenv==1.2.2
 # Web dashboard
 streamlit>=1.42.0
 Authlib>=1.3.2
+segno>=1.6          # QR code for the phone-push topic (pure Python)
 plotly>=5.0.0
 
 # Tests

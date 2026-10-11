@@ -1,5 +1,5 @@
 """
-Health service — the single writer of Portfolio Health snapshots and the sender of "new ACTION item" notifications.
+Health service — the single writer of Portfolio Health snapshots and the producer of "new ACTION item" notifications.
 
   get_health_view(ctx)            the actor's PortfolioHealth plus what changed since the last snapshot and since ~30 days
                                   ago. Takes today's snapshot lazily (first view of the day), so the page, the home card
@@ -11,11 +11,12 @@ Each snapshot is one transaction with its audit event (written once per day; a s
 row without a new audit event). Snapshots are skipped, with a clear status, when the global setting
 health_snapshot_enabled is off — the page still shows the live health.
 
-Notifications: a check that BECOMES ACTION (it was not ACTION in the previous snapshot) notifies once per run of ACTION:
-the de-duplication key is health:<check>:<date the run began>, so an ongoing problem does not re-notify every day and a
-new one after it clears does. Only ACTION notifies — never WATCH — at severity 4, through the person's own notification
-preferences (channel, minimum severity, quiet hours); a suppressed one is not recorded, so it is retried at the next
-snapshot. Delivery is the existing structured log hook; this module sends nothing itself.
+Notifications: a check that BECOMES ACTION (it was not ACTION in the previous snapshot) notifies once per run of ACTION
+(on the household, or on a single account):
+the de-duplication key is health:<check>:<date the run began> (health:<scope>:<check>:<date> for an account), so an ongoing problem does not re-notify every day and a
+new one after it clears does. Only ACTION notifies — never WATCH — at severity 4, through notification_service.notify: the
+person's own routing, minimum severity, quiet hours and content level decide how it goes out (a quiet-hours message is held
+or dropped as they chose). This module only enqueues; the delivery worker sends.
 """
 from __future__ import annotations
 
@@ -59,30 +60,37 @@ def _snapshot_for_owner(owner: str, portfolio: dict, *, actor: str, source: str,
 
 
 def _notify_new_actions(owner: str, health: ph.PortfolioHealth, today: date) -> list[str]:
-    """Notify (once per run) for each household check that is ACTION now. Never raises."""
+    """Notify (once per run) for each household or single-account check that is ACTION now, through
+    notification_service.notify (category PORTFOLIO_HEALTH): the person's own routing, severity, quiet hours and content level
+    decide whether and how it goes out, and the outbox de-duplicates. Returns the dedup keys that were ENQUEUED on at least one
+    channel. Never raises. (Tax-treatment slices are not notified separately: they are the same accounts grouped.)
+
+    The brief text — always used for push — names the check and nothing else: no amounts, no account names. The detailed
+    text, for email only and only if the person chose DETAILED, adds the full summary."""
     try:
-        from portfolio_agent.tools.notification_log_db import record_if_new
-        from portfolio_agent.tools.user_notifications_db import get_user_notifications_by_owner, should_notify
-        actions = [c for c in health.household.checks if c.status == HealthStatus.ACTION.value]
+        from portfolio_agent.services.notification_service import notify
+        scopes = [health.household, *health.by_account.values()]
+        actions = [(sc, c) for sc in scopes for c in sc.checks if c.status == HealthStatus.ACTION.value]
         if not actions:
             return []
         history = sdb.list_recent(owner, 90)
-        prefs = get_user_notifications_by_owner(owner)
         sent = []
-        for c in actions:
-            start = sdb.action_streak_start(history, c.key, today.isoformat(), c.status)
-            key = f"health:{c.key}:{start}"
-            ok, detail = should_notify(severity=ACTION_NOTIFICATION_SEVERITY, prefs=prefs)
-            if not ok:
-                _log.info(f"  [health-notify] {c.key} not sent — {detail}", event_type="notification_suppressed")
-                continue
-            if record_if_new(f"user:{owner}", key, detail):
-                _log.info(f"  [notify:{detail}] Portfolio Health ACTION — {c.title}: {c.summary[:140]}",
-                          event_type="notification", channel=detail, dedup_key=key)
+        for sc, c in actions:
+            start = sdb.action_streak_start(history, c.key, today.isoformat(), c.status, scope=sc.scope)
+            # household keys keep their original shape; an account's carries its scope so two accounts never collide
+            key = f"health:{c.key}:{start}" if sc.scope == "household" else f"health:{sc.scope}:{c.key}:{start}"
+            where = "" if sc.scope == "household" else " in one of your accounts"
+            result = notify(owner, "PORTFOLIO_HEALTH", dedup_key=key, title=f"APEX: Portfolio Health - {c.title}",
+                            brief=f"APEX: Portfolio Health - {c.title} needs attention{where}. Open APEX for details.",
+                            detailed=f"{c.title}{'' if sc.scope == 'household' else f' ({sc.label})'}: {c.summary}",
+                            severity=ACTION_NOTIFICATION_SEVERITY, link="/Portfolio_Health")
+            if result.get("enqueued"):
                 sent.append(key)
+                _log.info(f"  [notify] Portfolio Health ACTION — {c.title} ({'household' if sc.scope == 'household' else 'account'})",
+                          event_type="notification", dedup_key=key)
         return sent
     except Exception as exc:
-        _log.warning(f"  [health-notify] skipped ({type(exc).__name__}: {exc})", event_type="warning")
+        _log.warning(f"  [health-notify] skipped ({type(exc).__name__})", event_type="warning")
         return []
 
 

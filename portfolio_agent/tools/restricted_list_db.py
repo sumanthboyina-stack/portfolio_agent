@@ -196,19 +196,34 @@ def add_restricted(ticker: str, reason: str | None, owner: str) -> None:
     _require_owner(owner)
     now = datetime.now(timezone.utc).isoformat()
     with _db() as conn:
+        existed = conn.execute("SELECT 1 FROM restricted_list WHERE ticker = ? AND owner = ?", (ticker.upper(), owner)).fetchone() is not None
         conn.execute(
             "INSERT INTO restricted_list (ticker, reason, added_at, owner) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(owner, ticker) DO UPDATE SET reason = excluded.reason",
             (ticker.upper(), reason, now, owner),
         )
         conn.commit()
+    if not existed:                                   # only a NEW restriction is news (changing a reason is not)
+        _notify_change(owner, ticker, True, reason)
 
 
 def remove_restricted(ticker: str, owner: str) -> None:
     _require_owner(owner)
     with _db() as conn:
-        conn.execute("DELETE FROM restricted_list WHERE ticker = ? AND owner = ?", (ticker.upper(), owner))
+        n = conn.execute("DELETE FROM restricted_list WHERE ticker = ? AND owner = ?", (ticker.upper(), owner)).rowcount
         conn.commit()
+    if n:
+        _notify_change(owner, ticker, False, None)
+
+
+def _notify_change(owner: str, ticker: str, added: bool, reason: str | None) -> None:
+    """Tell the owner their restricted list changed for a ticker they hold (best effort, AFTER the commit; it can never undo
+    or block the change). See services.compliance_notifications."""
+    try:
+        from portfolio_agent.services.compliance_notifications import notify_restricted_change
+        notify_restricted_change(owner, ticker, added, reason)
+    except Exception:
+        pass
 
 
 def list_restricted_for(ctx) -> list[dict]:

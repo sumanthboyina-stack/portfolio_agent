@@ -124,6 +124,15 @@ def get_pending_events(today: str, min_severity: int = 1) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_events_since(since_iso: str, min_severity: int = 1) -> list[dict]:
+    """Events detected at or after *since_iso* (ISO datetime), newest severity first. Market data, no owner."""
+    with _db() as c:
+        rows = c.execute(
+            """SELECT * FROM trigger_events WHERE detected_at >= ? AND severity >= ? ORDER BY severity DESC, id ASC""",
+            [since_iso, min_severity]).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_events_for_ticker(ticker: str, today: str, min_severity: int = 1) -> list[dict]:
     """Return all events for a specific ticker today with severity >= min_severity."""
     with _db() as c:

@@ -10,7 +10,7 @@ portfolio_agent.tools.user_notifications_db) and edited through one form.
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -24,14 +24,13 @@ from web.styles import (
     inject_global_css, page_header, section_title, top_nav, material, card, badge_html,
     PRIMARY, SUCCESS, WARNING, NEUTRAL, SUCCESS_LIGHT, WARNING_LIGHT,
 )
-from portfolio_agent.domain import ALL_HORIZON_LABELS, NOTIFICATION_CHANNELS
+from portfolio_agent.domain import ALL_HORIZON_LABELS
 from portfolio_agent.tools.user_profile_db import get_user_profile_for, update_user_profile_for
-from portfolio_agent.tools.user_notifications_db import (
-    get_user_notifications_for, update_user_notifications_for,
-)
 
 from portfolio_agent.tools.portfolio_policy import get_effective_policy
 from web.components.investor_profile import render_investor_admin, render_investor_profile
+from web.components.notifications import render_notifications, render_notifications_admin
+from web.data import notifications as notif_data
 from web.auth import current_context, current_user, require_login
 
 st.set_page_config(
@@ -59,7 +58,7 @@ if flash := st.session_state.pop("profile_flash", None):
 
 _ctx = current_context("web:profile")
 profile = get_user_profile_for(_ctx)
-notif = get_user_notifications_for(_ctx)
+_nview = notif_data.load_user_view(_ctx)          # contacts, routing, preferences, recent notifications (the actor's own)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -78,16 +77,6 @@ def _parse_date(raw: str | None) -> date | None:
         return None
     try:
         return date.fromisoformat(str(raw)[:10])
-    except ValueError:
-        return None
-
-
-def _parse_time(raw: str | None) -> time | None:
-    if not raw:
-        return None
-    try:
-        hh, mm = str(raw).split(":")[:2]
-        return time(int(hh), int(mm))
     except ValueError:
         return None
 
@@ -124,12 +113,6 @@ def _validate(v: dict) -> list[str]:
         errors.append("Blackout start must be on or before blackout end.")
     if not v["preferred_horizons"]:
         errors.append("Select at least one prediction horizon.")
-    if bool(v["quiet_start"]) != bool(v["quiet_end"]):
-        errors.append("Quiet hours need both a start and an end time (or neither).")
-    if not (1 <= int(v["min_severity"]) <= 5):
-        errors.append("Minimum severity must be between 1 and 5.")
-    if v["use_conviction"] and not (0 <= int(v["min_conviction"]) <= 10):
-        errors.append("Minimum conviction must be between 0 and 10.")
     return errors
 
 
@@ -156,7 +139,7 @@ with c2:
 with c3:
     card(
         f'<div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6B7280">Notifications</div>'
-        f'<div style="margin-top:6px;font-size:0.9rem">{notif.channel} · severity ≥ {notif.min_severity_threshold}</div>',
+        f'<div style="margin-top:6px;font-size:0.9rem">{notif_data.summary_line(_nview)}</div>',
     )
 with c4:
     card(
@@ -251,33 +234,6 @@ with st.form("profile_form"):
                     help=f"Accepted: {_fmt_ts(profile.disclaimer_accepted_at)}",
                 )
 
-            # Notifications
-    _tile_4 = section_tile("Notifications", badge_text="personal filter on event alerts", expanded=False, key="profile_4", native=True)
-    if _tile_4:
-        with _tile_4:
-            st.caption(
-                "The pipeline still runs on every event that clears the global severity floor; these settings "
-                "only decide whether you are told about it."
-            )
-            n1, n2, n3, n4 = st.columns([1.5, 1.5, 1.2, 1.5])
-            channel = n1.selectbox(
-                "Channel", options=list(NOTIFICATION_CHANNELS),
-                index=list(NOTIFICATION_CHANNELS).index(notif.channel) if notif.channel in NOTIFICATION_CHANNELS else 0,
-                help="'none' silences all notifications.",
-            )
-            min_severity = n2.number_input("Min severity (1–5)", min_value=1, max_value=5, step=1,
-                                           value=int(notif.min_severity_threshold))
-            use_conviction = n3.checkbox("Apply conviction floor", value=notif.min_conviction_threshold is not None)
-            min_conviction = n4.number_input(
-                "Min conviction (0–10)", min_value=0, max_value=10, step=1,
-                value=int(notif.min_conviction_threshold if notif.min_conviction_threshold is not None else 6),
-                help="Only enforced when a conviction is known (i.e. after a prediction) and the box is ticked.",
-            )
-            q1, q2, _ = st.columns([1.5, 1.5, 3])
-            quiet_start = q1.time_input("Quiet hours start", value=_parse_time(notif.quiet_hours_start), step=900)
-            quiet_end = q2.time_input("Quiet hours end", value=_parse_time(notif.quiet_hours_end), step=900,
-                                      help="A start later than the end spans midnight (e.g. 22:00 → 07:00).")
-
             # Horizons
     _tile_5 = section_tile("Prediction Horizons", badge_text="generation filter", expanded=False, key="profile_5", native=True)
     if _tile_5:
@@ -308,11 +264,6 @@ if submitted:
         "blackout_start": blackout_start,
         "blackout_end": blackout_end,
         "preferred_horizons": list(preferred_horizons),
-        "quiet_start": quiet_start,
-        "quiet_end": quiet_end,
-        "min_severity": int(min_severity),
-        "use_conviction": bool(use_conviction),
-        "min_conviction": int(min_conviction),
     }
     problems = _validate(values)
     if problems:
@@ -343,16 +294,11 @@ if submitted:
             disclaimer_accepted_at=disclaimer_at,
             preferred_horizons=values["preferred_horizons"],
         )
-        update_user_notifications_for(
-            _ctx,
-            channel=channel,
-            min_severity_threshold=values["min_severity"],
-            min_conviction_threshold=values["min_conviction"] if use_conviction else None,
-            quiet_hours_start=quiet_start.strftime("%H:%M") if quiet_start else None,
-            quiet_hours_end=quiet_end.strftime("%H:%M") if quiet_end else None,
-        )
         st.session_state["profile_flash"] = "Profile saved."
         st.rerun()
+
+# ── Notifications (own contacts, routing, preferences — saved by their own buttons, not by "Save profile") ──────────
+render_notifications(_ctx, _nview)
 
 # ── Admin: invited users ──────────────────────────────────────────────────────
 
@@ -362,6 +308,7 @@ if current_user().is_admin:
 
     st.divider()
     render_investor_admin(_ctx)
+    render_notifications_admin(_ctx)
     _tile_users = section_tile("Users", badge_text="admin", badge_color=PRIMARY, expanded=True, key="admin_users")
     if _tile_users:
         with _tile_users:

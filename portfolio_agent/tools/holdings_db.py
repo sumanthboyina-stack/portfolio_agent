@@ -491,6 +491,16 @@ def find_account(portfolio_id: int, broker: str, account_number: str, *,
     return dict(r) if r else None
 
 
+def list_owners_holding(ticker: str, *, conn: sqlite3.Connection | None = None) -> list[str]:
+    """Every owner who currently HOLDS *ticker* in a real (not paper, not archived) account. System-wide on purpose, for the
+    event-notification fan-out job only — a per-request caller already knows its own owner."""
+    with _db(conn) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT p.owner FROM holdings h JOIN portfolios p ON p.portfolio_id = h.portfolio_id WHERE h.ticker = ? ORDER BY p.owner",
+            [_norm_ticker(ticker)]).fetchall()
+    return [r["owner"] for r in rows]
+
+
 def list_portfolio_owners(*, conn: sqlite3.Connection | None = None) -> list[str]:
     """Every owner that has a portfolio. For system-wide batch jobs only (the evening health snapshots) — a per-request
     caller already knows its own owner."""

@@ -342,7 +342,7 @@ def _phase_badge(text: str) -> str:
 # invocation) — rendered as a single done/pending indicator, not a X/Y bar.
 _BINARY_PHASES = {
     "short_interest", "universe_screen", "price_backfill",
-    "l1_outcome", "l2_metrics", "calibration_outcome", "l3_snapshot", "l4_screener_outcomes",
+    "l1_outcome", "l2_metrics", "calibration_outcome", "l3_snapshot", "l4_screener_outcomes", "l5_health",
 }
 
 
@@ -364,6 +364,7 @@ def _new_phases_dict() -> dict[str, dict]:
         "calibration_outcome": dict(base),
         "l3_snapshot":     dict(base),
         "l4_screener_outcomes": dict(base),
+        "l5_health":       dict(base),
     }
 
 
@@ -570,6 +571,14 @@ def _parse_progress(log_text: str) -> dict:
             phases["l4_screener_outcomes"]["status"] = "running"
             if phases["l3_snapshot"]["status"] == "running":
                 phases["l3_snapshot"]["status"] = "done"
+        if re.search(r"── Layer 5: Portfolio Health Snapshots", line):
+            current = "l5_health"
+            phases["l5_health"]["status"] = "running"
+            if phases["l4_screener_outcomes"]["status"] == "running":
+                phases["l4_screener_outcomes"]["status"] = "done"
+        m = re.search(r"L5: (.+)", line)
+        if m:
+            phases["l5_health"].update(note=m.group(1)[:160], status="done", completed=1, total=1)
         m = re.search(r"L1: (\d+) evaluated\s+(\d+) data_missing\s+(\d+) errors", line)
         if m:
             phases["l1_outcome"].update(
@@ -676,7 +685,7 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         "daily":      _DAILY_PHASES,
         "morning":    _DAILY_PHASES,
         "intraday":   ["news", "research", "fundamentals", "apex", "price_backfill"],
-        "evening":    ["l1_outcome", "l2_metrics", "calibration_outcome", "l3_snapshot", "l4_screener_outcomes"],
+        "evening":    ["l1_outcome", "l2_metrics", "calibration_outcome", "l3_snapshot", "l4_screener_outcomes", "l5_health"],
         "validation": ["l1_outcome", "l2_metrics", "calibration_outcome"],
         "weekly":     [],
     }.get(job_type, _DAILY_PHASES)
@@ -717,6 +726,7 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
         "calibration_outcome": ("calculate",   "Score Calibration", "2.5 ·"),
         "l3_snapshot":     ("photo_camera",    "Portfolio Snapshot","3 ·"),
         "l4_screener_outcomes": ("query_stats", "Screener Outcomes", "4 ·"),
+        "l5_health":       ("monitor_heart",   "Portfolio Health",  "5 ·"),
     }
     STATUS_COLOR = {
         "pending":   "#475569",

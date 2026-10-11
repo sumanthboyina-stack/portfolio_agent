@@ -101,6 +101,21 @@ def load_watchlist_tickers_for(ctx) -> list[str]:
     return [r[0] for r in rows]
 
 
+def list_owners_watching(ticker: str) -> list[str]:
+    """Every owner who WATCHES *ticker*. System-wide on purpose, for the event-notification fan-out job only."""
+    with _db() as conn:
+        rows = conn.execute("SELECT DISTINCT owner FROM watchlist WHERE ticker = ? AND owner IS NOT NULL ORDER BY owner",
+                            (ticker.upper(),)).fetchall()
+    return [r[0] for r in rows]
+
+
+def list_tickers_by_owner(owner: str) -> list[str]:
+    """The tickers *owner* watches, by a raw owner string (server-side callers that already trust it, like the digest)."""
+    with _db() as conn:
+        rows = conn.execute("SELECT ticker FROM watchlist WHERE owner = ? ORDER BY ticker", (owner,)).fetchall()
+    return [r[0] for r in rows]
+
+
 def add_tickers(to_add: list[str], cap: int = 70) -> tuple[list[str], str | None]:
     """Add tickers to the watchlist (respecting cap). Returns (added, warning_or_none)."""
     to_add = [str(t).upper() for t in to_add]

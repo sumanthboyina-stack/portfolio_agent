@@ -8,13 +8,21 @@ an explicit update. Rebuilt from a former CHECK(id = 1) singleton shape by
 _migrate_owner_scoping() — see user_profile_db's identical rebuild for why.
 
 Columns:
-  channel                  'none' | 'email' | 'slack'   (default 'none' = no notifications)
+  channel                  'none' | 'email' | 'slack'   (default 'none') — DEPRECATED, kept readable. Delivery is decided by
+                           notification routing (tools.notification_routing_db); this column is only what routing was
+                           migrated FROM, and the legacy should_notify() below still honours it for old callers.
   min_severity_threshold   INTEGER, default 3 — mirrors config._DEFAULT_EVENT_DRIVEN
                            ["intraday_severity_threshold"]; the pipeline floor
                            still applies first, this is a second personal filter
   min_conviction_threshold INTEGER, nullable — only applied when a conviction is known
   quiet_hours_start/end    "HH:MM" in the profile's timezone, nullable;
                            start > end spans midnight (e.g. 22:00 → 07:00)
+  content_level            'BRIEF' | 'DETAILED' (default BRIEF). BRIEF carries no amounts, position sizes or portfolio
+                           values — safe on a lock screen. Email may be DETAILED; push is ALWAYS brief.
+  quiet_hours_mode         'DEFER' | 'SUPPRESS' (default DEFER: hold and send when quiet hours end)
+  digest_time              "HH:MM" in the profile's timezone (default 07:30) for the daily digest
+  routing_source           'LEGACY' (a row that existed before routing) -> 'MIGRATED' once its routing rows were created
+                           from the old channel; NULL for people added after routing existed (they get the defaults)
   created_at, updated_at
 
 should_notify(...) is the single decision function the event detector and
@@ -26,11 +34,12 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, time, timezone
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from portfolio_agent.domain import LOCAL_OWNER, NOTIFICATION_CHANNELS, UserNotificationPrefs
+from portfolio_agent.domain import CONTENT_LEVELS, LOCAL_OWNER, NOTIFICATION_CHANNELS, QUIET_MODES, UserNotificationPrefs
 from portfolio_agent.tools.db import db_conn, migrate_columns
 
 _UPDATABLE_FIELDS = frozenset({
@@ -39,6 +48,9 @@ _UPDATABLE_FIELDS = frozenset({
     "min_conviction_threshold",
     "quiet_hours_start",
     "quiet_hours_end",
+    "content_level",
+    "quiet_hours_mode",
+    "digest_time",
 })
 
 
@@ -68,7 +80,11 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             quiet_hours_start        TEXT,
             quiet_hours_end          TEXT,
             created_at               TEXT NOT NULL,
-            updated_at               TEXT NOT NULL
+            updated_at               TEXT NOT NULL,
+            content_level            TEXT NOT NULL DEFAULT 'BRIEF',
+            quiet_hours_mode         TEXT NOT NULL DEFAULT 'DEFER',
+            digest_time              TEXT NOT NULL DEFAULT '07:30',
+            routing_source           TEXT
         )
     """)
 
@@ -99,14 +115,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns introduced after the first release, backfill ownership on
     any pre-existing row to LOCAL_OWNER (idempotent — a no-op once set), then
     rebuild to a real per-owner shape — see _migrate_owner_scoping()."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(user_notifications)").fetchall()}
+    routing_is_new = "routing_source" not in existing           # an existing table that predates notification routing
     migrate_columns(conn, "user_notifications", [
         ("min_conviction_threshold", "INTEGER"),
         ("quiet_hours_start",        "TEXT"),
         ("quiet_hours_end",          "TEXT"),
         ("owner",                    "TEXT"),
+        ("content_level",            "TEXT NOT NULL DEFAULT 'BRIEF'"),
+        ("quiet_hours_mode",         "TEXT NOT NULL DEFAULT 'DEFER'"),
+        ("digest_time",              "TEXT NOT NULL DEFAULT '07:30'"),
+        ("routing_source",           "TEXT"),
     ])
     conn.execute("UPDATE user_notifications SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
     _migrate_owner_scoping(conn)
+    if routing_is_new:
+        # Everyone already here keeps what they had: their old single channel becomes routing (see notification_routing_db).
+        conn.execute("UPDATE user_notifications SET routing_source = 'LEGACY' WHERE routing_source IS NULL")
+    from portfolio_agent.tools import notification_routing_db
+    notification_routing_db.migrate_legacy_rows(conn)           # idempotent: only rows still marked LEGACY
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -181,8 +208,17 @@ def _validate_and_normalize(fields: dict) -> dict:
     for key in ("quiet_hours_start", "quiet_hours_end"):
         if key in fields and fields[key] not in (None, "") and _parse_hhmm(fields[key]) is None:
             raise ValueError(f"{key} must be 'HH:MM', got {fields[key]!r}")
+    if "content_level" in fields and fields["content_level"] not in CONTENT_LEVELS:
+        raise ValueError(f"content_level must be one of {', '.join(CONTENT_LEVELS)}, got {fields['content_level']!r}")
+    if "quiet_hours_mode" in fields and fields["quiet_hours_mode"] not in QUIET_MODES:
+        raise ValueError(f"quiet_hours_mode must be one of {', '.join(QUIET_MODES)}, got {fields['quiet_hours_mode']!r}")
+    if "digest_time" in fields and _parse_hhmm(fields["digest_time"]) is None:
+        raise ValueError(f"digest_time must be 'HH:MM', got {fields['digest_time']!r}")
 
     values = dict(fields)
+    if "digest_time" in values:
+        t = _parse_hhmm(values["digest_time"])
+        values["digest_time"] = f"{t.hour:02d}:{t.minute:02d}"
     for key in ("quiet_hours_start", "quiet_hours_end"):
         if key in values and values[key] == "":
             values[key] = None
@@ -213,22 +249,28 @@ def update_user_notifications(**fields) -> UserNotificationPrefs:
     return UserNotificationPrefs.from_db_row(dict(row))
 
 
-def update_user_notifications_for(ctx, **fields) -> UserNotificationPrefs:
+def update_user_notifications_for(ctx, *, conn: Optional[sqlite3.Connection] = None, **fields) -> UserNotificationPrefs:
     """Authorized write: only updates the row owned by ctx's verified
     identity (auto-provisioned by get_user_notifications_for if this is that
-    identity's first write). Same validation as update_user_notifications."""
+    identity's first write). Same validation as update_user_notifications.
+
+    conn: join the caller's transaction (nothing is committed here), so a preference change and its audit event land
+    together — the caller must have called get_user_notifications_for(ctx) first (it provisions the row and runs the
+    schema setup, which cannot run inside someone else's write transaction)."""
     get_user_notifications_for(ctx)   # authorization check + auto-provision before any write
     if not fields:
         return get_user_notifications_for(ctx)
     values = _validate_and_normalize(fields)
     assignments = ", ".join(f"{col} = ?" for col in values)
-    with _db() as conn:
-        conn.execute(
-            f"UPDATE user_notifications SET {assignments} WHERE owner = ?",
-            [*values.values(), ctx.actor],
-        )
-        conn.commit()
+    sql, params = f"UPDATE user_notifications SET {assignments} WHERE owner = ?", [*values.values(), ctx.actor]
+    if conn is not None:
+        conn.execute(sql, params)
         row = conn.execute("SELECT * FROM user_notifications WHERE owner = ?", (ctx.actor,)).fetchone()
+        return UserNotificationPrefs.from_db_row(dict(row))
+    with _db() as c:
+        c.execute(sql, params)
+        c.commit()
+        row = c.execute("SELECT * FROM user_notifications WHERE owner = ?", (ctx.actor,)).fetchone()
     return UserNotificationPrefs.from_db_row(dict(row))
 
 
@@ -246,6 +288,55 @@ def in_quiet_hours(now: time, start: Optional[str], end: Optional[str]) -> bool:
     if s < e:
         return s <= now < e
     return now >= s or now < e  # overnight window
+
+
+@dataclass(frozen=True)
+class FilterDecision:
+    """The outcome of a person's PERSONAL filters for one notification (routing is decided separately)."""
+    ok: bool
+    reason: Optional[str] = None                 # BELOW_SEVERITY | BELOW_CONVICTION | QUIET_HOURS
+    defer_until: Optional[datetime] = None       # timezone-aware; only for QUIET_HOURS: when quiet hours end
+
+
+def next_quiet_end(now_local: datetime, start: Optional[str], end: Optional[str]) -> Optional[datetime]:
+    """When the quiet-hours window that contains *now_local* ends, as a timezone-aware datetime in the same zone; None when
+    now is not inside a window. (An overnight window 22:00-07:00 entered at 23:00 ends tomorrow 07:00; at 03:00, today 07:00.)"""
+    if not in_quiet_hours(now_local.time(), start, end):
+        return None
+    s, e = _parse_hhmm(start), _parse_hhmm(end)
+    end_today = now_local.replace(hour=e.hour, minute=e.minute, second=0, microsecond=0)
+    if s < e or now_local.time() < e:
+        return end_today
+    return end_today + timedelta(days=1)
+
+
+def evaluate_personal_filters(prefs: UserNotificationPrefs, *, severity: Optional[int], conviction: Optional[float] = None,
+                              now_local: datetime) -> FilterDecision:
+    """
+    The person's own filters, WITHOUT the deprecated single-channel gate (routing replaces it): minimum severity (skipped
+    when the notification has no severity), minimum conviction (only when both a threshold and a conviction exist), then
+    quiet hours (evaluated in the RECIPIENT's local time, passed in as now_local). Never raises.
+    """
+    if severity is not None and int(severity) < int(prefs.min_severity_threshold):
+        return FilterDecision(False, "BELOW_SEVERITY")
+    if (prefs.min_conviction_threshold is not None and conviction is not None
+            and float(conviction) < float(prefs.min_conviction_threshold)):
+        return FilterDecision(False, "BELOW_CONVICTION")
+    until = next_quiet_end(now_local, prefs.quiet_hours_start, prefs.quiet_hours_end)
+    if until is not None:
+        return FilterDecision(False, "QUIET_HOURS", until)
+    return FilterDecision(True)
+
+
+def recipient_now(owner: str) -> datetime:
+    """The current time in this person's profile timezone (the legacy should_notify used the LOCAL owner's for everyone)."""
+    tz = None
+    try:
+        from portfolio_agent.tools.user_profile_db import get_user_profile_by_owner
+        tz = get_user_profile_by_owner(owner).timezone
+    except Exception:
+        pass
+    return _local_now(tz)
 
 
 def _local_now(tz_name: Optional[str]) -> datetime:

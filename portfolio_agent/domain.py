@@ -561,7 +561,42 @@ class UserProfile(_DictCompat):
 
 # ── UserNotificationPrefs ──────────────────────────────────────────────────────
 
-NOTIFICATION_CHANNELS = ("none", "email", "slack")
+NOTIFICATION_CHANNELS = ("none", "email", "slack")     # the LEGACY single channel column (deprecated; routing replaces it)
+
+
+class Channel(StrEnum):
+    """Where a notification can be delivered. Only ACTIVE_CHANNELS have a sender; the rest are reserved."""
+    EMAIL = "EMAIL"
+    PUSH = "PUSH"              # phone push through ntfy
+    WHATSAPP = "WHATSAPP"      # stub: no sender yet
+    SMS = "SMS"                # stub: no sender yet
+    SLACK = "SLACK"            # kept for compatibility with the legacy 'slack' value; no sender
+
+
+class AlertCategory(StrEnum):
+    """What a notification is about — routing is chosen per category."""
+    MARKET_EVENT = "MARKET_EVENT"
+    PORTFOLIO_HEALTH = "PORTFOLIO_HEALTH"
+    COMPLIANCE = "COMPLIANCE"
+    DAILY_DIGEST = "DAILY_DIGEST"
+    SYSTEM = "SYSTEM"
+
+
+class ContentLevel(StrEnum):
+    BRIEF = "BRIEF"            # no amounts, position sizes or portfolio values: safe on a lock screen
+    DETAILED = "DETAILED"      # may include them (email only; push is always BRIEF)
+
+
+class QuietMode(StrEnum):
+    SUPPRESS = "SUPPRESS"      # drop what arrives in quiet hours
+    DEFER = "DEFER"            # hold it and send when quiet hours end
+
+
+ACTIVE_CHANNELS = frozenset({Channel.EMAIL, Channel.PUSH})       # the only channels that can deliver today
+CHANNELS = tuple(m.value for m in Channel)
+ALERT_CATEGORIES = tuple(m.value for m in AlertCategory)
+CONTENT_LEVELS = tuple(m.value for m in ContentLevel)
+QUIET_MODES = tuple(m.value for m in QuietMode)
 
 
 @dataclass
@@ -575,6 +610,9 @@ class UserNotificationPrefs(_DictCompat):
     quiet_hours_end: str | None = None     # "HH:MM"; start > end spans midnight
     created_at: str | None = None
     updated_at: str | None = None
+    content_level: str = "BRIEF"           # BRIEF | DETAILED (push is always BRIEF)
+    quiet_hours_mode: str = "DEFER"        # DEFER | SUPPRESS
+    digest_time: str = "07:30"             # "HH:MM" in the profile's timezone
 
     @classmethod
     def from_db_row(cls, row: dict) -> "UserNotificationPrefs":
@@ -589,10 +627,14 @@ class UserNotificationPrefs(_DictCompat):
             quiet_hours_end=row.get("quiet_hours_end") or None,
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
+            content_level=row.get("content_level") or defaults.content_level,
+            quiet_hours_mode=row.get("quiet_hours_mode") or defaults.quiet_hours_mode,
+            digest_time=row.get("digest_time") or defaults.digest_time,
         )
 
     @property
     def enabled(self) -> bool:
+        """The LEGACY gate (deprecated): the old single channel is not 'none'. New code reads routing."""
         return self.channel != "none"
 
     def to_dict(self) -> dict:
@@ -605,6 +647,9 @@ class UserNotificationPrefs(_DictCompat):
             "quiet_hours_end": self.quiet_hours_end,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "content_level": self.content_level,
+            "quiet_hours_mode": self.quiet_hours_mode,
+            "digest_time": self.digest_time,
         }
 
 

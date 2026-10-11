@@ -142,6 +142,19 @@ async def run_batch_evening(
         if tracker:
             tracker.finish_phase("l5_health", 0, 1, note=str(e)[:120])
 
+    # Deliver anything queued meanwhile (health ACTION alerts, deferred quiet-hours items). A delivery problem is never an
+    # evening-batch problem: run_once() never raises and is idempotent with the every-few-minutes cron job.
+    try:
+        from portfolio_agent.services.notification_producers import run_scheduled_producers
+        from portfolio_agent.services.notification_worker import run_once
+        run_scheduled_producers()
+        _n = run_once()
+        if _n.get("claimed"):
+            log.info(f"  Notifications: {_n['sent']} sent · {_n['retried']} to retry · {_n['failed']} failed · {_n['suppressed']} suppressed",
+                     event_type="summary")
+    except Exception as e:
+        log.warning(f"  Notifications delivery skipped — {e}", event_type="warning")
+
     if tracker:
         tracker.finish_run("completed")
     log.info("\nEvening batch complete.", event_type="phase_end")

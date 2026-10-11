@@ -104,7 +104,21 @@ def _append(*, owner_scope: str, ticker: str, action: str, event: str, granted_b
             (owner_scope, ticker.upper(), action, event, granted_by, _now_iso(), expires_at, evidence_ref, request_id),
         )
         conn.commit()
-        return cur.lastrowid
+        row_id = cur.lastrowid
+    _notify_after_commit(row_id)
+    return row_id
+
+
+def _notify_after_commit(row_id: int) -> None:
+    """Tell the owner (best effort, AFTER the record is committed): a notification problem can never undo or block an
+    approval record. See services.compliance_notifications."""
+    try:
+        from portfolio_agent.services.compliance_notifications import notify_approval_event
+        with _db() as conn:
+            row = conn.execute("SELECT * FROM trade_approvals WHERE id = ?", (row_id,)).fetchone()
+        notify_approval_event(dict(row))
+    except Exception:
+        pass
 
 
 def get_active_approval(owner_scope: str, ticker: str, action: str, *, now: str | None = None) -> dict | None:
@@ -130,6 +144,19 @@ def get_active_approval(owner_scope: str, ticker: str, action: str, *, now: str 
     if d["expires_at"] is not None and d["expires_at"] <= now:
         return None
     return d
+
+
+def list_expiring(now_iso: str, until_iso: str) -> list[dict]:
+    """Approvals that are ACTIVE at now_iso (latest event for their owner / ticker / action is a grant, not revoked) and
+    expire in (now_iso, until_iso]. System-wide on purpose, for the compliance notification scan only."""
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT t.* FROM trade_approvals t
+               WHERE t.event = 'granted' AND t.expires_at IS NOT NULL AND t.expires_at > ? AND t.expires_at <= ?
+                 AND t.id = (SELECT MAX(id) FROM trade_approvals x
+                             WHERE x.owner_scope = t.owner_scope AND x.ticker = t.ticker AND x.action = t.action)
+               ORDER BY t.expires_at""", [now_iso, until_iso]).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_approval_history(owner_scope: str, ticker: str, action: str, limit: int = 25) -> list[dict]:

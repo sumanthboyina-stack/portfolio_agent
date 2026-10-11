@@ -157,6 +157,16 @@ def _db():
         yield conn
 
 
+def _backfill(conn: sqlite3.Connection, where: str, update_sql: str, params: list | tuple = ()) -> None:
+    """
+    Run a one-time backfill UPDATE only if some row actually needs it. This setup runs on every connection, and a bare
+    UPDATE takes the database write lock even when it changes nothing — with the pipeline's parallel threads that
+    contention surfaced as "database is locked" on prediction saves. The existence check is a plain read.
+    """
+    if conn.execute(f"SELECT 1 FROM predictions WHERE {where} LIMIT 1").fetchone() is not None:
+        conn.execute(update_sql, list(params))
+
+
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
@@ -330,12 +340,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     ])
     # Rows that predate prediction_role came from random per-run model selection.
     # Idempotent: once backfilled, no row is NULL again.
-    conn.execute("UPDATE predictions SET prediction_role = ? WHERE prediction_role IS NULL", [ROLE_LEGACY_RANDOM])
+    _backfill(conn, "prediction_role IS NULL", "UPDATE predictions SET prediction_role = ? WHERE prediction_role IS NULL",
+              [ROLE_LEGACY_RANDOM])
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_role ON predictions(prediction_role, horizon_days)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_itype ON predictions(instrument_type, horizon_days)")
     # Rows that predate scopes stay unclassified: they are never promoted to shared
     # by default and only reach readers through the restricted legacy path.
-    conn.execute("UPDATE predictions SET scope = ? WHERE scope IS NULL", [SCOPE_LEGACY])
+    _backfill(conn, "scope IS NULL", "UPDATE predictions SET scope = ? WHERE scope IS NULL", [SCOPE_LEGACY])
     # One-time attribution: this deployment has exactly one user; legacy rows
     # predate owner_scope entirely (NULL, not "unowned by design" the way a
     # shared_market row's NULL owner_scope is). Attribute them to that user
@@ -343,14 +354,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # from SHARED_SCOPES-gated prompts/mining, still visible via
     # LEGACY_REVIEW_SCOPES/DISPLAY_SCOPES exactly as before. Idempotent.
     from portfolio_agent.domain import LOCAL_OWNER
-    conn.execute(
-        "UPDATE predictions SET owner_scope = ? WHERE scope = ? AND owner_scope IS NULL",
-        (f"user:{LOCAL_OWNER}", SCOPE_LEGACY),
-    )
+    _backfill(conn, f"scope = '{SCOPE_LEGACY}' AND owner_scope IS NULL",
+              "UPDATE predictions SET owner_scope = ? WHERE scope = ? AND owner_scope IS NULL",
+              (f"user:{LOCAL_OWNER}", SCOPE_LEGACY))
     # One-time rename: any row already owner-scoped to the old "user:local"
     # placeholder now belongs to "user:sumanth_b" -- idempotent.
-    conn.execute("UPDATE predictions SET owner_scope = ? WHERE owner_scope = 'user:local'",
-                 (f"user:{LOCAL_OWNER}",))
+    _backfill(conn, "owner_scope = 'user:local'", "UPDATE predictions SET owner_scope = ? WHERE owner_scope = 'user:local'",
+              (f"user:{LOCAL_OWNER}",))
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_scope ON predictions(scope, ticker, created_at)")
     # Index for per-model accuracy queries and parent linkage
     conn.execute(
@@ -371,7 +381,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # the same blended view plus 'portfolio' / 'opportunity' splits. Rename in
     # place (one-time, idempotent) so existing trend history stays visible
     # under the new segment name instead of silently disappearing.
-    conn.execute("UPDATE metrics_rolling SET segment = 'all' WHERE segment = 'unknown'")
+    if conn.execute("SELECT 1 FROM metrics_rolling WHERE segment = 'unknown' LIMIT 1").fetchone() is not None:
+        conn.execute("UPDATE metrics_rolling SET segment = 'all' WHERE segment = 'unknown'")
 
     # Index on new columns — only safe after migration ensures columns exist
     # Rename prediction_date → as_of_date (idempotent)
