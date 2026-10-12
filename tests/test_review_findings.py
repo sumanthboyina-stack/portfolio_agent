@@ -295,7 +295,8 @@ def test_run_all_detectors_detects_and_persists_material_news():
     from portfolio_agent.events.db import get_pending_events
     import portfolio_agent.tools.news_db as news_db
 
-    today = "2026-09-24"
+    from datetime import date as _date
+    today = _date.today().isoformat()                    # (a fixed date made this test fail once the real date moved past its look-back window)
     with news_db._db() as conn:
         conn.execute(
             """INSERT INTO news_filter_log

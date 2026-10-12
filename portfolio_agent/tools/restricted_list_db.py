@@ -129,10 +129,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _migrate_owner_scoping().
     """
     migrate_columns(conn, "restricted_list", [("owner", "TEXT")])
-    conn.execute("UPDATE restricted_list SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
+    from portfolio_agent.tools.db import update_if_any
+    update_if_any(conn, "restricted_list", "owner IS NULL", "UPDATE restricted_list SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
     # One-time rename: LOCAL_OWNER was "local" before this deployment's single
     # user was named "sumanth_b" ahead of registration/login. Idempotent.
-    conn.execute("UPDATE restricted_list SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
+    update_if_any(conn, "restricted_list", "owner = 'local'", "UPDATE restricted_list SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
     _migrate_owner_scoping(conn)
     if not _LEGACY_YAML.exists():
         return

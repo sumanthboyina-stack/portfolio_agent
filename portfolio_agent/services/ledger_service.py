@@ -588,12 +588,13 @@ def switch_to_snapshot(ctx: RequestContext, account_id: int, *, reason: str | No
 
 
 def reconcile_account(ctx: RequestContext, account_id: int, statement_positions: list[dict], statement_cash: float | None = None, *,
-                      as_of=None, share_tolerance: float = 0.001, cash_tolerance: float = 0.01) -> dict:
+                      as_of=None, share_tolerance: float = 0.001, cash_tolerance: float = 0.01, audit: bool = True) -> dict:
     """
     Compare what the account's LEDGER says it holds (as of `as_of`, default now) with a broker statement: [{"ticker", "shares",
     optional "cost_basis_total"}] and optionally the statement's cash. READ-ONLY with respect to the ledger and positions: a difference is
     reported, never "fixed" by inventing a trade; the person decides what really happened and records it (or voids a wrong row).
-    Each ticker is MATCH, DIFFERENT, ONLY_IN_LEDGER or ONLY_IN_STATEMENT; cash is MATCH or DIFFERENT. The result is also audited.
+    Each ticker is MATCH, DIFFERENT, ONLY_IN_LEDGER or ONLY_IN_STATEMENT; cash is MATCH or DIFFERENT. The result is also audited (audit=False
+    for a preview that may be recomputed on every screen refresh).
     """
     require_context(ctx)
     through = _date(as_of, "as_of") if as_of else None
@@ -635,9 +636,10 @@ def reconcile_account(ctx: RequestContext, account_id: int, statement_positions:
         out = {"account_id": account_id, "as_of": through, "holdings_source": account.get("holdings_source"),
                "matches": counts["MATCH"] == len(rows) and (cash is None or cash["status"] == "MATCH"),
                "positions": rows, "cash": cash, "summary": counts}
-        repo.record_audit_event(actor=ctx.actor, source=ctx.source, request_id=ctx.request_id, operation="reconcile_ledger",
-                                portfolio_id=account["portfolio_id"], account_id=account_id,
-                                after={"matches": out["matches"], "summary": counts, "cash_status": cash and cash["status"], "as_of": through}, conn=c)
+        if audit:
+            repo.record_audit_event(actor=ctx.actor, source=ctx.source, request_id=ctx.request_id, operation="reconcile_ledger",
+                                    portfolio_id=account["portfolio_id"], account_id=account_id,
+                                    after={"matches": out["matches"], "summary": counts, "cash_status": cash and cash["status"], "as_of": through}, conn=c)
         return out
 
 

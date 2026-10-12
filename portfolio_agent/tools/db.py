@@ -67,6 +67,17 @@ def migrate_columns(
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
 
 
+def update_if_any(conn: sqlite3.Connection, table: str, where: str, update_sql: str, params: tuple | list = ()) -> int:
+    """
+    Run a one-time rename / backfill UPDATE only when some row matches `where`. These migrations run on EVERY connection, and a bare UPDATE
+    takes the database write lock even when it changes nothing, so a connection opened while another holds a write transaction waited out
+    the busy timeout (10 s) just to do nothing. The existence check is a plain read. Returns rows changed.
+    """
+    if conn.execute(f"SELECT 1 FROM {table} WHERE {where} LIMIT 1").fetchone() is None:
+        return 0
+    return conn.execute(update_sql, list(params)).rowcount
+
+
 def safe_float(v: Any) -> Optional[float]:
     """Convert *v* to float, returning None for None, non-numeric, or NaN."""
     if v is None:

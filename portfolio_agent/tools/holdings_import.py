@@ -111,6 +111,10 @@ class AccountPlan:
     unchanged: list[str] = field(default_factory=list)
     existing_count: int = 0
     account_id: int | None = None                         # None until the account exists (created on commit)
+    # An account managed by its transaction ledger is never overwritten by a file: the file is COMPARED with the ledger instead
+    # (services.ledger_service.reconcile_account) and nothing is changed. `reconciliation` is that comparison (None if it could not be made).
+    ledger_managed: bool = False
+    reconciliation: dict | None = None
 
     @property
     def label(self) -> str:
@@ -131,9 +135,14 @@ class ImportPlan:
             "updated": sum(len(a.updated) for a in self.accounts),
             "removed": sum(len(a.removed) for a in self.accounts),
             "unchanged": sum(len(a.unchanged) for a in self.accounts),
-            "positions": sum(len(a.rows) for a in self.accounts),
-            "cash_accounts": sum(1 for a in self.accounts if a.cash_amount is not None),
+            "positions": sum(len(a.rows) for a in self.accounts if not a.ledger_managed),
+            "cash_accounts": sum(1 for a in self.accounts if a.cash_amount is not None and not a.ledger_managed),
         }
+
+    @property
+    def compared(self) -> int:
+        """Accounts managed by their ledger: the file is compared with them, not applied."""
+        return sum(1 for a in self.accounts if a.ledger_managed)
 
 
 def _diff(existing: list, new_rows: list[dict]) -> tuple[list[str], list[dict], list[str], list[str]]:
@@ -159,7 +168,24 @@ def _reconcile(plan_acct: AccountPlan, ctx: RequestContext, conn=None) -> None:
     plan_acct.account_id = acct["account_id"] if acct else None
     existing = repo.list_positions(acct["account_id"], conn=conn) if acct else []
     plan_acct.existing_count = len(existing)
+    if acct and acct.get("holdings_source") == "ledger":
+        plan_acct.ledger_managed = True                   # no diff to apply: positions come from the ledger; compare instead
+        plan_acct.reconciliation = _compare_with_ledger(ctx, acct["account_id"], plan_acct, None, audit=False)
+        return
     plan_acct.added, plan_acct.updated, plan_acct.removed, plan_acct.unchanged = _diff(existing, plan_acct.rows)
+
+
+def _compare_with_ledger(ctx: RequestContext, account_id: int, plan_acct: AccountPlan, statement_date: str | None, *, audit: bool) -> dict | None:
+    """The file's positions and cash against the account's ledger (read-only). None if the ledger cannot be replayed."""
+    from portfolio_agent.services import ledger_service
+    stmt = [{"ticker": r["ticker"], "shares": r.get("shares") or 0.0, "cost_basis_total": r.get("cost_basis_total")}
+            for r in plan_acct.rows if r.get("ticker")]
+    for as_of in (statement_date, None):                   # a statement date the ledger rejects (future / malformed) falls back to "now"
+        try:
+            return ledger_service.reconcile_account(ctx, account_id, stmt, plan_acct.cash_amount, as_of=as_of, audit=audit)
+        except ledger_service.InvalidTransaction:
+            continue
+    return None
 
 
 def build_plan(parsed: ParsedUpload, labels: dict[str, str] | None = None, *,
@@ -206,6 +232,7 @@ class ImportResult:
     statement_date: str | None
     price_as_of: str | None
     unpriced: list[str]
+    reconciled: list[dict] = field(default_factory=list)   # [{label, matches, differences, tickers}] for ledger-managed accounts (compared, not changed)
 
     @property
     def message(self) -> str:
@@ -214,6 +241,14 @@ class ImportResult:
                f"{self.updated} updated, {self.removed} removed ({BROKER_LABELS.get(self.broker, self.broker.title())} · {acc}).")
         if self.unpriced:
             msg += f" No price available for {', '.join(self.unpriced)}."
+        for r in self.reconciled:
+            if r["matches"] is None:
+                msg += f" {r['label']} is managed by its ledger; the file could not be compared with it."
+            elif r["matches"]:
+                msg += f" {r['label']} is managed by its ledger: the file matches it (nothing changed)."
+            else:
+                msg += (f" {r['label']} is managed by its ledger, so the file was compared, not applied: {r['differences']} difference"
+                        f"{'s' if r['differences'] != 1 else ''} ({', '.join(r['tickers'][:8])}) — nothing changed; record or void transactions to resolve.")
         return msg
 
 
@@ -240,6 +275,10 @@ def commit_plan(plan: ImportPlan, fetch_prices: bool = True, *,
     of it is ONE transaction with one audit event per account, so a failure
     part-way leaves every account and the import history exactly as they were.
 
+    An account managed by its transaction ledger (holdings_source = "ledger") is NEVER overwritten: its positions and cash come from its
+    ledger. The file is compared with the ledger after the commit (read-only; the differences are reported in ImportResult.reconciled and
+    audited) and nothing about that account is changed.
+
     Prices are fetched before the transaction opens so the write lock is
     never held while waiting on the market-data provider. Counts come from
     what actually changed at commit time, not from the preview.
@@ -262,6 +301,7 @@ def commit_plan(plan: ImportPlan, fetch_prices: bool = True, *,
 
     totals = {"added": 0, "updated": 0, "removed": 0, "positions": 0}
     cash_accounts = 0
+    ledger_accounts: list[tuple[AccountPlan, int]] = []
     with repo.transaction() as conn:
         run_id = repo.record_import_run(broker=plan.broker, accounts=[a.label for a in plan.accounts],
                                         filename=plan.filename, statement_date=statement, conn=conn)
@@ -271,6 +311,10 @@ def commit_plan(plan: ImportPlan, fetch_prices: bool = True, *,
                 account_type=next((r.get("account_type") for r in acct.rows if r.get("account_type")), None),
                 conn=conn)
             acct.account_id = account["account_id"]
+            if account.get("holdings_source") == "ledger":
+                acct.ledger_managed = True
+                ledger_accounts.append((acct, account["account_id"]))      # compared after the commit; nothing written for it here
+                continue
             res = account_service.replace_account_snapshot(
                 ctx, account["account_id"], priced_rows[acct.account_number],
                 as_of_date=today, source_import_id=run_id, conn=conn)
@@ -281,9 +325,17 @@ def commit_plan(plan: ImportPlan, fetch_prices: bool = True, *,
                 detail=", ".join(acct.cash_lines) or None, reason="import", conn=conn)
             cash_accounts += acct.cash_amount is not None
         repo.update_import_run(run_id, conn=conn, cash_accounts=cash_accounts, **totals)
+    reconciled: list[dict] = []
+    for acct, aid in ledger_accounts:                      # read-only comparisons, after the import's transaction has closed
+        rec = _compare_with_ledger(ctx, aid, acct, plan.statement_date, audit=True)
+        diffs = [p["ticker"] for p in rec["positions"] if p["status"] != "MATCH"] if rec else []
+        if rec and rec["cash"] and rec["cash"]["status"] != "MATCH":
+            diffs.append("cash")
+        acct.reconciliation = rec
+        reconciled.append({"label": acct.label, "matches": None if rec is None else rec["matches"], "differences": len(diffs), "tickers": diffs})
     # Classify any security seen for the first time (stock / ETF / fund / ...). A network lookup, so it runs
     # after the commit; best effort — a failed lookup leaves the instrument UNKNOWN and never fails the import.
     from portfolio_agent.services.instrument_classifier import classify_new_holdings
-    classify_new_holdings(ctx, sorted({r["ticker"] for rows in priced_rows.values() for r in rows if r.get("ticker")}))
+    classify_new_holdings(ctx, sorted({r["ticker"] for a in plan.accounts if not a.ledger_managed for r in priced_rows[a.account_number] if r.get("ticker")}))
     return ImportResult(run_id, plan.broker, [a.label for a in plan.accounts], totals["added"], totals["updated"],
-                        totals["removed"], totals["positions"], cash_accounts, statement, price_as_of, sorted(unpriced))
+                        totals["removed"], totals["positions"], cash_accounts, statement, price_as_of, sorted(unpriced), reconciled)

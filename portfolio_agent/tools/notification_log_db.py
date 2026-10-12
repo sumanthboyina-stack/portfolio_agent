@@ -52,8 +52,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     deployment's one user was named "sumanth_b" ahead of registration/login.
     Idempotent -- a no-op once no row still says "user:local"."""
     from portfolio_agent.domain import LOCAL_OWNER
-    conn.execute("UPDATE notification_log SET owner_scope = ? WHERE owner_scope = 'user:local'",
-                 (f"user:{LOCAL_OWNER}",))
+    from portfolio_agent.tools.db import update_if_any
+    update_if_any(conn, "notification_log", "owner_scope = 'user:local'",
+                  "UPDATE notification_log SET owner_scope = ? WHERE owner_scope = 'user:local'", (f"user:{LOCAL_OWNER}",))
 
 
 def record_if_new(owner_scope: str, dedup_key: str, channel: str) -> bool:

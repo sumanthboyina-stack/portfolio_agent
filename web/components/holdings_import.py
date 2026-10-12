@@ -164,6 +164,23 @@ def render_import_flow(key: str, on_close: Callable[[], None] | None = None) -> 
             unsafe_allow_html=True,
         )
         for a in plan.accounts:
+            if a.ledger_managed:
+                with st.container(border=True):
+                    st.markdown(f"**{esc(a.label)}** · {len(a.rows)} positions in file · managed by its transaction ledger")
+                    rec = a.reconciliation
+                    if rec is None:
+                        st.caption("This account's positions come from its ledger, so the file will not be applied. It could not be compared "
+                                   "with the ledger right now.")
+                    else:
+                        c = rec["summary"]
+                        st.caption("This account's positions come from its ledger, so the file will be **compared, not applied**: nothing in it "
+                                   f"changes. Today: {c['MATCH']} match, {c['DIFFERENT']} differ, {c['ONLY_IN_LEDGER']} only in the ledger, "
+                                   f"{c['ONLY_IN_STATEMENT']} only in the file" + (f"; cash {rec['cash']['status'].lower()}" if rec["cash"] else "") + ".")
+                        diff = [{"ticker": p["ticker"], "ledger": p["ledger_shares"], "file": p["statement_shares"], "status": p["status"]}
+                                for p in rec["positions"] if p["status"] != "MATCH"]
+                        if diff:
+                            st.dataframe(pd.DataFrame(diff), hide_index=True, width="stretch")
+                continue
             with st.container(border=True):
                 cash_txt = f" · cash {fmt_money(a.cash_amount)}" if a.cash_amount is not None else " · no cash line (cash will be unknown)"
                 st.markdown(f"**{esc(a.label)}** · {len(a.rows)} positions in file, {a.existing_count} stored now{cash_txt}")

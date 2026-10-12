@@ -206,6 +206,19 @@ def _class_of(r: IssuerRow) -> str:
     return "other"
 
 
+# Class-share tickers the way issuers print them -> the way market data (yfinance) writes them. A small, explicit table plus "." -> "-":
+# nothing is inferred beyond it, so a ticker not in it stays exactly as the file wrote it.
+_CLASS_SHARE_TICKERS = {"BRKB": "BRK-B", "BRKA": "BRK-A", "BFB": "BF-B", "BFA": "BF-A", "LENB": "LEN-B"}
+
+
+def normalize_issuer_ticker(sym: str | None) -> str | None:
+    t = (sym or "").strip().upper()
+    if t in ("", "-", "N/A", "--") or not re.match(r"^[A-Z0-9.\-]{1,10}$", t):
+        return None
+    t = t.replace(".", "-")
+    return _CLASS_SHARE_TICKERS.get(t, t)
+
+
 def issuer_file_to_fund_data(ticker: str, f: IssuerFile) -> FundData:
     data = FundData(ticker=ticker.upper(), source="issuer_csv", as_of=f.as_of)
     holdings: list[FundHolding] = []
@@ -222,8 +235,7 @@ def issuer_file_to_fund_data(ticker: str, f: IssuerFile) -> FundData:
             continue
         if r.weight <= 0:
             continue
-        sym = (r.ticker or "").strip().upper()
-        sym = None if sym in ("", "-", "N/A", "--") or not re.match(r"^[A-Z0-9.\-]{1,10}$", sym) else sym
+        sym = normalize_issuer_ticker(r.ticker)
         holdings.append(FundHolding(symbol=sym, name=r.name, weight=round(r.weight, 12)))
         c = _class_of(r)
         classes[c] = classes.get(c, 0.0) + r.weight

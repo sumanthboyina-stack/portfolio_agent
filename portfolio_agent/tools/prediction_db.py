@@ -456,21 +456,62 @@ def _rebuild_metrics_rolling_with_edges(conn: sqlite3.Connection) -> None:
 
 # ── Trading calendar helpers ───────────────────────────────────────────────────
 
+def _observed(d: date, *, new_years: bool = False) -> date | None:
+    """A fixed-date holiday as NYSE observes it: Saturday -> the Friday before, Sunday -> the Monday after. The one exception: when January 1
+    falls on a Saturday the exchange is OPEN the Friday before (Dec 31), so there is no observed day (None)."""
+    if d.weekday() == 5:
+        return None if new_years else d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    nxt = date(year + (month == 12), month % 12 + 1, 1)
+    last = nxt - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
 @lru_cache(maxsize=32)
 def _us_market_holidays(year: int) -> frozenset[date]:
-    """Return approximate NYSE holidays for the given year (excludes Good Friday)."""
-    try:
-        from pandas.tseries.holiday import USFederalHolidayCalendar
-        from pandas import Timestamp
-        cal = USFederalHolidayCalendar()
-        holidays_ts = cal.holidays(start=f"{year}-01-01", end=f"{year}-12-31")
-        return frozenset(Timestamp(ts).date() for ts in holidays_ts)
-    except Exception:
-        return frozenset()
+    """
+    The NYSE's full-day closures for a calendar year: New Year's Day, Martin Luther King Jr. Day (3rd Monday of January), Washington's Birthday
+    (3rd Monday of February), Good Friday, Memorial Day (last Monday of May), Juneteenth (from 2022), Independence Day, Labor Day (1st Monday of
+    September), Thanksgiving (4th Thursday of November) and Christmas, with weekend holidays observed as NYSE does (see _observed). Columbus Day
+    and Veterans Day are NOT NYSE holidays (the federal calendar this replaced treated them as closed and missed Good Friday). One-off closures
+    (national days of mourning, weather) are not modelled.
+    """
+    from dateutil.easter import easter
+    days: set[date] = set()
+    ny = _observed(date(year, 1, 1), new_years=True)
+    if ny:
+        days.add(ny)
+    days.add(_nth_weekday(year, 1, 0, 3))                                  # MLK
+    days.add(_nth_weekday(year, 2, 0, 3))                                  # Washington's Birthday
+    days.add(easter(year) - timedelta(days=2))                             # Good Friday
+    days.add(_last_weekday(year, 5, 0))                                    # Memorial Day
+    if year >= 2022:
+        jt = _observed(date(year, 6, 19))
+        if jt:
+            days.add(jt)
+    it = _observed(date(year, 7, 4))
+    if it:
+        days.add(it)
+    days.add(_nth_weekday(year, 9, 0, 1))                                  # Labor Day
+    days.add(_nth_weekday(year, 11, 3, 4))                                 # Thanksgiving
+    xm = _observed(date(year, 12, 25))
+    if xm:
+        days.add(xm)
+    return frozenset(days)
 
 
 def is_trading_day(dt: date) -> bool:
-    """Return True if dt is a NYSE trading day (Mon-Fri, not a US market holiday)."""
+    """Return True if dt is a NYSE trading day (Mon-Fri, not an NYSE full-day holiday; see _us_market_holidays)."""
     if dt.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
     return dt not in _us_market_holidays(dt.year)

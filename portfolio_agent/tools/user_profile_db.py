@@ -179,11 +179,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # The column was JUST added: every row that exists predates it and keeps the numbers it has — 'custom'.
         # (Fresh tables are created with the column, so this never runs for them; new rows default to 'profile'.)
         conn.execute("UPDATE user_profile SET limits_source = 'custom'")
-    conn.execute("UPDATE user_profile SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
+    from portfolio_agent.tools.db import update_if_any
+    update_if_any(conn, "user_profile", "owner IS NULL", "UPDATE user_profile SET owner = ? WHERE owner IS NULL", (LOCAL_OWNER,))
     # One-time rename: LOCAL_OWNER was the placeholder "local" before this
     # deployment's single user was named "sumanth_b" ahead of registration/
     # login. Idempotent -- a no-op once no row still says "local".
-    conn.execute("UPDATE user_profile SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
+    update_if_any(conn, "user_profile", "owner = 'local'", "UPDATE user_profile SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
     _migrate_owner_scoping(conn)
 
 

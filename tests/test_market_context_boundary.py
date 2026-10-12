@@ -12,6 +12,7 @@ Phase 1: market-only context, writer, and history boundary.
 """
 from __future__ import annotations
 
+from datetime import date as _real_date, datetime, timedelta
 from decimal import Decimal as X
 
 import pytest
@@ -28,6 +29,19 @@ from portfolio_agent.tools.weight_engine import compute_dynamic_weights, compute
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+
+
+@pytest.fixture(autouse=True)
+def _frozen_today(monkeypatch):
+    """The weight engine judges recency against date.today(); these tests use fixed, dated inputs and golden outputs captured on 2026-09-21, so
+    "today" is pinned there (the goldens hold for any day from 09-20 to 09-30 and silently broke when the real date moved on)."""
+    from portfolio_agent.tools import weight_engine
+
+    class _Pinned(_real_date):
+        @classmethod
+        def today(cls):
+            return _real_date(2026, 9, 21)
+    monkeypatch.setattr(weight_engine, "date", _Pinned)
 
 
 NEWS = [{"headline": "Company beats earnings estimates", "sentiment": "POSITIVE", "sentiment_score": 0.6,
@@ -284,7 +298,7 @@ def test_unclassified_history_is_excluded_from_shared_but_kept_for_legacy_review
 
 def _mark_evaluated(ticker: str, **fields) -> None:
     fields = {"evaluation_status": "evaluated", "actual_direction": "UP", "predicted_direction": "UP",
-             "evaluated_at": "2026-09-20T00:00:00", "conviction_score": 8.0, "weight_regime": "MIXED", **fields}
+             "evaluated_at": (datetime.now() - timedelta(days=1)).isoformat(timespec="seconds"), "conviction_score": 8.0, "weight_regime": "MIXED", **fields}
     with pdb._db() as c:
         c.execute(f"UPDATE predictions SET {', '.join(f'{k} = ?' for k in fields)} WHERE ticker = ?",
                   [*fields.values(), ticker])
