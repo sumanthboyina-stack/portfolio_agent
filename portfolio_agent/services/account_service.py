@@ -70,6 +70,18 @@ class DuplicatePosition(ValueError):
     """The account already holds this ticker (use on_duplicate='update' or set_position)."""
 
 
+class LedgerManaged(ValueError):
+    """The account's positions and cash are derived from its transaction ledger, so they cannot be typed in, imported over or removed by hand.
+    Record the trade (services.ledger_service) or compare a statement with reconcile_account instead."""
+
+
+def _require_snapshot(acct: dict, what: str) -> None:
+    if acct.get("holdings_source") == "ledger":
+        raise LedgerManaged(f"{what}: this account is managed by its transaction ledger, so its positions and cash are derived from it. "
+                            "Record a transaction, or compare a broker statement with reconcile_account; to type positions by hand, "
+                            "switch the account back to a snapshot first.")
+
+
 class DuplicateInstrument(ValueError):
     """Another instrument already carries that ticker (merging instruments is a separate, manual step)."""
 
@@ -257,6 +269,7 @@ def _add_position(ctx: RequestContext, account_id: int, position: dict, *, on_du
         raise ValueError("add_position: ticker is required")
     with repo.unit_of_work(conn) as c:
         acct = _owned_account(ctx, account_id, c)
+        _require_snapshot(acct, "add_position")
         existing = repo.find_position(account_id, fields["ticker"], conn=c)
         if existing is not None:
             if on_duplicate == "reject":
@@ -283,6 +296,7 @@ def set_position(ctx: RequestContext, position_id: int, *, expected_version: int
         cost_basis_total = round(shares * avg_cost, 2)
     with repo.unit_of_work(conn) as c:
         pos, acct = _owned_position(ctx, position_id, c)
+        _require_snapshot(acct, "set_position")
         _check_version(pos, expected_version, "position")
         price = pos.get("current_price")
         repo.update_position(position_id, conn=c, shares=shares, avg_cost=avg_cost, cost_basis_total=cost_basis_total,
@@ -298,6 +312,7 @@ def remove_position(ctx: RequestContext, position_id: int, *, expected_version: 
     """Remove exactly one position (e.g. it was entered by mistake). Not a sale."""
     with repo.unit_of_work(conn) as c:
         pos, acct = _owned_position(ctx, position_id, c)
+        _require_snapshot(acct, "remove_position")
         _check_version(pos, expected_version, "position")
         repo.delete_position(position_id, conn=c)
         _audit(ctx, c, "remove_position", portfolio_id=acct["portfolio_id"], account_id=pos["account_id"],
@@ -313,6 +328,7 @@ def record_account_cash(ctx: RequestContext, account_id: int, amount: float | No
     """Record (amount) or forget (None) the cash line of one account."""
     with repo.unit_of_work(conn) as c:
         acct = _owned_account(ctx, account_id, c)
+        _require_snapshot(acct, "record_account_cash")
         before = repo.get_account_cash(account_id, conn=c)
         if amount is None:
             repo.clear_account_cash(account_id, conn=c)
@@ -355,6 +371,7 @@ def replace_account_snapshot(ctx: RequestContext, account_id: int, rows: list[di
     a general-purpose upsert.
     """
     acct = _owned_account(ctx, account_id, conn)
+    _require_snapshot(acct, "import")
     existing = {p["ticker"]: p for p in repo.list_positions(account_id, conn=conn)}
     seen: set[str] = set()
     added: list[str] = []; updated: list[str] = []; unchanged: list[str] = []

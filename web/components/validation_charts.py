@@ -67,7 +67,7 @@ _METRIC_CFG = {
         higher=True, bar_max=1.0, bar_min=0.0,
         fmt=lambda v: f"{v*100:.2f}%",
         defn="% of predictions where the model's UP / DOWN / FLAT direction matched the actual market move "
-             "(3 classes, FLAT = within ±1%).",
+             "(3 classes; FLAT = within the horizon's flat edge, shown on each horizon's header).",
         tiers=_REL_ACC_TIERS, relative="accuracy",
         ref=None, ref_label=_REL_ACC_NOTE,
     ),

@@ -2,9 +2,8 @@
 Fund data providers — where a fund's holdings, sector mix, asset-class mix and cost come from.
 
 FundDataProvider is the interface; today's implementation is YFinanceFundProvider (ETFs and mutual funds, through
-yfinance's funds_data and info). IssuerCSVProvider and NPortProvider are STUBS for later (an issuer's published holdings
-file; an SEC N-PORT filing) — they exist so the interface is real, and they return an explicit "not implemented" reason
-code rather than pretending to have data.
+yfinance's funds_data and info). NPortProvider (SEC N-PORT filings) lives in tools.sec_nport. IssuerCSVProvider is a STUB for
+later (an issuer's published holdings file) and returns an explicit "not implemented" reason code rather than pretending to have data.
 
 Rules
   * A provider NEVER raises into the pipeline: any failure becomes a reason code on the returned FundData.
@@ -29,6 +28,12 @@ RC_FUND_SECTORS_MISSING = "FUND_SECTORS_MISSING"
 RC_FUND_ASSET_CLASSES_MISSING = "FUND_ASSET_CLASSES_MISSING"
 RC_FUND_HOLDINGS_TOP_N_ONLY = "FUND_HOLDINGS_TOP_N_ONLY"          # provider only exposes the largest holdings
 RC_PROVIDER_NOT_IMPLEMENTED = "FUND_PROVIDER_NOT_IMPLEMENTED"
+RC_NPORT_NOT_FILED = "NPORT_NOT_FILED"                            # no N-PORT filing for this fund (not a registered fund, or none public yet)
+RC_HOLDINGS_UNMAPPED = "FUND_HOLDINGS_UNMAPPED"                   # some holdings have a CUSIP / ISIN but no ticker (yet)
+RC_FUND_DATA_STALE = "FUND_DATA_STALE"                             # every source that had data is older than its allowed age
+RC_ISSUER_NOT_CONFIGURED = "ISSUER_SOURCE_NOT_CONFIGURED"          # no enabled issuer holdings-file source for this fund
+RC_HOLDINGS_KEPT_PREVIOUS = "FUND_HOLDINGS_KEPT_PREVIOUS"          # a refresh found no holdings; the last stored list was kept
+RC_NPORT_NOT_CONFIGURED = "NPORT_NOT_CONFIGURED"                   # EDGAR_USER_AGENT is not set, so SEC is not called
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class FundHolding:
     weight: float                       # fraction of the fund
     cusip: str | None = None
     holding_is_fund: bool = False       # set by fund_data_service once the holding's own instrument type is known
+    isin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,14 @@ class FundData:
     asset_class_weights: dict[str, float] = field(default_factory=dict)   # fractions: stock / bond / cash / other
     country_weights: dict[str, float] | None = None                       # optional
     holdings_coverage: float = 0.0                                        # sum of holding weights, 0-1
+    # Net weight (fraction, may be negative) of derivative and short positions, which are NOT in `holdings` and not in the asset-class
+    # mix: N-PORT lists futures / swaps / shorts, and counting them as holdings would break the "weights explain the fund" arithmetic.
+    derivative_short_weight: float = 0.0
+    # Sum of the weights of holdings that have a TICKER. holdings_coverage is what the holdings EXPLAIN (any identified position);
+    # this is how much of that is also tied to a tradable symbol. Equal for providers that give tickers (yfinance).
+    mapped_coverage: float = 0.0
+    # Which source supplied each piece after the provider chain merged them: {"holdings": "nport", "sectors": "yfinance", ...}.
+    source_detail: dict[str, str] = field(default_factory=dict)
     as_of: str | None = None
     source: str = ""
     reason_codes: list[str] = field(default_factory=list)
@@ -159,6 +173,7 @@ class FundDataProvider(ABC):
         except Exception:
             data.country_weights = None
         data.holdings_coverage = round(min(1.0, sum(h.weight for h in data.holdings)), 6)
+        data.mapped_coverage = round(min(1.0, sum(h.weight for h in data.holdings if h.symbol)), 6)
         data.reason_codes = list(dict.fromkeys(data.reason_codes))
         return data
 
@@ -310,6 +325,7 @@ class YFinanceFundProvider(FundDataProvider):
         data.sector_weights = parse_sector_weights(part("sector_weightings"))
         data.asset_class_weights = parse_asset_classes(part("asset_classes"))
         data.holdings_coverage = round(min(1.0, sum(h.weight for h in data.holdings)), 6)
+        data.mapped_coverage = round(min(1.0, sum(h.weight for h in data.holdings if h.symbol)), 6)
         for present, code in ((data.profile, RC_FUND_PROFILE_MISSING), (data.holdings, RC_FUND_HOLDINGS_MISSING),
                               (data.sector_weights, RC_FUND_SECTORS_MISSING),
                               (data.asset_class_weights, RC_FUND_ASSET_CLASSES_MISSING)):
@@ -334,27 +350,22 @@ class YFinanceFundProvider(FundDataProvider):
         return self.fetch(ticker).asset_class_weights
 
 
-# ── Stubs (TODO) ──────────────────────────────────────────────────────────────
-
-class _NotImplementedProvider(FundDataProvider):
-    def get_profile(self, ticker): return None
-    def get_holdings(self, ticker): return []
-    def get_sector_weights(self, ticker): return {}
-    def get_asset_class_weights(self, ticker): return {}
-
-    def fetch(self, ticker: str) -> FundData:
-        return FundData(ticker=ticker.upper(), source=self.name, reason_codes=[RC_PROVIDER_NOT_IMPLEMENTED])
-
-
-class IssuerCSVProvider(_NotImplementedProvider):
-    """TODO: an issuer's published holdings file (full holdings, not just the top 10). Not built yet."""
-    name = "issuer_csv"
-
-
-class NPortProvider(_NotImplementedProvider):
-    """TODO: SEC Form N-PORT filings (full quarterly holdings for registered funds). Not built yet."""
-    name = "nport"
+def __getattr__(name: str):
+    """`from fund_data_providers import NPortProvider` works, but the SEC client (tools.sec_nport) is imported only when asked for."""
+    if name == "NPortProvider":
+        from portfolio_agent.tools.sec_nport import NPortProvider
+        return NPortProvider
+    if name == "IssuerCSVProvider":
+        from portfolio_agent.tools.issuer_holdings import IssuerCSVProvider
+        return IssuerCSVProvider
+    raise AttributeError(name)
 
 
 def default_provider() -> FundDataProvider:
-    return YFinanceFundProvider()
+    """The provider chain in the stored order (portfolio_settings.fund_provider_order_json) with the stored staleness limits; if the settings
+    cannot be read, yfinance alone, as before the chain existed."""
+    try:
+        from portfolio_agent.tools.fund_provider_chain import build_default_chain
+        return build_default_chain()
+    except Exception:
+        return YFinanceFundProvider()

@@ -61,3 +61,34 @@ def _no_live_fund_lookups(monkeypatch):
     monkeypatch.setattr(fdp.YFinanceFundProvider, "fetch",
                         lambda self, ticker: fdp.FundData(ticker=ticker.upper(), source="yfinance",
                                                           reason_codes=[fdp.RC_FUND_FETCH_FAILED]))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_identifier_or_sec_calls(monkeypatch):
+    """
+    CUSIP/ISIN mapping (OpenFIGI) and SEC N-PORT fetches are network calls. No test may reach either: a client built without an injected
+    session fails like a transient outage (nothing is cached, nothing raises). Tests of those modules pass a fake session.
+    """
+    from portfolio_agent.tools import identifier_mapping as idm
+    from portfolio_agent.tools import sec_nport
+    real_map, real_get = idm.OpenFigiClient.map, sec_nport.SecClient.get
+
+    def _map(self, jobs):
+        if self._session is None:
+            raise idm.MappingError("live OpenFIGI calls are blocked in tests")
+        return real_map(self, jobs)
+
+    def _get(self, url, params=None):
+        if self._session is None:
+            raise sec_nport.SecError("live SEC calls are blocked in tests")
+        return real_get(self, url, params)
+    from portfolio_agent.tools import issuer_holdings
+    real_dl = issuer_holdings.IssuerCSVProvider._download
+
+    def _dl(self, url):
+        if self._session is None:
+            raise issuer_holdings.IssuerFileError("live issuer downloads are blocked in tests")
+        return real_dl(self, url)
+    monkeypatch.setattr(issuer_holdings.IssuerCSVProvider, "_download", _dl)
+    monkeypatch.setattr(idm.OpenFigiClient, "map", _map)
+    monkeypatch.setattr(sec_nport.SecClient, "get", _get)

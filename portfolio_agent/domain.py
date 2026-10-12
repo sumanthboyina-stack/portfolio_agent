@@ -162,6 +162,33 @@ class HoldingsSource(StrEnum):
     LEDGER = "ledger"                # positions are derived from the transaction ledger (Step 4)
 
 
+class LotMethod(StrEnum):
+    """How a sale picks the tax lots it closes. The method in force when a sale is RECORDED is stored on that sale, so later changes to
+    an account's or the default method never rewrite old sales."""
+    FIFO = "FIFO"                    # oldest lot first
+    LIFO = "LIFO"                    # newest lot first
+    HIFO = "HIFO"                    # highest unit cost first (ties: older first)
+    SPECIFIC = "SPECIFIC"            # the sale names its lots and quantities
+
+
+class TransactionType(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+    DEPOSIT = "DEPOSIT"              # cash in from outside
+    WITHDRAWAL = "WITHDRAWAL"        # cash out to outside
+    DIVIDEND = "DIVIDEND"
+    INTEREST = "INTEREST"
+    EMPLOYER_MATCH = "EMPLOYER_MATCH"
+    FEE = "FEE"
+    SPLIT = "SPLIT"                  # stock split / reverse split: share count and unit cost change, total basis does not
+    OPENING_BALANCE = "OPENING_BALANCE"  # what an account held (shares at a unit cost, or cash) the day it became ledger-managed: NOT a trade
+    VOID = "VOID"                    # cancels an earlier transaction (the ledger itself is never edited)
+
+
+LOT_METHODS = frozenset(m.value for m in LotMethod)
+DEFAULT_LOT_METHOD = LotMethod.FIFO.value
+
+
 class ClassificationSource(StrEnum):
     AUTO = "auto"
     MANUAL = "manual"                # a person's override: automatic classification never overwrites it

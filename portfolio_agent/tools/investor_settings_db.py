@@ -49,7 +49,11 @@ PORTFOLIO_SETTINGS_EXTRA_DEFAULTS: dict = {
     "lookthrough_max_depth": 3,            # fund-of-funds levels to open
     "high_expense_ratio_pct": 0.50,        # a fund costing more than this % a year is "high"
     "health_snapshot_enabled": 1,          # take one portfolio-health snapshot per owner per day
+    "default_lot_method": "FIFO",          # tax-lot method for a sale when neither the sale nor the account names one
 }
+
+# Lot methods an account / the default may use (SPECIFIC is chosen per sale, with its lots, so it can never be a standing default).
+STANDING_LOT_METHODS = ("FIFO", "LIFO", "HIFO")
 
 # Portfolio Health thresholds (seed defaults for more portfolio_settings columns): name -> (default, min, max).
 # Nothing in tools/portfolio_health.py decides a status from a number that is not one of these or a policy limit.
@@ -65,6 +69,54 @@ HEALTH_SETTINGS_SPEC: dict = {
     "health_stale_fund_data_multiple":    (2.0, 1.0, 100.0),   # fund data older than this many refresh intervals is stale
 }
 HEALTH_SETTINGS_DEFAULTS: dict = {k: v[0] for k, v in HEALTH_SETTINGS_SPEC.items()}
+
+# Fund-data SOURCE settings (seed defaults for more portfolio_settings columns): name -> (default, min, max). SEC EDGAR N-PORT today;
+# later provider settings join this table the same way. Secrets (API keys, the SEC contact string) are NEVER here: env vars only.
+FUND_SOURCE_SETTINGS_SPEC: dict = {
+    "sec_fund_ids_refresh_days":  (7.0, 1.0, 365.0),   # re-download SEC's ticker -> CIK / series / class table after this many days
+    "nport_requests_per_second":  (8.0, 1.0, 10.0),    # SEC allows at most 10 requests a second; the hard cap is the max here
+    "nport_http_timeout_seconds": (30.0, 5.0, 120.0),  # per SEC request
+    # CUSIP / ISIN -> ticker (OpenFIGI). Only public security identifiers are ever sent, never anything about a portfolio. The API key
+    # is the OPENFIGI_API_KEY environment variable (optional: without it the free, slower limits apply) and is never stored here.
+    "openfigi_enabled":           (1.0, 0.0, 1.0),     # 0 = use only mappings already stored; no OpenFIGI calls
+    "openfigi_batch_size":        (10.0, 1.0, 100.0),  # identifiers per request (OpenFIGI allows 10 without a key, 100 with one)
+    "mapping_refresh_days":       (30.0, 1.0, 3650.0), # a stored mapping, or a stored "not found", is looked up again after this long
+    # Provider chain: how old a source's data (its as-of date) may be before it is passed over for the next source, and how much of a fund the
+    # holdings must explain (%) to count as "complete" (a complete, fresh holdings list stops the chain asking for holdings elsewhere).
+    "issuer_csv_max_age_days":    (3.0, 1.0, 3650.0),
+    "nport_max_age_days":         (150.0, 1.0, 3650.0),   # N-PORT is public quarterly with a 60-day lag
+    "yfinance_max_age_days":      (7.0, 1.0, 3650.0),
+    "fund_holdings_complete_pct": (90.0, 0.0, 100.0),
+    "openfigi_max_ids_per_refresh": (300.0, 1.0, 5000.0),  # at most this many NEW identifiers are looked up per fund refresh (largest
+                                                           # holdings first); the rest stay keyed by CUSIP and are picked up next time
+}
+FUND_SOURCE_SETTINGS_DEFAULTS: dict = {k: v[0] for k, v in FUND_SOURCE_SETTINGS_SPEC.items()}
+
+# Which fund-data sources are asked, in this order (a JSON list in portfolio_settings.fund_provider_order_json). Seed default only.
+KNOWN_FUND_PROVIDERS = ("issuer_csv", "nport", "yfinance")
+DEFAULT_FUND_PROVIDER_ORDER = ["issuer_csv", "nport", "yfinance"]
+
+
+def parse_fund_provider_order(raw) -> list[str]:
+    """The stored order as a list, dropping anything unknown / repeated; an unreadable or empty value is the seed default."""
+    try:
+        vals = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+    except (TypeError, ValueError):
+        vals = []
+    out = [v for v in dict.fromkeys(vals) if v in KNOWN_FUND_PROVIDERS]
+    return out or list(DEFAULT_FUND_PROVIDER_ORDER)
+
+
+def _validate_provider_order(order) -> list[str]:
+    if not isinstance(order, (list, tuple)) or not order:
+        raise ValueError("fund_provider_order: a non-empty list of sources")
+    bad = [o for o in order if o not in KNOWN_FUND_PROVIDERS]
+    if bad:
+        raise ValueError(f"fund_provider_order: unknown source(s) {bad}; known: {list(KNOWN_FUND_PROVIDERS)}")
+    if len(set(order)) != len(order):
+        raise ValueError("fund_provider_order: a source can appear only once")
+    return list(order)
+_NUMERIC_EXTRA_SPEC: dict = {**HEALTH_SETTINGS_SPEC, **FUND_SOURCE_SETTINGS_SPEC}
 
 SEED_QUIZ_QUESTIONS: list[dict] = [
     {"id": "horizon", "text": "When will you need most of this money?", "default_option": "3to10",
@@ -211,7 +263,9 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         ("lookthrough_max_depth",        "INTEGER NOT NULL DEFAULT 3"),
         ("high_expense_ratio_pct",       "REAL NOT NULL DEFAULT 0.5"),
         ("health_snapshot_enabled",      "INTEGER NOT NULL DEFAULT 1"),
-    ] + [(name, f"REAL NOT NULL DEFAULT {spec[0]}") for name, spec in HEALTH_SETTINGS_SPEC.items()])
+        ("fund_provider_order_json",     f"TEXT NOT NULL DEFAULT '{json.dumps(DEFAULT_FUND_PROVIDER_ORDER)}'"),
+        ("default_lot_method",           "TEXT NOT NULL DEFAULT 'FIFO'"),
+    ] + [(name, f"REAL NOT NULL DEFAULT {spec[0]}") for name, spec in _NUMERIC_EXTRA_SPEC.items()])
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -507,6 +561,8 @@ def update_portfolio_settings(*, updated_by: str, expected_version: int | None =
                               lookthrough_max_depth: int | None = None,
                               high_expense_ratio_pct: float | None = None,
                               health_snapshot_enabled: bool | None = None,
+                              fund_provider_order: list[str] | None = None,
+                              default_lot_method: str | None = None,
                               conn: sqlite3.Connection | None = None, **health_thresholds) -> dict:
     """
     default_emergency_reserve_amount: dollars, >= 0 — the reserve every user without their own amount gets.
@@ -514,18 +570,20 @@ def update_portfolio_settings(*, updated_by: str, expected_version: int | None =
     lookthrough_min_coverage_pct: 0–100. lookthrough_max_depth: whole levels, 1–6.
     high_expense_ratio_pct: a fund's annual cost above this percent is "high" (0–10).
     health_snapshot_enabled: whether a daily portfolio-health snapshot is taken.
-    health_thresholds: any of HEALTH_SETTINGS_SPEC's names, each within its own range (the two effective-N and the two
+    default_lot_method: FIFO | LIFO | HIFO — the tax-lot method a sale uses when it and its account name none (stored on the sale when it is recorded).
+    fund_provider_order: the fund-data sources to ask, in order (a non-empty list from KNOWN_FUND_PROVIDERS, no repeats).
+    health_thresholds: any of HEALTH_SETTINGS_SPEC's or FUND_SOURCE_SETTINGS_SPEC's names, each within its own range (the two effective-N and the two
     correlation levels must keep WATCH on the safe side of ACTION).
     """
     fields: dict = {}
-    unknown = set(health_thresholds) - set(HEALTH_SETTINGS_SPEC)
+    unknown = set(health_thresholds) - set(_NUMERIC_EXTRA_SPEC)
     if unknown:
         raise ValueError(f"unknown portfolio setting(s): {', '.join(sorted(unknown))}")
     for name, val in health_thresholds.items():
         if val is not None:
-            _, lo, hi = HEALTH_SETTINGS_SPEC[name]
+            _, lo, hi = _NUMERIC_EXTRA_SPEC[name]
             fields[name] = _num(val, name, lo, hi)
-    if fields:
+    if any(k in HEALTH_SETTINGS_SPEC for k in fields):
         cur = get_portfolio_settings(conn=conn)
         eff = {k: fields.get(k, cur[k]) for k in HEALTH_SETTINGS_SPEC}
         if eff["health_min_effective_n_action"] > eff["health_min_effective_n_watch"]:
@@ -552,6 +610,13 @@ def update_portfolio_settings(*, updated_by: str, expected_version: int | None =
         fields["high_expense_ratio_pct"] = _num(high_expense_ratio_pct, "high_expense_ratio_pct", 0.0, 10.0)
     if health_snapshot_enabled is not None:
         fields["health_snapshot_enabled"] = 1 if health_snapshot_enabled else 0
+    if default_lot_method is not None:
+        m = str(default_lot_method).strip().upper()
+        if m not in STANDING_LOT_METHODS:
+            raise ValueError(f"default_lot_method: one of {list(STANDING_LOT_METHODS)} (SPECIFIC is chosen per sale), not {default_lot_method!r}")
+        fields["default_lot_method"] = m
+    if fund_provider_order is not None:
+        fields["fund_provider_order_json"] = json.dumps(_validate_provider_order(fund_provider_order))
     if not fields:
         return get_portfolio_settings(conn=conn)
     return _write_portfolio(fields, updated_by, expected_version, conn)
@@ -575,4 +640,6 @@ def _write_portfolio(fields: dict, updated_by: str, expected_version: int | None
 
 def reset_portfolio_settings_to_defaults(*, updated_by: str, conn: sqlite3.Connection | None = None) -> dict:
     return _write_portfolio({"default_emergency_reserve_amount": DEFAULT_EMERGENCY_RESERVE_AMOUNT,
-                             **PORTFOLIO_SETTINGS_EXTRA_DEFAULTS, **HEALTH_SETTINGS_DEFAULTS}, updated_by, None, conn)
+                             **PORTFOLIO_SETTINGS_EXTRA_DEFAULTS, **HEALTH_SETTINGS_DEFAULTS, **FUND_SOURCE_SETTINGS_DEFAULTS,
+                             "fund_provider_order_json": json.dumps(DEFAULT_FUND_PROVIDER_ORDER)},
+                            updated_by, None, conn)

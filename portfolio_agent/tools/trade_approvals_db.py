@@ -146,6 +146,30 @@ def get_active_approval(owner_scope: str, ticker: str, action: str, *, now: str 
     return d
 
 
+def get_approval_as_of(owner_scope: str, ticker: str, actions: list[str], as_of_date: str) -> dict | None:
+    """
+    The approval that COVERED a trade made on `as_of_date` (YYYY-MM-DD): for the first of `actions` (in order) that has any event on or
+    before that day, the latest such event must be a 'granted' one whose expires_at, if set, is not before that day. A grant recorded later
+    does not cover an earlier trade, and a revoke recorded after the trade does not un-cover it (history is read as of the date, never
+    rewritten). Returns the grant row (its `id` is the approval id) or None. Reads only; the table stays append-only.
+    """
+    with _db() as conn:
+        for action in actions:
+            row = conn.execute(
+                """SELECT * FROM trade_approvals WHERE owner_scope = ? AND ticker = ? AND action = ? AND substr(recorded_at, 1, 10) <= ?
+                   ORDER BY id DESC LIMIT 1""",
+                (owner_scope, ticker.upper(), action, as_of_date)).fetchone()
+            if row is None:
+                continue
+            d = dict(row)
+            if d["event"] != EVENT_GRANTED:
+                return None
+            if d["expires_at"] is not None and d["expires_at"][:10] < as_of_date:
+                return None
+            return d
+    return None
+
+
 def list_expiring(now_iso: str, until_iso: str) -> list[dict]:
     """Approvals that are ACTIVE at now_iso (latest event for their owner / ticker / action is a grant, not revoked) and
     expire in (now_iso, until_iso]. System-wide on purpose, for the compliance notification scan only."""

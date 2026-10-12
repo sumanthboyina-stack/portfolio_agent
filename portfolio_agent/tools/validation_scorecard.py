@@ -94,6 +94,11 @@ class Scorecard:
     evidence: Evidence
     trend: list[tuple[str, float]] = field(default_factory=list)       # (date, daily rank IC of composite score)
     by_recommendation: list[dict] = field(default_factory=list)        # mean excess return per rating
+    # The bucket edges this horizon's rows were scored with: {"flat", "strong", "significant"} as fractions, and the edges
+    # version they belong to. A scorecard is ONE edges cohort; rows scored under different edges are counted, not mixed in.
+    edges: dict = field(default_factory=dict)
+    edges_version: int = 1
+    other_edges_n: int = 0                                              # evaluated rows of this horizon under OTHER edges (excluded)
 
     def item(self, key: str) -> ScoreItem:
         return next(i for i in self.items if i.key == key)
@@ -200,9 +205,24 @@ def _ranking_item(d: pd.DataFrame, n_dates: int, rng) -> tuple[ScoreItem, pd.Ser
                      len(rated), nd, v, reason, _RANK_HELP, subtitle=sub, extras=extras), ic_by_date
 
 
-_DIR_HELP = ("APEX 3-class directional accuracy (UP / FLAT / DOWN, FLAT = within ±1%) on the NON-OVERLAPPING rows, with a Wilson 95% CI, "
-             "against the best naive baseline scored on those same rows (always-UP/DOWN/FLAT, in-sample majority class, class-frequency "
-             "and uniform random expectations, SPY prior window, ticker momentum; the look-ahead SPY-same-window diagnostic is excluded).")
+_DIR_HELP_T = ("APEX 3-class directional accuracy (UP / FLAT / DOWN, FLAT = within {flat}) on the NON-OVERLAPPING rows, with a Wilson 95% CI, "
+               "against the best naive baseline scored on those same rows (always-UP/DOWN/FLAT, in-sample majority class, class-frequency "
+               "and uniform random expectations, SPY prior window, ticker momentum; the look-ahead SPY-same-window diagnostic is excluded).")
+
+
+def _flat_text(edges) -> str:
+    return "±" + f"{edges.flat * 100:.4f}".rstrip("0").rstrip(".") + "%"
+
+
+def _dir_help(d: pd.DataFrame) -> str:
+    """The direction help with THIS cohort's FLAT band (±1% for 5 days under the original edges, ±8% for 250 days ...)."""
+    try:
+        return _DIR_HELP_T.format(flat=_flat_text(vm._edges_of(d)))
+    except Exception:
+        return _DIR_HELP_T.format(flat="the horizon's flat band")
+
+
+_DIR_HELP = _DIR_HELP_T.format(flat="the horizon's flat band")        # placeholder text for an empty card
 
 
 def _direction_item(d: pd.DataFrame, closes, streak_n, n_dates: int) -> ScoreItem:
@@ -212,7 +232,7 @@ def _direction_item(d: pd.DataFrame, closes, streak_n, n_dates: int) -> ScoreIte
     comp = vm.compare_predictors(kept, closes)
     best = comp.get("best_baseline")
     if not eff["nonoverlap_n"] or eff["nonoverlap_accuracy"] is None or not best:
-        return _empty_item("direction", title, q, _DIR_HELP, "Not enough non-overlapping predictions yet.", n=eff["nonoverlap_n"], n_dates=n_dates)
+        return _empty_item("direction", title, q, _dir_help(d), "Not enough non-overlapping predictions yet.", n=eff["nonoverlap_n"], n_dates=n_dates)
     acc, lo, hi, base = eff["nonoverlap_accuracy"], eff["ci_low"], eff["ci_high"], best["accuracy"]
     blabel = PLAIN_BASELINE.get(best["key"], best["name"])
     v = verdict(n_dates, lo, hi, base)
@@ -223,7 +243,7 @@ def _direction_item(d: pd.DataFrame, closes, streak_n, n_dates: int) -> ScoreIte
         UNPROVEN: f"APEX was right {_pct(acc)} of the time versus {_pct(base)} for {blabel}; the plausible range ({_pct(lo)} to {_pct(hi)}) includes that.",
     }[v]
     return ScoreItem("direction", title, q, acc, _pct(acc), lo, hi, base, f"{_pct(base)} by {blabel}", eff["nonoverlap_n"], n_dates, v, reason,
-                     _DIR_HELP, extras={"effective_sample": {k: x for k, x in eff.items() if k != "kept"}, "comparison": comp, "best_baseline": best})
+                     _dir_help(d), extras={"effective_sample": {k: x for k, x in eff.items() if k != "kept"}, "comparison": comp, "best_baseline": best})
 
 
 _PROB_HELP = ("5-bucket Brier skill score = 1 − APEX Brier / climatology Brier, where climatology forecasts the sample's own bucket "
@@ -355,4 +375,10 @@ def compute_scorecard(df: Optional[pd.DataFrame], horizon: int, closes_by_symbol
             item = _empty_item(key, *meta[:2], meta[2], reason=_too_early_reason(evidence.n_dates) if key != "ranges" else "Ranges have no stated coverage target, so this is for information only.",
                                verdict_=INFO_ONLY if key == "ranges" else TOO_EARLY, n_dates=evidence.n_dates)
         items.append(item)
-    return Scorecard(horizon=horizon, items=items, evidence=evidence, trend=trend, by_recommendation=_by_recommendation(d) if len(d) else [])
+    try:
+        e = vm._edges_of(d, horizon)
+        edges, edges_version = e.to_dict(), (int(d["bucket_edges_version"].max()) if "bucket_edges_version" in d.columns and len(d) and d["bucket_edges_version"].notna().any() else 1)
+    except Exception:
+        edges, edges_version = {}, 1
+    return Scorecard(horizon=horizon, items=items, evidence=evidence, trend=trend, by_recommendation=_by_recommendation(d) if len(d) else [],
+                     edges=edges, edges_version=edges_version)

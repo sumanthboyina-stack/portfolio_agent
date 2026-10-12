@@ -57,7 +57,7 @@ from portfolio_agent.tools.lookthrough import RC_LOOKTHROUGH_PARTIAL
 from portfolio_agent.tools.portfolio_policy import EffectivePolicy, get_effective_policy
 
 ASSESSMENT_VERSION = "portfolio-assessment/3.0"
-EXPOSURES_VERSION = "portfolio-exposures/2.0"
+EXPOSURES_VERSION = "portfolio-exposures/2.1"   # 2.1: unmapped fund holdings keyed by CUSIP, mapped-vs-explained coverage, per-source fund data
 
 UNKNOWN = "UNKNOWN"
 INSUFFICIENT_DATA = "INSUFFICIENT_DATA"

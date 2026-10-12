@@ -11,14 +11,26 @@ from portfolio_agent.log import get_logger as _get_logger
 from portfolio_agent.pipeline.prompt_templates import _APEX_PROMPT_TEMPLATE, _build_macro_section
 
 
-def _build_horizons_instruction(horizons: list[int]) -> str:
-    """Build the per-horizon guidance block to inject into APEX prompts."""
+def _build_horizons_instruction(horizons: list[int], edges: dict | None = None) -> str:
+    """
+    Build the per-horizon guidance block to inject into APEX prompts. Each horizon states ITS OWN return-bucket ranges, rendered
+    by tools.bucket_edges.describe() from the very edges the scorer uses (a 250-day "flat" is not a 5-day "flat"). `edges` is
+    {horizon: Edges} for the version in force; None reads the current ones from the settings.
+    """
+    from portfolio_agent.tools import bucket_edges as be
+    if edges is None:
+        from portfolio_agent.tools.engine_settings_db import current_bucket_edges
+        edges = current_bucket_edges()[1]
     guidance = {
         5:  "5d  (~1 week)  — focus on news flow, momentum, short-term catalysts",
         21: "21d (~1 month) — focus on earnings drift, monthly themes, near catalysts",
         63: "63d (~1 quarter) — focus on fundamentals, valuation, full earnings cycle",
+        250: "250d (~1 year) — focus on long-run fundamentals, valuation and structural trends, not short-term news",
     }
-    lines = [f"  • {guidance.get(h, f'{h}d horizon')}" for h in sorted(horizons)]
+    lines = []
+    for h in sorted(horizons):
+        lines.append(f"  • {guidance.get(h, f'{h}d horizon')}")
+        lines.append(f"      return buckets for the {h}d distribution: {be.describe(be.edges_for(h, be.SEED_VERSION, table=edges))}")
     return "\n".join(lines) if lines else "  • 5d (~1 week) — news flow, momentum"
 
 
@@ -117,7 +129,11 @@ async def _run_daily_apex(
         scheduled_horizons = scheduled_horizons_override
     else:
         scheduled_horizons = get_scheduled_horizons(today_date)
-    horizons_instr = _build_horizons_instruction(scheduled_horizons)
+    # The return-bucket edges in force NOW (version + per-horizon table): they are in the prompt, so they are what every row
+    # saved by this run is stored under — and scored with, whatever the edges are changed to later. Read once, serially.
+    from portfolio_agent.tools.engine_settings_db import current_bucket_edges
+    edges_version, edges_table = current_bucket_edges()
+    horizons_instr = _build_horizons_instruction(scheduled_horizons, edges_table)
     log.info(f"  Scheduled horizons today: {scheduled_horizons}", event_type="info")
 
     # One plan per phase: decides challenger sampling below. run_apex resolves the
@@ -399,6 +415,7 @@ async def _run_daily_apex(
                 p_flat=dist.get("flat"),
                 p_moderate_up=dist.get("moderate_up"),
                 p_strong_up=dist.get("strong_up"),
+                bucket_edges_version=edges_version,
                 trigger_type=trig_type,
                 trigger_event_id=trig_ev_id,
                 guardrail_flags=_flags or None,
@@ -435,7 +452,7 @@ async def _run_daily_apex(
             ticker=ticker,
             ctx_json=ctx_map[ticker],
             macro_section=_build_macro_section(_macro_snap),
-            horizons_instruction=_build_horizons_instruction(ticker_horizons.get(ticker, scheduled_horizons)),
+            horizons_instruction=_build_horizons_instruction(ticker_horizons.get(ticker, scheduled_horizons), edges_table),
         )
 
         result = await _run_apex(ticker, prompt)

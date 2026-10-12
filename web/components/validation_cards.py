@@ -238,12 +238,14 @@ def _render_scorecard_tiles(
             n_label = f"{n} evaluated predictions"
             n_warn  = ""
 
+        _e = (report or {}).get("edges")
+        edges_txt = (f" &nbsp;·&nbsp; FLAT ±{_e['flat'] * 100:g}%, strong &gt;{_e['strong'] * 100:g}%" if _e else "")
         out = _TILE_CSS if i == 0 else ""
         out += _headline_tiles_html(report, hlbl, hcolor)
         out += (
             f'<div class="sc-wrap">'
             f'<div class="sc-horizon-hdr" style="color:{hcolor};background:{hcolor}18;border-left:3px solid {hcolor}">'
-            f'{hlbl} Horizon &nbsp;·&nbsp; Secondary: 3-class accuracy, calibration &nbsp;·&nbsp; {n_label}{n_warn}</div>'
+            f'{hlbl} Horizon &nbsp;·&nbsp; Secondary: 3-class accuracy, calibration{edges_txt} &nbsp;·&nbsp; {n_label}{n_warn}</div>'
             f'<div class="sc-row">'
         )
 
@@ -383,6 +385,37 @@ def render_baselines_body(report: Optional[dict]) -> None:
                        f"{bm['flat']['mean_excess'] * 100:+.2f}%.")
 
 
+def render_long_horizon_block(report: Optional[dict], provisional: Optional[dict], horizon_label: str) -> None:
+    """
+    Beat-the-benchmark accuracy for a long horizon: the FINAL number (matured predictions, with the effective-N / too-early
+    flag) and, separately and clearly labelled, the PROVISIONAL standing of the calls that have not matured yet. The two are
+    different data and are never combined.
+    """
+    bb = (report or {}).get("beat_benchmark")
+    st.markdown(f"**Beat-the-benchmark accuracy — {horizon_label}** (final: matured predictions only)")
+    if not bb or not bb["raw_n"]:
+        st.caption("No matured UP / DOWN calls with an excess return yet.")
+    else:
+        rows = [{"Calls": "All matured UP + DOWN calls", "n": bb["raw_n"], "Beat / lagged SPY": _pct(bb["raw_accuracy"])},
+                {"Calls": "Effective (non-overlapping)", "n": bb["effective_n"], "Beat / lagged SPY": _pct(bb["accuracy"]),
+                 "Wilson 95% CI": f"{_pct(bb['ci_low'])} – {_pct(bb['ci_high'])}"},
+                {"Calls": "Baseline: always UP", "n": "", "Beat / lagged SPY": _pct(bb["always_up_rate"])}]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        if bb["too_early"]:
+            st.warning(f"Too early to judge: only {bb['effective_n']} effective (non-overlapping) calls, fewer than "
+                       f"{bb['min_effective_n']}. The numbers above are shown for completeness, not as evidence.",
+                       icon=":material/schedule:")
+    pv = provisional or {}
+    st.markdown(f"**Provisional — {horizon_label}** (not matured yet; NOT included in any number above)")
+    if not pv.get("n"):
+        st.caption("No open predictions with an interim mark yet.")
+    else:
+        st.caption(f"{pv['n']} open calls ({pv['effective_n']} non-overlapping), on average {pv['mean_fraction_elapsed'] * 100:.0f}% "
+                   f"of the way to maturity: {_pct(pv['accuracy_so_far'])} are ahead of (UP) / behind (DOWN) SPY so far, mean "
+                   f"excess {pv['mean_excess_so_far'] * 100:+.2f}%. Interim marks move until the window closes."
+                   + ("  Too early to read." if pv["too_early"] else ""))
+
+
 def render_baselines_section(report: Optional[dict], horizon_label: str) -> None:
     """Body of the per-horizon "Baselines & sample size" expander."""
     with st.expander(f"Baselines & sample size — {horizon_label}", expanded=False):
@@ -477,7 +510,7 @@ def render_flat_diagnostic(report: Optional[dict]) -> None:
         st.dataframe(pd.DataFrame(rr), hide_index=True, use_container_width=True)
         cal = fd["calibration"]
         st.caption(f"Calibration of the FLAT bucket: APEX puts a mean {_pct(cal['mean_p_flat_all_rows'])} on p_flat across all rows; "
-                   f"{_pct(cal['actual_flat_rate'])} of outcomes actually landed within ±1%.")
+                   f"{_pct(cal['actual_flat_rate'])} of outcomes actually landed within ±{cal.get('flat_edge', 0.01) * 100:g}%.")
 
 
 def render_ranking_section(report: Optional[dict], horizon_label: str) -> None:

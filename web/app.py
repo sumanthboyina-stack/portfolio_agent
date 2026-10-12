@@ -14,7 +14,7 @@ sys.path.insert(0, str(_ROOT))
 
 # Challenger shadow rows never reach a user-facing read; evaluated per query (it also
 # guarantees the prediction_role column exists on this DB).
-from portfolio_agent.tools.prediction_db import not_challenger_sql as _not_challenger_sql
+from portfolio_agent.tools.prediction_db import not_challenger_sql as _not_challenger_sql, LATEST_EDGES_ONLY as _LATEST_EDGES
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -164,17 +164,17 @@ def _load(owner: str) -> dict:
                    num_predictions, high_conviction_accuracy
             FROM metrics_rolling
             WHERE metric_date=(SELECT MAX(metric_date) FROM metrics_rolling)
-              AND lookback_days=90
+              AND lookback_days=90 AND {_LATEST}
             ORDER BY horizon_days
-        """).fetchall()
+        """.replace("{_LATEST}", _LATEST_EDGES)).fetchall()
         if not rows:
             rows = c.execute("""
                 SELECT horizon_days, directional_accuracy, brier_score,
                        num_predictions, high_conviction_accuracy
                 FROM metrics_rolling
-                WHERE metric_date=(SELECT MAX(metric_date) FROM metrics_rolling)
+                WHERE metric_date=(SELECT MAX(metric_date) FROM metrics_rolling) AND {_LATEST}
                 GROUP BY horizon_days ORDER BY horizon_days
-            """).fetchall()
+            """.replace("{_LATEST}", _LATEST_EDGES)).fetchall()
         d["validation"] = {r[0]: dict(r) for r in rows}
 
         # ── Watchlist opportunities (not holdings) ──────────────────────────

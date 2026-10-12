@@ -361,3 +361,82 @@ def reset_instrument_type_horizons(ctx: RequestContext, *, reason: str | None = 
     from portfolio_agent.tools import engine_settings_db as esdb
     return update_instrument_type_horizons(ctx, {t: list(h) for t, h in esdb.SEED_INSTRUMENT_TYPE_HORIZONS.items()},
                                            reason=reason or "reset to defaults")
+
+
+def update_horizon_bucket_edges(ctx: RequestContext, edges: dict, *, expected_version: int | None = None,
+                                reason: str | None = None) -> dict:
+    """Admin: the flat / significant / strong return cut-offs per forecast horizon ({horizon: {flat, strong, significant}},
+    fractions; a partial dict changes only the horizons given). A change bumps engine_settings.bucket_edges_version and
+    appends the table to bucket_edges_history; predictions already made keep the edges they were made under. One
+    transaction with its audit event. Returns {"version": int, "edges": {horizon: {...}}}."""
+    require_admin(ctx)
+    from portfolio_agent.tools import bucket_edges as be
+    from portfolio_agent.tools import engine_settings_db as esdb
+    esdb.get_engine_settings()                       # make sure the table exists BEFORE the write transaction opens
+    with _uow() as c:
+        b = esdb.get_engine_settings(conn=c)
+        before = {"version": b["bucket_edges_version"], "edges": {h: e.to_dict() for h, e in b["horizon_bucket_edges"].items()}}
+        a = esdb.update_engine_settings(updated_by=ctx.actor, expected_version=expected_version,
+                                        horizon_bucket_edges=edges, conn=c)
+        after = {"version": a["bucket_edges_version"], "edges": {h: e.to_dict() for h, e in a["horizon_bucket_edges"].items()}}
+        _audit(ctx, c, "update_horizon_bucket_edges", before=before, after=after, reason=reason)
+    be.clear_cache()
+    return after
+
+
+def reset_horizon_bucket_edges(ctx: RequestContext, *, reason: str | None = None) -> dict:
+    from portfolio_agent.tools import bucket_edges as be
+    return update_horizon_bucket_edges(ctx, {h: e.to_dict() for h, e in be.SEED_EDGES.items()},
+                                       reason=reason or "reset to defaults")
+
+
+def update_horizon_cadence(ctx: RequestContext, cadence: dict, *, expected_version: int | None = None,
+                           reason: str | None = None) -> dict:
+    """Admin: how often the scheduled batch generates each horizon ({horizon_days: rule}; rules in
+    engine_settings_db.CADENCE_RULES, "never" turns a horizon's routine run off). Stored in engine_settings; one transaction
+    with its audit event. Returns the full {horizon_days: rule} in force afterwards."""
+    require_admin(ctx)
+    from portfolio_agent.tools import engine_settings_db as esdb
+    esdb.get_engine_settings()                       # make sure the table exists BEFORE the write transaction opens
+    with _uow() as c:
+        before = dict(esdb.get_engine_settings(conn=c)["horizon_cadence"])
+        after = esdb.update_engine_settings(updated_by=ctx.actor, expected_version=expected_version,
+                                            horizon_cadence=cadence, conn=c)["horizon_cadence"]
+        _audit(ctx, c, "update_horizon_cadence", before=before, after=after, reason=reason)
+    return after
+
+
+def reset_horizon_cadence(ctx: RequestContext, *, reason: str | None = None) -> dict:
+    from portfolio_agent.tools import engine_settings_db as esdb
+    return update_horizon_cadence(ctx, dict(esdb.SEED_HORIZON_CADENCE), reason=reason or "reset to defaults")
+
+
+def upsert_fund_issuer_source(ctx: RequestContext, ticker: str, issuer: str, url: str, enabled: bool, *, notes: str | None = None,
+                              expected_version: int | None = None, reason: str | None = None) -> dict:
+    """Admin: add or change the issuer holdings file (iShares / SPDR) used for one fund. The URL must be https on the issuer's own domain.
+    Rows are seeded disabled; nothing is downloaded from an issuer until one is enabled here. One transaction with its audit event."""
+    require_admin(ctx)
+    from portfolio_agent.tools import fund_data_db as fdb
+    from portfolio_agent.tools.issuer_holdings import validate_issuer_url
+    t = (ticker or "").strip().upper()
+    if not t:
+        raise ValueError("ticker is required")
+    clean_url = validate_issuer_url(issuer, url)
+    fdb._ensure_once()
+    with _uow() as c:
+        before = fdb.get_issuer_source(t, enabled_only=False, conn=c)
+        after = fdb.upsert_issuer_source(t, issuer, clean_url, enabled, notes=notes, updated_by=ctx.actor,
+                                         expected_version=expected_version, conn=c)
+        _audit(ctx, c, "upsert_fund_issuer_source", before=before, after=after, reason=reason)
+    return after
+
+
+def refresh_fund_data_now(ctx: RequestContext, *, reason: str | None = None) -> dict:
+    """Admin "refresh now": re-fetch every held fund through the provider chain, ignoring the freshness window. Network happens outside any
+    transaction (inside refresh_fund_data); the audit event is its own short transaction. Returns refresh_all_fund_data's summary."""
+    require_admin(ctx)
+    from portfolio_agent.services.fund_data_service import refresh_all_fund_data
+    summary = refresh_all_fund_data(ctx, force=True)
+    with _uow() as c:
+        _audit(ctx, c, "refresh_fund_data_now", after={"funds": summary["funds"], "counts": summary["counts"]}, reason=reason)
+    return summary

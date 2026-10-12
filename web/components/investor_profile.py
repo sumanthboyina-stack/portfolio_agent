@@ -252,8 +252,8 @@ def render_investor_admin(ctx) -> None:
     if not _tile:
         return
     with _tile:
-        t_res, t_prof, t_quiz, t_fund, t_health, t_hz = st.tabs(
-            ["Default emergency reserve", "Profiles", "Quiz", "Fund data & snapshots", "Health thresholds", "Horizons by type"])
+        t_res, t_prof, t_quiz, t_fund, t_health, t_hz, t_edges, t_cad, t_src = st.tabs(
+            ["Default emergency reserve", "Profiles", "Quiz", "Fund data & snapshots", "Health thresholds", "Horizons by type", "Return buckets", "Schedule cadence", "Fund sources"])
 
         with t_res:
             ps = sdb.get_portfolio_settings()
@@ -358,6 +358,28 @@ def render_investor_admin(ctx) -> None:
                                         help="How many fund-in-fund levels to open (a target-date fund holding index funds is 2).")
                 exp = g3.number_input("High expense ratio (% a year)", 0.0, 10.0, float(ps["high_expense_ratio_pct"]), 0.05,
                                       help="Funds above this are flagged on the Portfolio Health page.")
+                st.markdown("**SEC N-PORT (full fund holdings)** — the SEC contact string is the server's `EDGAR_USER_AGENT` environment variable, never stored here.")
+                n1, n2, n3 = st.columns(3)
+                ids_days = n1.number_input("SEC fund-ID table refresh (days)", 1.0, 365.0, float(ps["sec_fund_ids_refresh_days"]), 1.0,
+                                           help="How long SEC's ticker -> fund-series table is reused before it is downloaded again.")
+                nport_rps = n2.number_input("SEC requests per second", 1.0, 10.0, float(ps["nport_requests_per_second"]), 1.0,
+                                            help="SEC allows at most 10 a second; this can only lower the rate.")
+                nport_to = n3.number_input("SEC request timeout (seconds)", 5.0, 120.0, float(ps["nport_http_timeout_seconds"]), 5.0)
+                st.markdown("**CUSIP / ISIN → ticker (OpenFIGI)** — only public security identifiers are sent. An API key is optional and is the "
+                            "server's `OPENFIGI_API_KEY` environment variable, never stored here.")
+                m0, m1, m2, m3 = st.columns(4)
+                figi_on = m0.checkbox("Use OpenFIGI", value=bool(ps["openfigi_enabled"]),
+                                      help="Off: only mappings already stored are used; nothing is sent anywhere.")
+                figi_batch = m1.number_input("Identifiers per request", 1, 100, int(ps["openfigi_batch_size"]), 1,
+                                             help="OpenFIGI allows 10 without a key and 100 with one; the lower limit is applied automatically.")
+                map_days = m2.number_input("Re-check a mapping after (days)", 1.0, 3650.0, float(ps["mapping_refresh_days"]), 1.0,
+                                           help="Applies to found and not-found results alike.")
+                figi_max = m3.number_input("New identifiers per fund refresh", 1, 5000, int(ps["openfigi_max_ids_per_refresh"]), 10,
+                                           help="Largest holdings are looked up first; the rest stay keyed by CUSIP until a later refresh.")
+                lot_pick = st.selectbox("Default tax-lot method for sales", list(sdb.STANDING_LOT_METHODS),
+                                        index=list(sdb.STANDING_LOT_METHODS).index(ps.get("default_lot_method") or "FIFO"),
+                                        help="Used when a sale and its account name no method. The method is stored on each sale when it is "
+                                             "recorded, so changing this never changes past sales.")
                 snap = st.checkbox("Save a daily Portfolio Health snapshot", value=bool(ps["health_snapshot_enabled"]))
                 st.caption(f"Version {ps['version']} · updated {ps['updated_at'][:16].replace('T', ' ')}"
                            + (f" by {ps['updated_by']}" if ps.get("updated_by") else ""))
@@ -368,7 +390,10 @@ def render_investor_admin(ctx) -> None:
                 _admin_call(lambda: svc.reset_portfolio_settings(ctx) if reset else svc.update_portfolio_settings(
                     ctx, expected_version=ps["version"], etf_data_ttl_hours=etf_ttl, mutual_fund_data_ttl_hours=mf_ttl,
                     lookthrough_min_coverage_pct=cov, lookthrough_max_depth=int(depth), high_expense_ratio_pct=exp,
-                    health_snapshot_enabled=snap), "Portfolio settings " + ("reset." if reset else "saved."))
+                    health_snapshot_enabled=snap, default_lot_method=lot_pick, sec_fund_ids_refresh_days=ids_days, nport_requests_per_second=nport_rps,
+                    nport_http_timeout_seconds=nport_to, openfigi_enabled=1.0 if figi_on else 0.0,
+                    openfigi_batch_size=int(figi_batch), mapping_refresh_days=map_days,
+                    openfigi_max_ids_per_refresh=int(figi_max)), "Portfolio settings " + ("reset." if reset else "saved."))
 
         with t_health:
             ps = sdb.get_portfolio_settings()
@@ -423,6 +448,122 @@ def render_investor_admin(ctx) -> None:
                 _admin_call(lambda: svc.reset_instrument_type_horizons(ctx) if reset else
                             svc.update_instrument_type_horizons(ctx, picked, expected_version=es["version"]),
                             "Horizons " + ("reset." if reset else "saved."))
+
+        with t_edges:
+            from portfolio_agent.tools import engine_settings_db as esdb
+            es = esdb.get_engine_settings()
+            cur = es["horizon_bucket_edges"]
+            st.caption("Where FLAT, moderate and strong begin for each forecast horizon (percent move over the whole horizon). "
+                       "These ranges are shown to the model in its prompt and used to score its calls. A change applies to NEW "
+                       "predictions only: predictions already made keep, and are scored with, the edges they were made under.")
+            with st.form("admin_bucket_edges"):
+                picked_edges: dict[int, dict] = {}
+                for h in (5, 21, 63, 250):
+                    e = cur[h]
+                    c1, c2, c3 = st.columns(3)
+                    f = c1.number_input(f"{h}d  FLAT within ±%", 0.01, 100.0, float(e.flat * 100), 0.25, key=f"be_f_{h}")
+                    g = c2.number_input(f"{h}d  wrong-significant beyond %", 0.01, 100.0, float(e.significant * 100), 0.25, key=f"be_g_{h}")
+                    s_ = c3.number_input(f"{h}d  strong beyond ±%", 0.01, 100.0, float(e.strong * 100), 0.25, key=f"be_s_{h}")
+                    picked_edges[h] = {"flat": round(f / 100, 6), "significant": round(g / 100, 6), "strong": round(s_ / 100, 6)}
+                st.caption(f"Bucket edges version {es['bucket_edges_version']} (engine settings version {es['version']}). "
+                           "Need FLAT < wrong-significant < strong.")
+                b1, b2 = st.columns(2)
+                save = b1.form_submit_button("Save", type="primary")
+                reset = b2.form_submit_button("Reset to defaults")
+            if save or reset:
+                _admin_call(lambda: svc.reset_horizon_bucket_edges(ctx) if reset else
+                            svc.update_horizon_bucket_edges(ctx, picked_edges, expected_version=es["version"]),
+                            "Return buckets " + ("reset." if reset else "saved."))
+
+        with t_cad:
+            from portfolio_agent.tools import engine_settings_db as esdb
+            es = esdb.get_engine_settings()
+            cur = es["horizon_cadence"]
+            st.caption("How often the scheduled morning batch generates each forecast horizon. Event-driven runs (material news, "
+                       "intraday) are separate, and a horizon is only generated for the instrument types that have it enabled. "
+                       "Takes effect on the next batch run.")
+            with st.form("admin_cadence"):
+                picked_c: dict[int, str] = {}
+                for h in sorted(cur):
+                    picked_c[h] = st.selectbox(f"{h}d horizon", list(esdb.CADENCE_RULES), index=list(esdb.CADENCE_RULES).index(cur[h]),
+                                               format_func=lambda r: esdb.CADENCE_LABELS[r], key=f"cad_{h}")
+                st.caption(f"Engine settings version {es['version']}")
+                b1, b2 = st.columns(2)
+                save = b1.form_submit_button("Save", type="primary")
+                reset = b2.form_submit_button("Reset to defaults")
+            if save or reset:
+                _admin_call(lambda: svc.reset_horizon_cadence(ctx) if reset else
+                            svc.update_horizon_cadence(ctx, picked_c, expected_version=es["version"]),
+                            "Schedule cadence " + ("reset." if reset else "saved."))
+
+        with t_src:
+            from portfolio_agent.tools import fund_data_db as fdb
+            fdb._ensure_once()
+            ps = sdb.get_portfolio_settings()
+            known = list(sdb.KNOWN_FUND_PROVIDERS)
+            cur_order = sdb.parse_fund_provider_order(ps.get("fund_provider_order_json"))
+            st.caption("Where fund holdings come from, in the order they are asked. A source is asked only if it could still add something "
+                       "missing, and data older than its limit is passed over for the next source. Per-piece rules are in the README.")
+            with st.form("admin_fund_sources"):
+                labels = {"issuer_csv": "Issuer holdings file (iShares / SPDR)", "nport": "SEC N-PORT filing", "yfinance": "yfinance (top 10)"}
+                cols = st.columns(len(known))
+                order_pick = []
+                for i, c in enumerate(cols):
+                    default = cur_order[i] if i < len(cur_order) else "(none)"
+                    order_pick.append(c.selectbox(f"Ask #{i + 1}", known + ["(none)"], index=(known + ["(none)"]).index(default),
+                                                  format_func=lambda k: labels.get(k, k), key=f"src_order_{i}"))
+                a1, a2, a3, a4 = st.columns(4)
+                age_i = a1.number_input("Issuer file max age (days)", 1.0, 3650.0, float(ps["issuer_csv_max_age_days"]), 1.0)
+                age_n = a2.number_input("N-PORT max age (days)", 1.0, 3650.0, float(ps["nport_max_age_days"]), 1.0)
+                age_y = a3.number_input("yfinance max age (days)", 1.0, 3650.0, float(ps["yfinance_max_age_days"]), 1.0)
+                comp = a4.number_input("Holdings count as complete at (%)", 0.0, 100.0, float(ps["fund_holdings_complete_pct"]), 5.0,
+                                       help="Fresh holdings explaining at least this much of the fund stop the chain asking for holdings elsewhere.")
+                save = st.form_submit_button("Save", type="primary")
+            if save:
+                chosen = [o for o in order_pick if o != "(none)"]
+                _admin_call(lambda: svc.update_portfolio_settings(
+                    ctx, expected_version=ps["version"], fund_provider_order=chosen, issuer_csv_max_age_days=age_i,
+                    nport_max_age_days=age_n, yfinance_max_age_days=age_y, fund_holdings_complete_pct=comp), "Fund sources saved.")
+
+            st.markdown("**Issuer holdings files** — seeded disabled; the URL must be https on the issuer's own site. Check a URL in a browser before enabling it.")
+            for src in fdb.list_issuer_sources():
+                with st.form(f"issuer_src_{src['ticker']}"):
+                    u1, u2, u3 = st.columns([1, 5, 1])
+                    u1.markdown(f"**{src['ticker']}**<br><small>{src['issuer']}</small>", unsafe_allow_html=True)
+                    url = u2.text_input("URL", value=src["url"], key=f"is_url_{src['ticker']}", label_visibility="collapsed")
+                    on = u3.checkbox("Enabled", value=bool(src["enabled"]), key=f"is_on_{src['ticker']}")
+                    if src.get("notes"):
+                        st.caption(src["notes"])
+                    if st.form_submit_button("Save source"):
+                        _admin_call(lambda: svc.upsert_fund_issuer_source(ctx, src["ticker"], src["issuer"], url, on, notes=src.get("notes"),
+                                                                          expected_version=src["version"]), f"{src['ticker']} source saved.")
+
+            st.markdown("**Stored fund data**")
+            rows = fdb.list_fund_staleness()
+            if rows:
+                today = date.today()
+                lim = {"issuer_csv": ps["issuer_csv_max_age_days"], "nport": ps["nport_max_age_days"], "yfinance": ps["yfinance_max_age_days"]}
+                table = []
+                for r in rows:
+                    try:
+                        age = (today - date.fromisoformat((r["as_of"] or "")[:10])).days
+                    except ValueError:
+                        age = None
+                    src_h = r["source_detail"].get("holdings") or r["source"]
+                    table.append({"Fund": r["ticker"], "Holdings from": src_h, "As of": r["as_of"], "Age (days)": age,
+                                  "Limit (days)": lim.get(src_h), "Stale": bool(age is not None and lim.get(src_h) and age > lim[src_h]),
+                                  "Explained %": round(100 * (r["holdings_coverage"] or 0), 1),
+                                  "Mapped %": None if r["mapped_coverage"] is None else round(100 * r["mapped_coverage"], 1),
+                                  "Fetched": (r["fetched_at"] or "")[:16].replace("T", " ")})
+                st.dataframe(table, hide_index=True, use_container_width=True)
+            else:
+                st.caption("No fund data stored yet.")
+            if st.button("Refresh all fund data now", help="Re-fetches every held fund through the chain, ignoring the freshness window."):
+                try:
+                    out = svc.refresh_fund_data_now(ctx)
+                    _flash(f"Refreshed {out['funds']} funds: {out['counts']}")
+                except (ValueError, RuntimeError, svc.NotAdmin) as exc:
+                    st.error(str(exc), icon=material("error"))
 
 
 def _admin_call(fn, ok_message: str) -> None:

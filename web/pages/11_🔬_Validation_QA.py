@@ -66,9 +66,11 @@ from web.data.validation import (
     _load_evaluated_predictions_df,
     _compute_filtered_metrics,
     build_horizon_reports,
+    build_provisional_reports,
 )
 from web.components.validation_cards import (
     render_baselines_body,
+    render_long_horizon_block,
     render_ranking_tables,
     render_model_split,
     render_flat_diagnostic,
@@ -616,6 +618,9 @@ with tabs[4]:
         st.info(_NO_REPORT, icon=material("info"))
     else:
         render_baselines_body(_report)
+    if _qa_h in (63, 250):
+        st.divider()
+        render_long_horizon_block(_report, build_provisional_reports((_qa_h,))[_qa_h], _H_LABELS_ALL.get(_qa_h, f"{_qa_h}d"))
 
 # ── Tab 6: Ranking detail ─────────────────────────────────────────────────────
 

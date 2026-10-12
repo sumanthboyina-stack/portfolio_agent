@@ -37,6 +37,7 @@ RC_LOOKTHROUGH_DEPTH_LIMIT = "LOOKTHROUGH_DEPTH_LIMIT"    # sub-fund not opened:
 RC_LOOKTHROUGH_MISSING_LEVEL = "LOOKTHROUGH_MISSING_LEVEL"  # a holding is a fund but nothing is stored for it
 RC_LOOKTHROUGH_TOP_N_ONLY = "LOOKTHROUGH_TOP_HOLDINGS_ONLY"
 RC_LOOKTHROUGH_MIX_UNKNOWN = "LOOKTHROUGH_MIX_UNKNOWN"    # a fund's sector / asset-class mix is not known
+RC_LOOKTHROUGH_UNMAPPED = "LOOKTHROUGH_UNMAPPED_HOLDINGS"  # holdings known only by CUSIP / ISIN: explained, but not tied to a ticker
 
 SRC_OWN, SRC_MANUAL, SRC_PROXY, SRC_NONE = "own", "manual", "proxy", "none"
 
@@ -45,12 +46,26 @@ _CLASS_KEY = {"US_EQUITY": "stock", "INTL_EQUITY": "stock", "FIXED_INCOME": "bon
               "REAL_ESTATE": "real_estate", "COMMODITY": "commodity"}
 
 
+def holding_key(h: "ViewHolding") -> str:
+    """How a holding is keyed in the exposures: its ticker; else its CUSIP ("CUSIP:037833100") or ISIN, so the same security reached through
+    two funds is ONE exposure even without a ticker; else its name. Never a guess at a ticker."""
+    if h.symbol:
+        return h.symbol.upper()
+    if h.cusip:
+        return f"CUSIP:{h.cusip.upper()}"
+    if h.isin:
+        return f"ISIN:{h.isin.upper()}"
+    return (h.name or "?").upper()
+
+
 @dataclass(frozen=True)
 class ViewHolding:
     symbol: str | None
     name: str | None
     weight: float                                   # fraction of the fund
     is_fund: bool = False
+    cusip: str | None = None                        # identifiers, kept for a holding that has no ticker (yet)
+    isin: str | None = None
 
 
 @dataclass
@@ -67,6 +82,7 @@ class FundView:
     asset_class: str | None = None                  # the instrument's own class (US_EQUITY / INTL_EQUITY / …)
     expense_ratio: float | None = None
     holdings_coverage: float = 0.0                  # 0-1: how much the named holdings explain
+    mapped_coverage: float | None = None            # 0-1: how much of that has a ticker (None = not known; equal for ticker-keyed data)
     as_of: str | None = None
     reason_codes: list[str] = field(default_factory=list)
 
@@ -90,6 +106,7 @@ class ScopeResult:
     explained_value: float = 0.0
     fund_value: float = 0.0
     fund_explained_value: float = 0.0
+    fund_mapped_value: float = 0.0                                # the part of fund_explained_value whose holdings have a ticker
     leveraged_inverse_value: float = 0.0
     leverage_adjustment: float = 0.0                              # Σ value × (leverage_factor − 1)
     reason_codes: list[str] = field(default_factory=list)
@@ -99,6 +116,11 @@ class ScopeResult:
     @property
     def coverage_pct(self) -> float:
         return 100.0 if self.total_value <= 0 else round(100.0 * self.explained_value / self.total_value, 2)
+
+    @property
+    def fund_mapped_coverage_pct(self) -> float | None:
+        """Share of the money in funds that is tied to real tickers (<= fund_coverage_pct: unmapped holdings are explained, not mapped)."""
+        return None if self.fund_value <= 0 else round(100.0 * self.fund_mapped_value / self.fund_value, 2)
 
     @property
     def fund_coverage_pct(self) -> float | None:
@@ -271,7 +293,7 @@ def _expand(res: ScopeResult, ticker: str, name: str | None, value: float, lf: f
     explained = 0.0
     weight_sum = 0.0
     for h in view.holdings:
-        sym = (h.symbol or h.name or "?").upper()
+        sym = holding_key(h)
         weight_sum += h.weight
         hv = value * h.weight
         if h.is_fund:
@@ -289,6 +311,10 @@ def _expand(res: ScopeResult, ticker: str, name: str | None, value: float, lf: f
         else:
             _issuer(res, sym, h.name, hv, hv * lf, root)
             explained += hv
+            if h.symbol:
+                res.fund_mapped_value += hv
+            else:
+                _add(res.reason_codes, RC_LOOKTHROUGH_UNMAPPED)
     rest = value * max(0.0, 1.0 - weight_sum)
     if rest > _EPS:
         _issuer(res, f"{ticker}_other", f"Other holdings of {ticker}", rest, rest * lf, root, bucket=True)

@@ -66,6 +66,20 @@ async def run_batch_evening(
     if tracker:
         tracker.finish_phase("l1_outcome", 1, 0, note=_l1_note)
 
+    try:                                  # interim marks for not-yet-matured long horizons; never part of the final metrics
+        from portfolio_agent.tools.validation_engine import update_provisional_marks
+        update_provisional_marks()
+    except Exception as e:
+        log.warning(f"  L1b: provisional marks failed — {e}", event_type="warning")
+
+    try:            # shared fund data through the provider chain (issuer file -> SEC N-PORT -> yfinance); TTL-guarded, never fatal
+        from portfolio_agent.services.context import system_context
+        from portfolio_agent.services.fund_data_service import refresh_all_fund_data
+        _fd = refresh_all_fund_data(system_context("evening"))
+        log.info(f"  L1c: fund data — {_fd['funds']} funds, {_fd['counts']}", event_type="summary")
+    except Exception as e:
+        log.warning(f"  L1c: fund data refresh failed — {e}", event_type="warning")
+
     log.info("\n── Layer 2: Rolling Metrics ────────────────────────────────────", event_type="phase_start")
     if tracker:
         tracker.start_phase("l2_metrics", total=1)

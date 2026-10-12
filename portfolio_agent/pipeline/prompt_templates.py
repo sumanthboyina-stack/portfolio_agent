@@ -286,8 +286,9 @@ prediction_history, known_failure_patterns):
    For the top-level composite_score use the weights from the longest scheduled horizon (most balanced view).
 6. Map the overall composite to STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL.
 7. For EACH scheduled horizon below, provide direction, return range, conviction, the horizon-specific
-   weights used, AND a probability distribution across 5 return buckets (integers summing to 100):
-   strong_down (<-5%), moderate_down (-5% to -1%), flat (-1% to +1%), moderate_up (+1% to +5%), strong_up (>+5%).
+   weights used, AND a probability distribution across 5 return buckets (integers summing to 100). The bucket
+   RANGES scale with the horizon — a 1-year "flat" is not a 1-week "flat" — so use EXACTLY the ranges listed with each
+   horizon below, and judge that horizon's distribution by them.
    Be honest: if you're uncertain, spread probability across buckets. Don't collapse everything into one.
 {horizons_instruction}
 

@@ -29,8 +29,9 @@ from portfolio_agent.services.context import RequestContext, require_context
 from portfolio_agent.tools import fund_data_db as fdb
 from portfolio_agent.tools import fund_manual_db as mdb
 from portfolio_agent.tools import holdings_db as repo
+from portfolio_agent.tools import identifier_mapping as idmap
 from portfolio_agent.tools import investor_settings_db as sdb
-from portfolio_agent.tools.fund_data_providers import FundData, FundDataProvider, default_provider
+from portfolio_agent.tools.fund_data_providers import RC_HOLDINGS_KEPT_PREVIOUS, FundData, FundDataProvider, default_provider
 from portfolio_agent.tools.lookthrough import (
     SRC_MANUAL, SRC_NONE, SRC_OWN, SRC_PROXY, FundView, ViewHolding,
 )
@@ -134,6 +135,11 @@ def refresh_fund_data(ctx: RequestContext, tickers: list[str], *, provider: Fund
             if not data.ok:
                 status[t] = "no_data"
                 continue
+            if data.holdings:
+                try:                                                          # CUSIP / ISIN -> ticker: network, no transaction open
+                    idmap.map_fund_holdings(data, settings)
+                except Exception:
+                    pass                                                      # unmapped holdings stay keyed by CUSIP; never fatal
             itype = (repo.find_instrument(t) or {}).get("instrument_type")
             syms = [h.symbol.upper() for h in data.holdings if h.symbol]
             if itype in _FUND_OF_FUNDS_TYPES and syms and depth < max_depth:
@@ -143,9 +149,11 @@ def refresh_fund_data(ctx: RequestContext, tickers: list[str], *, provider: Fund
                 children.extend(h.symbol.upper() for h in data.holdings if h.holding_is_fund and h.symbol)
             try:
                 inst = repo.find_instrument(t)
+                _keep_previous_holdings(inst["instrument_id"], t, data)
                 fdb.save_fund_data(inst["instrument_id"], data, fetched_at=now.isoformat(timespec="seconds"))
                 status[t] = "fetched"
                 fetched_summary[t] = {"holdings": len(data.holdings), "coverage": data.holdings_coverage,
+                                      "mapped_coverage": data.mapped_coverage,
                                       "reason_codes": data.reason_codes}
             except Exception:
                 status[t] = "no_data"
@@ -161,6 +169,43 @@ def refresh_fund_data(ctx: RequestContext, tickers: list[str], *, provider: Fund
         except Exception:
             pass                                                              # the data is saved; the audit row is best-effort here
     return status
+
+
+def _keep_previous_holdings(instrument_id: int, ticker: str, data: FundData) -> None:
+    """A refresh that came back WITHOUT holdings (a source down, a filing not found) must not wipe the holdings already stored: the previous
+    list, its coverage, as-of date and source stay, marked FUND_HOLDINGS_KEPT_PREVIOUS. The write that follows is one transaction either way."""
+    if data.holdings:
+        return
+    prev = fdb.get_fund_data(instrument_id, ticker)
+    if prev is None or not prev.holdings:
+        return
+    data.holdings, data.holdings_coverage, data.mapped_coverage = list(prev.holdings), prev.holdings_coverage, prev.mapped_coverage
+    data.derivative_short_weight, data.as_of = prev.derivative_short_weight, prev.as_of
+    data.source = prev.source
+    data.source_detail = {**data.source_detail, "holdings": prev.source_detail.get("holdings") or prev.source}
+    data.reason_codes = list(dict.fromkeys([*data.reason_codes, RC_HOLDINGS_KEPT_PREVIOUS]))
+
+
+def held_fund_tickers() -> list[str]:
+    """Every fund ticker held in ANY portfolio (the shared fund tables serve everyone), real market symbols only."""
+    out = []
+    for t in repo.get_portfolio_tickers():
+        inst = repo.find_instrument(t)
+        if inst is not None and inst.get("instrument_type") in _FUND_TYPES:
+            out.append(t)
+    return out
+
+
+def refresh_all_fund_data(ctx: RequestContext, *, force: bool = False, provider: FundDataProvider | None = None) -> dict:
+    """Refresh every held fund through the provider chain (TTL-guarded unless force). Used by the evening batch and the admin "refresh now".
+    Returns {"funds": n, "status": {ticker: status}, "counts": {status: n}}; never raises."""
+    tickers = held_fund_tickers()
+    status = refresh_fund_data(ctx, tickers, provider=provider, force=force) if tickers else {}
+    counts: dict[str, int] = {}
+    for st in status.values():
+        k = st.split(":")[0]
+        counts[k] = counts.get(k, 0) + 1
+    return {"funds": len(tickers), "status": status, "counts": counts}
 
 
 # ── Manual breakdown (private) ────────────────────────────────────────────────
@@ -234,11 +279,12 @@ def clear_manual_breakdown(ctx: RequestContext, ticker: str) -> bool:
 def _view_from_data(inst: dict, data: FundData, source: str, via: str | None = None) -> FundView:
     return FundView(
         ticker=inst["ticker"], name=inst.get("name"), source=source, via=via,
-        holdings=[ViewHolding(h.symbol, h.name, h.weight, h.holding_is_fund) for h in data.holdings],
+        holdings=[ViewHolding(h.symbol, h.name, h.weight, h.holding_is_fund, h.cusip, h.isin) for h in data.holdings],
         sector_weights=dict(data.sector_weights), asset_class_weights=dict(data.asset_class_weights),
         country_weights=data.country_weights, asset_class=inst.get("asset_class"),
         expense_ratio=data.profile.expense_ratio if data.profile else None,
-        holdings_coverage=data.holdings_coverage, as_of=data.as_of, reason_codes=list(data.reason_codes))
+        holdings_coverage=data.holdings_coverage, mapped_coverage=data.mapped_coverage, as_of=data.as_of,
+        reason_codes=list(data.reason_codes))
 
 
 def _view_from_manual(inst: dict, manual: dict) -> FundView:

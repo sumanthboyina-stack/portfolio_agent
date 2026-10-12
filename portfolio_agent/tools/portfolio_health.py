@@ -59,6 +59,8 @@ RC_FUND_DATA_STALE = "FUND_DATA_STALE"
 RC_FUND_DATA_MISSING = "FUND_DATA_MISSING"
 RC_NO_BREAKDOWN = "CIT_NO_BREAKDOWN"
 RC_RESTRICTED_UNREADABLE = "RESTRICTED_LIST_UNREADABLE"
+RC_TRADES_WITHOUT_CLEARANCE = "TRADES_WITHOUT_CLEARANCE"     # ledger trades with clearance_status 'missing'
+RC_CLEARANCE_UNKNOWN = "TRADE_CLEARANCE_UNKNOWN"             # ledger trades whose approvals could not be read
 
 _FUND_TYPES = {t.value for t in FUND_INSTRUMENT_TYPES}
 _NO_DATA_FUND_TYPES = {InstrumentType.CIT.value, InstrumentType.STABLE_VALUE.value}
@@ -144,6 +146,7 @@ class HealthInputs:
     fund_fetched_at: dict = field(default_factory=dict)     # {TICKER: iso fetched_at} of stored fund data
     now: datetime | None = None
     issuer_key: dict = field(default_factory=dict)          # {symbol: merged issuer key} (e.g. GOOG / GOOGL share a CIK)
+    clearance: dict | None = None                           # ledger_db.clearance_counts: {missing, unknown, approved, not_required, missing_tickers}
 
 
 # ── Small pure helpers ────────────────────────────────────────────────────────
@@ -589,8 +592,8 @@ def _profile(inp: HealthInputs) -> HealthCheck:
     return _check("profile", "Risk profile", G, f"{pol.profile.title()} profile ({str(pol.profile_source).lower()}).", metrics)
 
 
-def _compliance(inp: HealthInputs) -> HealthCheck:
-    # TODO(ledger): once the transaction ledger exists, add clearance / holding-period checks here.
+def _restricted_part(inp: HealthInputs) -> HealthCheck:
+    """The restricted-list half of the compliance check (what the check was before the ledger existed)."""
     if inp.restricted is None:
         return _check("compliance", "Restricted list", U, "The restricted list could not be read, so it was not checked.",
                       codes=[RC_RESTRICTED_UNREADABLE])
@@ -602,6 +605,29 @@ def _compliance(inp: HealthInputs) -> HealthCheck:
                       {"held_restricted": [r["ticker"] for r in hits]})
     return _check("compliance", "Restricted list", G, f"None of your holdings are on your restricted list ({len(inp.restricted)} listed).",
                   {"held_restricted": []})
+
+
+def _compliance(inp: HealthInputs) -> HealthCheck:
+    restricted = _restricted_part(inp)
+    cl = inp.clearance or {}
+    missing, unknown = int(cl.get("missing") or 0), int(cl.get("unknown") or 0)
+    if not missing and not unknown:
+        return restricted                                  # no ledger trade needs attention: exactly the restricted-list check, as before
+    parts, statuses, codes, metrics = [], [restricted.status], list(restricted.reason_codes), dict(restricted.metrics)
+    if restricted.status != G:
+        parts.append(restricted.summary)
+    if missing:
+        tk = ", ".join(cl.get("missing_tickers") or [])
+        parts.append(f"{missing} recorded trade{'s' if missing != 1 else ''} had no pre-clearance approval on file" + (f" ({tk})" if tk else "") +
+                     ". Review them on the Accounts page.")
+        statuses.append(A)
+        codes.append(RC_TRADES_WITHOUT_CLEARANCE)
+    if unknown:
+        parts.append(f"{unknown} recorded trade{'s' if unknown != 1 else ''} could not be checked for pre-clearance (approvals unreadable).")
+        statuses.append(W)
+        codes.append(RC_CLEARANCE_UNKNOWN)
+    metrics.update({"trades_missing_clearance": missing, "trades_clearance_unknown": unknown, "missing_clearance_tickers": cl.get("missing_tickers") or []})
+    return _check("compliance", "Compliance", worst(statuses), " ".join(parts), metrics, codes)
 
 
 def _data_quality(sc: _Scope, inp: HealthInputs) -> HealthCheck:
@@ -774,6 +800,12 @@ def gather_inputs(owner: str, portfolio: dict, *, now: datetime | None = None) -
         restricted = list_restricted_by_owner(owner)
     except Exception:
         restricted = None
+    try:                                                  # ledger trades with no pre-clearance approval (empty for a portfolio with no ledger trades)
+        from portfolio_agent.tools import ledger_db as ldb
+        with repo.unit_of_work() as lc:
+            clearance = ldb.clearance_counts(lc, pid)
+    except Exception:
+        clearance = None
     ikey = {}
     cik = pa._issuer_key_map()
     for v in views.values():
@@ -785,7 +817,7 @@ def gather_inputs(owner: str, portfolio: dict, *, now: datetime | None = None) -
         ikey[t] = exposures.issuer_of.get(t) or cik.get(t, t)
     return HealthInputs(owner=owner, policy=policy, settings=settings, holdings=holdings, cash=cash, accounts=accounts,
                         exposures=exposures, views=views, restricted=restricted, share_class_peers=peers,
-                        fund_fetched_at=fetched, now=now, issuer_key=ikey)
+                        fund_fetched_at=fetched, now=now, issuer_key=ikey, clearance=clearance)
 
 
 def _cache_key(inp: HealthInputs, day: date) -> str:
@@ -794,6 +826,7 @@ def _cache_key(inp: HealthInputs, day: date) -> str:
     thresholds = {k: inp.settings.get(k) for k in sorted(inp.settings) if k.startswith("health_") or k.startswith("lookthrough")
                   or k.endswith("_ttl_hours") or k == "high_expense_ratio_pct"}
     raw = json.dumps([inp.exposures.version, inp.policy.fingerprint, cash, restricted, thresholds, day.isoformat(),
+                      [(inp.clearance or {}).get("missing"), (inp.clearance or {}).get("unknown")],
                       [(h.get("ticker"), h.get("account_id"), h.get("shares"), h.get("current_price"), h.get("price_as_of")) for h in inp.holdings]],
                      default=str, sort_keys=True)
     import hashlib

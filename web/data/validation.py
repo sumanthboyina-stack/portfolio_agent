@@ -44,7 +44,7 @@ sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 
-from portfolio_agent.tools.prediction_db import LEGACY_REVIEW_SCOPES, VALIDATION_ROLES, role_clause, scope_clause
+from portfolio_agent.tools.prediction_db import LATEST_EDGES_ONLY, LEGACY_REVIEW_SCOPES, VALIDATION_ROLES, role_clause, scope_clause
 
 _DB = _ROOT / "data" / "portfolio.db"
 
@@ -256,9 +256,9 @@ def _load_rolling_metrics_series(segment: str = "All") -> pd.DataFrame:
                    brier_score, mean_log_loss, num_predictions,
                    high_conviction_accuracy, low_conviction_accuracy
             FROM metrics_rolling
-            WHERE segment = ?
+            WHERE segment = ? AND {LATEST}
             ORDER BY metric_date ASC
-        """, [bucket]).fetchall()
+        """.replace("{LATEST}", LATEST_EDGES_ONLY), [bucket]).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
         df["metric_date"] = pd.to_datetime(df["metric_date"])
@@ -336,7 +336,7 @@ def _load_evaluated_predictions_df(
                    predicted_return_low, predicted_return_high,
                    p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
                    conviction_score, composite_score, trigger_type, model_name, prediction_role,
-                   instrument_type, leverage_factor
+                   instrument_type, leverage_factor, COALESCE(bucket_edges_version, 1) AS bucket_edges_version
             FROM predictions
             {where}
             ORDER BY COALESCE(evaluation_date, as_of_date) ASC
@@ -345,6 +345,10 @@ def _load_evaluated_predictions_df(
     df = pd.DataFrame([dict(r) for r in rows])
     if not df.empty:
         df["event_date"] = pd.to_datetime(df["evaluation_date"].fillna(df["as_of_date"]))
+        # The edges COHORT of each row: the lowest edges version with identical edges for its horizon, so a horizon whose edges
+        # did not change (5d) is one cohort across versions and rows scored under different edges never share a metric.
+        from portfolio_agent.tools import bucket_edges as _be
+        df["edges_cohort"] = [_be.canonical_version(h, v) for h, v in zip(df["horizon_days"], df["bucket_edges_version"])]
     return df
 
 
@@ -489,6 +493,21 @@ def build_horizon_reports(df: pd.DataFrame, fetch=None, use_prices: bool = True)
     return reports
 
 
+def build_provisional_reports(horizons: tuple[int, ...] | None = None, *, roles=VALIDATION_ROLES,
+                              scopes=LEGACY_REVIEW_SCOPES) -> dict[int, dict]:
+    """
+    {horizon: validation_metrics.provisional_beat_benchmark(...)} for the long horizons: how the NOT-YET-MATURED calls stand so
+    far. Read from prediction_provisional_marks only, so it can never feed the final metrics above; the page shows it under its
+    own "provisional" heading.
+    """
+    from portfolio_agent.tools import validation_metrics as vm
+    from portfolio_agent.tools.prediction_db import get_provisional_marks
+    out: dict[int, dict] = {}
+    for h in (horizons or vm.LONG_HORIZONS):
+        out[int(h)] = vm.provisional_beat_benchmark(pd.DataFrame(get_provisional_marks(int(h), scopes=scopes, roles=roles)))
+    return out
+
+
 def build_scorecards(df: pd.DataFrame, fetch=None, use_prices: bool = True) -> dict:
     """
     {horizon_days: Scorecard} for an evaluated-predictions frame (see _load_evaluated_predictions_df).
@@ -503,8 +522,16 @@ def build_scorecards(df: pd.DataFrame, fetch=None, use_prices: bool = True) -> d
     if df is None or df.empty or "horizon_days" not in df.columns:
         return {}
     cards: dict = {}
-    for h, sub in df.dropna(subset=["horizon_days"]).groupby("horizon_days"):
-        sub = sub.reset_index(drop=True)
+    for h, sub_all in df.dropna(subset=["horizon_days"]).groupby("horizon_days"):
+        # ONE edges cohort per horizon: the newest edges that have any evaluated row. Rows scored under older, different
+        # edges are never mixed in — they are counted on the card (other_edges_n) and viewable by cohort on the QA page.
+        sub_all = sub_all.reset_index(drop=True)
+        if "edges_cohort" in sub_all.columns:
+            newest = int(sub_all["edges_cohort"].max())
+            sub = sub_all[sub_all["edges_cohort"] == newest].reset_index(drop=True)
+            other_n = int(len(sub_all) - len(sub))
+        else:
+            sub, other_n = sub_all, 0
         streaked = _add_streak_ids(sub)
         streak_n = int(streaked["streak_id"].nunique()) if "streak_id" in streaked.columns else None
         closes: dict = {}
@@ -513,7 +540,9 @@ def build_scorecards(df: pd.DataFrame, fetch=None, use_prices: bool = True) -> d
                 closes = load_price_history(vm.price_requests(sub), fetch=fetch)
             except Exception:
                 closes = {}
-        cards[int(h)] = compute_scorecard(sub, int(h), closes, streak_n)
+        card = compute_scorecard(sub, int(h), closes, streak_n)
+        card.other_edges_n = other_n
+        cards[int(h)] = card
     return cards
 
 

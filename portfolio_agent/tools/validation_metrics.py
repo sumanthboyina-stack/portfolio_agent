@@ -12,7 +12,9 @@ Expected columns on the evaluated-rows frame (extra columns are ignored):
     predicted_direction, actual_return, benchmark_return, excess_return,
     p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up
 
-Class labels are 3-way UP / DOWN / FLAT, with FLAT = |return| <= FLAT_THRESHOLD.
+Class labels are 3-way UP / DOWN / FLAT, with FLAT = |return| <= the FLAT edge of the cohort's horizon and bucket-edges version
+(tools.bucket_edges; 1% for 5 days under version 1). A cohort is ONE horizon and ONE edges version: mixing versions with
+different edges in one metric raises, because their classes would not mean the same thing.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from portfolio_agent.tools import bucket_edges as be
 from portfolio_agent.tools.validation_engine import (
     FLAT_THRESHOLD,
     _BUCKET_NAMES,
@@ -70,10 +73,11 @@ N_BOOT = 1000
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def direction_from_return(ret: Optional[float]) -> Optional[str]:
+def direction_from_return(ret: Optional[float], edges: Optional["be.Edges"] = None) -> Optional[str]:
+    """UP / DOWN / FLAT for a return under `edges` (default: the original 5-day, version-1 edges)."""
     if ret is None or (isinstance(ret, float) and math.isnan(ret)):
         return None
-    return "UP" if ret > FLAT_THRESHOLD else "DOWN" if ret < -FLAT_THRESHOLD else "FLAT"
+    return be.direction(ret, edges or be.LEGACY_EDGES)
 
 
 def _require_single_horizon(df: pd.DataFrame) -> Optional[int]:
@@ -82,7 +86,26 @@ def _require_single_horizon(df: pd.DataFrame) -> Optional[int]:
     hs = df["horizon_days"].dropna().unique()
     if len(hs) > 1:
         raise ValueError(f"validation_metrics works per horizon; got horizons {sorted(hs.tolist())}")
-    return int(hs[0]) if len(hs) else None
+    h = int(hs[0]) if len(hs) else None
+    _edges_of(df, h)                       # also refuses a cohort that mixes different bucket edges
+    return h
+
+
+def _edges_of(df: pd.DataFrame, horizon: Optional[int] = None) -> "be.Edges":
+    """The ONE set of bucket edges a (single-horizon) cohort was scored under. Rows from versions with identical edges for the
+    horizon are the same cohort; rows whose edges differ must never share a metric (ValueError)."""
+    if df is None or df.empty:
+        return be.LEGACY_EDGES
+    if horizon is None and "horizon_days" in df.columns and df["horizon_days"].notna().any():
+        horizon = int(df["horizon_days"].dropna().iloc[0])
+    if "bucket_edges_version" not in df.columns:
+        return be.edges_for(horizon, None)
+    versions = df["bucket_edges_version"].where(df["bucket_edges_version"].notna(), 1).astype(int).unique().tolist()
+    edges = {be.edges_for(horizon, v) for v in versions}
+    if len(edges) > 1:
+        raise ValueError(f"validation_metrics: this cohort mixes different bucket edges (edges versions {sorted(versions)}); "
+                         f"score one edges version at a time")
+    return edges.pop()
 
 
 def prepare_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -94,7 +117,8 @@ def prepare_rows(df: pd.DataFrame) -> pd.DataFrame:
     d = d[d["actual_return"].notna()]
     d["pred_dir"] = d["predicted_direction"].fillna("").astype(str).str.upper()
     d = d[d["pred_dir"].isin(DIRECTIONS)].copy()
-    d["actual_dir"] = d["actual_return"].map(direction_from_return)
+    edges = _edges_of(d)
+    d["actual_dir"] = d["actual_return"].map(lambda r: direction_from_return(r, edges))
     return d.reset_index(drop=True)
 
 
@@ -209,13 +233,14 @@ def baseline_labels(df: pd.DataFrame, closes_by_symbol: Optional[dict[str, dict[
     out["majority_class"] = d["actual_dir"].value_counts().idxmax()
 
     bench = d["benchmark_return"] if "benchmark_return" in d.columns else pd.Series(index=d.index, dtype=float)
-    out["spy_same_window"] = bench.map(direction_from_return)
+    edges = _edges_of(d, h)
+    out["spy_same_window"] = bench.map(lambda r: direction_from_return(r, edges))
 
     spy = closes_by_symbol.get("SPY") or {}
 
     def _prior(sym_closes, as_of):
         r = trailing_return(sym_closes, str(as_of)[:10], h) if (h and as_of is not None) else None
-        return direction_from_return(r)
+        return direction_from_return(r, edges)
 
     out["spy_prior_window"] = [_prior(spy, a) for a in d["as_of_date"]]
     out["momentum"] = [
@@ -337,7 +362,7 @@ def probability_baselines(df: pd.DataFrame) -> dict:
     APEX Brier / log-loss against the baseline of always forecasting the
     sample's own base rates, on rows that carry a full p_* distribution:
 
-      binary   UP vs not-UP (actual_up = ret > FLAT_THRESHOLD); matches the
+      binary   UP vs not-UP (actual_up = ret > the cohort's flat edge); matches the
                stored brier_score / log_loss columns.
                baseline Brier = p(1-p), baseline log-loss = binary entropy,
                p = empirical UP rate.
@@ -355,15 +380,17 @@ def probability_baselines(df: pd.DataFrame) -> dict:
     if d.empty:
         return out
     bin_b, bin_l, five_b, five_l, ups, buckets = [], [], [], [], [], []
-    for rec in d[P_COLUMNS + ["actual_return"]].to_dict("records"):
+    edges = _edges_of(d)
+    keep = P_COLUMNS + ["actual_return"] + [c for c in ("horizon_days", "bucket_edges_version") if c in d.columns]
+    for rec in d[keep].to_dict("records"):
         ret = float(rec["actual_return"])
         b, l = compute_distribution_metrics(rec, ret)
         fb, fl = brier_5bucket(rec, ret), logloss_5bucket(rec, ret)
         if b is None or fb is None:      # all-zero distribution
             continue
         bin_b.append(b); bin_l.append(l); five_b.append(fb); five_l.append(fl)
-        ups.append(1.0 if ret > FLAT_THRESHOLD else 0.0)
-        buckets.append(actual_return_bucket(ret))
+        ups.append(1.0 if ret > edges.flat else 0.0)
+        buckets.append(be.bucket_of(ret, edges))
     n = len(ups)
     if not n:
         return out
@@ -442,6 +469,78 @@ def effective_sample(df: pd.DataFrame, streak_n: Optional[int] = None) -> dict:
         "low_sample": len(kept) < MIN_NONOVERLAP_N,
         "kept": kept,
     }
+
+
+# ── beat-the-benchmark accuracy (the headline for long horizons) ───────────────
+#
+# Over 63 and 250 days the 3-class label (UP/DOWN/FLAT against a horizon-scaled band) is mostly the market's own drift, so the
+# question that matters is: did an UP call beat SPY and a DOWN call lag it? The count that decides how much to trust it is the
+# EFFECTIVE n -- the non-overlapping calls -- because a ticker's overlapping long windows are one observation, not many.
+
+LONG_HORIZONS = (63, 250)
+
+
+def _beat_hit(row) -> bool:
+    return (row["pred_dir"] == "UP" and row["excess_return"] > 0) or (row["pred_dir"] == "DOWN" and row["excess_return"] < 0)
+
+
+def beat_benchmark_accuracy(df: pd.DataFrame) -> dict:
+    """
+    FINAL (matured) rows only. Of the UP / DOWN calls with an excess return over SPY, the share that beat (UP) or lagged (DOWN)
+    the benchmark -- `raw_*` over every such call, and the headline `accuracy` (+ Wilson 95% CI) over the non-overlapping calls
+    (`effective_n`). `too_early` is True while effective_n < MIN_NONOVERLAP_N: the number is shown, but not as evidence.
+    FLAT calls make no benchmark claim and are not scored. `always_up_rate` is what always saying UP would have scored.
+    """
+    d = prepare_rows(df)
+    _require_single_horizon(d)
+    out = {"final": True, "raw_n": 0, "raw_accuracy": None, "effective_n": 0, "accuracy": None, "ci_low": None, "ci_high": None,
+           "always_up_rate": None, "too_early": True, "min_effective_n": MIN_NONOVERLAP_N}
+    if d.empty or "excess_return" not in d.columns:
+        return out
+    d = d[d["excess_return"].notna()]
+    out["always_up_rate"] = float((d["excess_return"] > 0).mean()) if len(d) else None
+    calls = d[d["pred_dir"].isin(["UP", "DOWN"])]
+    if calls.empty:
+        return out
+    out["raw_n"] = len(calls)
+    out["raw_accuracy"] = float(calls.apply(_beat_hit, axis=1).mean())
+    kept = nonoverlap_rows(calls)
+    k = int(kept.apply(_beat_hit, axis=1).sum()) if len(kept) else 0
+    out["effective_n"] = len(kept)
+    if len(kept):
+        out["accuracy"] = k / len(kept)
+        out["ci_low"], out["ci_high"] = wilson_ci(k, len(kept))
+    out["too_early"] = len(kept) < MIN_NONOVERLAP_N
+    return out
+
+
+def provisional_beat_benchmark(marks: pd.DataFrame) -> dict:
+    """
+    PROVISIONAL, never final: the same question asked of predictions that have NOT matured yet, using the return so far against
+    SPY's return so far (prediction_provisional_marks). It reads only that table's frame and is returned under its own keys
+    (`provisional`: True, `accuracy_so_far`), so it cannot be mistaken for -- or summed into -- beat_benchmark_accuracy.
+    Rows are ones with an excess_so_far; effective_n counts non-overlapping calls the same way, and `too_early` uses the same rule.
+    """
+    out = {"provisional": True, "n": 0, "effective_n": 0, "accuracy_so_far": None, "mean_excess_so_far": None,
+           "mean_fraction_elapsed": None, "too_early": True, "min_effective_n": MIN_NONOVERLAP_N}
+    if marks is None or marks.empty:
+        return out
+    d = marks.copy()
+    d["pred_dir"] = d["predicted_direction"].astype(str).str.upper()
+    d = d[d["excess_so_far"].notna() & d["pred_dir"].isin(["UP", "DOWN"])]
+    if d.empty:
+        return out
+    d["excess_return"] = d["excess_so_far"]
+    hit = d.apply(_beat_hit, axis=1)
+    kept = nonoverlap_rows(d)
+    out["n"] = len(d)
+    out["effective_n"] = len(kept)
+    out["accuracy_so_far"] = float(hit.mean())
+    out["mean_excess_so_far"] = float(d["excess_so_far"].mean())
+    h = d["horizon_days"].astype(float)
+    out["mean_fraction_elapsed"] = float((d["trading_days_elapsed"].astype(float) / h).clip(upper=1.0).mean())
+    out["too_early"] = len(kept) < MIN_NONOVERLAP_N
+    return out
 
 
 # ── date-aware ranking metrics ────────────────────────────────────────────────
@@ -615,10 +714,12 @@ def five_bucket_skill_ci(d: pd.DataFrame, n_boot: int, rng) -> dict:
         return out
     x = d[d["actual_return"].notna() & d[P_COLUMNS].notna().all(axis=1)]
     rec, keep = [], []
-    for i, r in zip(x.index, x[P_COLUMNS + ["actual_return"]].to_dict("records")):
+    edges = _edges_of(x)
+    cols = P_COLUMNS + ["actual_return"] + [c for c in ("horizon_days", "bucket_edges_version") if c in x.columns]
+    for i, r in zip(x.index, x[cols].to_dict("records")):
         b = brier_5bucket(r, float(r["actual_return"]))
         if b is not None:
-            rec.append((b, _BUCKET_NAMES.index(actual_return_bucket(float(r["actual_return"])))))
+            rec.append((b, _BUCKET_NAMES.index(be.bucket_of(float(r["actual_return"]), edges))))
             keep.append(i)
     if not rec:
         return out
@@ -819,7 +920,8 @@ def flat_diagnostic(df: pd.DataFrame) -> dict:
         }
     out["derived_rules"] = rules
     out["calibration"] = {"mean_p_flat_all_rows": float(p["p_flat"].mean()),
-                          "actual_flat_rate": float((d["actual_dir"] == "FLAT").mean())}
+                          "actual_flat_rate": float((d["actual_dir"] == "FLAT").mean()),
+                          "flat_edge": _edges_of(d).flat}
     return out
 
 
@@ -830,10 +932,12 @@ def horizon_report(df: pd.DataFrame, closes_by_symbol: Optional[dict[str, dict[s
     _require_single_horizon(d)
     eff = effective_sample(d, streak_n)
     return {
+        "edges": _edges_of(d).to_dict() if not d.empty else None,       # the cohort's bucket edges, for the pages to show
         "comparison": compare_predictors(d, closes_by_symbol),
         "nonoverlap_comparison": compare_predictors(eff["kept"], closes_by_symbol),
         "confusion": confusion_matrix(d),
         "beat_market": beat_market(d),
+        "beat_benchmark": beat_benchmark_accuracy(d),
         "probability": probability_baselines(d),
         "ranking": ranking_report(d),
         "flat_diagnostic": flat_diagnostic(d),

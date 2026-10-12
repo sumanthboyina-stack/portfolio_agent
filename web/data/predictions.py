@@ -175,7 +175,7 @@ def _load_edge_data(horizon_days: int, risk_segment: str | None) -> dict | None:
                 """SELECT directional_accuracy, num_predictions
                    FROM metrics_rolling
                    WHERE horizon_days = ? AND segment = ?
-                   ORDER BY computed_at DESC LIMIT 1""",
+                   ORDER BY bucket_edges_version DESC, computed_at DESC LIMIT 1""",
                 (horizon_days, risk_segment),
             ).fetchone()
         else:
@@ -183,7 +183,7 @@ def _load_edge_data(horizon_days: int, risk_segment: str | None) -> dict | None:
                 """SELECT directional_accuracy, num_predictions
                    FROM metrics_rolling
                    WHERE horizon_days = ?
-                   ORDER BY computed_at DESC LIMIT 1""",
+                   ORDER BY bucket_edges_version DESC, computed_at DESC LIMIT 1""",
                 (horizon_days,),
             ).fetchone()
     return dict(row) if row else None

@@ -435,6 +435,32 @@ def evaluate_clearance(ticker: str, profile, *, action: str = DEFAULT_ACTION, si
     )
 
 
+LEDGER_CLEARANCE_APPROVED = "approved"
+LEDGER_CLEARANCE_MISSING = "missing"
+LEDGER_CLEARANCE_NOT_REQUIRED = "not_required"
+LEDGER_CLEARANCE_UNKNOWN = "unknown"
+
+
+def evaluate_ledger_clearance(owner: str, ticker: str, side: str, trade_date: str, *,
+                              pre_clearance_required: bool) -> tuple[str, Optional[int]]:
+    """
+    Was a trade that has ALREADY HAPPENED covered by a pre-clearance approval on its trade date? (status, approval_id). Used by the transaction
+    ledger, which records what occurred and so never blocks: 'not_required' when the owner's pre_clearance_required is off, 'approved' with the
+    approval's id when trade_approvals has a grant covering ticker + side + date (an approval for the side, "buy" / "sell", or a general
+    "trade" one), 'missing' when it has none, and 'unknown' when the approvals could not be read (never silently "missing" or "approved").
+    Unlike evaluate_clearance this ignores the restricted list and blackout windows: it answers the approval question only.
+    """
+    if not pre_clearance_required:
+        return LEDGER_CLEARANCE_NOT_REQUIRED, None
+    try:
+        from portfolio_agent.tools.trade_approvals_db import get_approval_as_of
+        actions = [str(side).lower(), DEFAULT_ACTION]
+        row = get_approval_as_of(f"user:{owner}", ticker, actions, str(trade_date)[:10])
+    except Exception:
+        return LEDGER_CLEARANCE_UNKNOWN, None
+    return (LEDGER_CLEARANCE_APPROVED, row["id"]) if row else (LEDGER_CLEARANCE_MISSING, None)
+
+
 def _build_memo(ticker: str, action: str, decision: str, reason_codes: list[str], evidence: dict) -> str:
     if decision == DECISION_BLOCKED:
         why = "on the restricted list" if RC_RESTRICTED_LIST_HIT in reason_codes else "an active blackout window applies"

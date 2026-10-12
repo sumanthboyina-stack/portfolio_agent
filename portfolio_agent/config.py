@@ -6,7 +6,7 @@ module no longer reads a YAML config file. The event_driven section was
 never actually overridden by anyone (config/portfolio.yaml only ever held
 `holdings:`), so these are now just the defaults directly — if per-deployment
 overrides are needed again later, they belong in a small settings table, not
-a reintroduced config file.
+a reintroduced config file. (The scheduled cadence now is: engine_settings.horizon_cadence_json.)
 """
 
 from __future__ import annotations
@@ -18,12 +18,6 @@ _DEFAULT_EVENT_DRIVEN: dict = {
     "evening_batch_time": "17:30",
     "intraday_severity_threshold": 3,
     "watchlist_severity_threshold": 3,
-    "scheduled_cadence": {
-        "horizon_5d":   "weekly_monday",
-        "horizon_21d":  "weekly_monday",
-        "horizon_63d":  "monthly_first_trading_day",
-        "horizon_250d": "quarterly_first_trading_day",
-    },
     "detectors": {
         "earnings":       True,
         "sec_8k":         True,
@@ -35,5 +29,13 @@ _DEFAULT_EVENT_DRIVEN: dict = {
 
 
 def get_event_driven_config() -> dict:
-    """Return the event-driven scheduling config (currently just the defaults)."""
-    return dict(_DEFAULT_EVENT_DRIVEN)
+    """The event-driven scheduling config: the defaults above, with `scheduled_cadence` read from the database
+    (engine_settings.horizon_cadence_json, admin-editable) on every call, so a change applies on the next run. If the
+    database cannot be read the seed cadence is used, so a scheduled run never dies on settings."""
+    cfg = dict(_DEFAULT_EVENT_DRIVEN)
+    from portfolio_agent.tools import engine_settings_db as esdb
+    try:
+        cfg["scheduled_cadence"] = esdb.scheduled_cadence()
+    except Exception:
+        cfg["scheduled_cadence"] = {f"horizon_{h}d": r for h, r in esdb.SEED_HORIZON_CADENCE.items()}
+    return cfg

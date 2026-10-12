@@ -430,7 +430,7 @@ def test_stock_only_portfolio_is_unchanged_by_look_through():
     assert [k for k in c] == ["position_concentration", "sector_concentration", "issuer_concentration",
                               "cash_reserve_for_candidate", "leveraged_inverse_exposure", "instrument_type_allowed"]
     assert c["leveraged_inverse_exposure"].actual_pct == 0.0 and c["leveraged_inverse_exposure"].breached is False
-    assert (pa.EXPOSURES_VERSION, pa.ASSESSMENT_VERSION) == ("portfolio-exposures/2.0", "portfolio-assessment/3.0")
+    assert (pa.EXPOSURES_VERSION, pa.ASSESSMENT_VERSION) == ("portfolio-exposures/2.1", "portfolio-assessment/3.0")
 
 
 def test_issuer_and_sector_checks_use_look_through_with_the_split_in_plain_words():

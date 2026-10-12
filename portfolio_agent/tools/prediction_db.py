@@ -30,6 +30,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -243,7 +244,21 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             mean_log_loss          REAL,
             num_predictions        INTEGER,
             computed_at            TEXT,
-            PRIMARY KEY (metric_date, horizon_days, segment, system_version, lookback_days)
+            bucket_edges_version   INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (metric_date, horizon_days, segment, system_version, lookback_days, bucket_edges_version)
+        )
+    """)
+    # Interim, NOT-final marks for predictions that have not matured yet (long horizons). A separate table on purpose: nothing
+    # here is ever read by the final metrics, which come only from the evaluated columns of `predictions`.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS prediction_provisional_marks (
+            prediction_id      INTEGER PRIMARY KEY,
+            marked_on          TEXT    NOT NULL,
+            trading_days_elapsed INTEGER NOT NULL,
+            return_so_far      REAL,
+            benchmark_so_far   REAL,
+            excess_so_far      REAL,
+            updated_at         TEXT    NOT NULL
         )
     """)
     conn.execute("""
@@ -290,6 +305,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("outcome_score",               "REAL"),
         ("in_predicted_range",          "INTEGER"),
         ("system_version",              "TEXT"),
+        # The horizon-scaled bucket edges this prediction was MADE under (tools.bucket_edges). It is always scored with them.
+        # Rows that predate the column are version 1 (the old fixed ±1% / ±5% / 2% for every horizon).
+        ("bucket_edges_version",        "INTEGER"),
         ("prompt_hash",                 "TEXT"),
         ("snapshot_fundamentals_score", "REAL"),
         ("snapshot_news_score",         "REAL"),
@@ -344,6 +362,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
               [ROLE_LEGACY_RANDOM])
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_role ON predictions(prediction_role, horizon_days)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_itype ON predictions(instrument_type, horizon_days)")
+    # Rows that predate horizon-scaled bucket edges were made (and prompted) under the old fixed edges: version 1. Conditional
+    # like every backfill here, so a connection that has nothing to migrate takes no write lock.
+    _backfill(conn, "bucket_edges_version IS NULL", "UPDATE predictions SET bucket_edges_version = 1 WHERE bucket_edges_version IS NULL")
     # Rows that predate scopes stay unclassified: they are never promoted to shared
     # by default and only reach readers through the restricted legacy path.
     _backfill(conn, "scope IS NULL", "UPDATE predictions SET scope = ? WHERE scope IS NULL", [SCOPE_LEGACY])
@@ -394,20 +415,58 @@ def _migrate(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_predictions_ticker_horizon
         ON predictions (ticker, as_of_date, horizon_days)
     """)
+    _rebuild_metrics_rolling_with_edges(conn)
+
+
+def _rebuild_metrics_rolling_with_edges(conn: sqlite3.Connection) -> None:
+    """
+    metrics_rolling's primary key now includes bucket_edges_version (rolling metrics are computed per edges version and never
+    mix them). SQLite cannot change a primary key in place, so an existing table is copied into the new shape — every row kept,
+    as version 1, the edges all of them were scored under — and the old table dropped only after the copy. Runs once.
+    """
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(metrics_rolling)").fetchall()]
+    if not cols or "bucket_edges_version" in cols:
+        return
+    conn.execute("ALTER TABLE metrics_rolling RENAME TO metrics_rolling_pre_edges")
+    conn.execute("""
+        CREATE TABLE metrics_rolling (
+            metric_date        TEXT    NOT NULL,
+            horizon_days       INTEGER NOT NULL,
+            segment            TEXT    NOT NULL DEFAULT 'unknown',
+            system_version     TEXT    NOT NULL DEFAULT 'v1.0',
+            lookback_days      INTEGER NOT NULL,
+            directional_accuracy   REAL,
+            in_range_pct           REAL,
+            mean_excess_return     REAL,
+            mean_error_magnitude   REAL,
+            high_conviction_accuracy REAL,
+            low_conviction_accuracy  REAL,
+            brier_score            REAL,
+            mean_log_loss          REAL,
+            num_predictions        INTEGER,
+            computed_at            TEXT,
+            bucket_edges_version   INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (metric_date, horizon_days, segment, system_version, lookback_days, bucket_edges_version)
+        )""")
+    old_cols = [c for c in cols if c != "bucket_edges_version"]
+    names = ", ".join(old_cols)
+    conn.execute(f"INSERT INTO metrics_rolling ({names}, bucket_edges_version) SELECT {names}, 1 FROM metrics_rolling_pre_edges")
+    conn.execute("DROP TABLE metrics_rolling_pre_edges")
 
 
 # ── Trading calendar helpers ───────────────────────────────────────────────────
 
-def _us_market_holidays(year: int) -> set[date]:
+@lru_cache(maxsize=32)
+def _us_market_holidays(year: int) -> frozenset[date]:
     """Return approximate NYSE holidays for the given year (excludes Good Friday)."""
     try:
         from pandas.tseries.holiday import USFederalHolidayCalendar
         from pandas import Timestamp
         cal = USFederalHolidayCalendar()
         holidays_ts = cal.holidays(start=f"{year}-01-01", end=f"{year}-12-31")
-        return {Timestamp(ts).date() for ts in holidays_ts}
+        return frozenset(Timestamp(ts).date() for ts in holidays_ts)
     except Exception:
-        return set()
+        return frozenset()
 
 
 def is_trading_day(dt: date) -> bool:
@@ -427,9 +486,9 @@ def _next_trading_day(dt: date) -> date:
 
 def _evaluation_date(start: date, horizon_days: int) -> str:
     """
-    Compute the evaluation date for a prediction made on start.
-    Approximately horizon_days trading days forward.
-    Uses business-day offset from pandas.
+    LEGACY rule: the evaluation date as a weekday offset (pandas BDay, holidays ignored). insert_prediction no longer uses
+    it — new predictions use trading_day_evaluation_date — but it is kept as the record of how every earlier row's
+    evaluation_date was derived.
     """
     try:
         from pandas import Timestamp
@@ -439,6 +498,21 @@ def _evaluation_date(start: date, horizon_days: int) -> str:
         # fallback: rough calendar-day approximation
         cal_days = {5: 7, 21: 30, 63: 91}.get(horizon_days, horizon_days * 7 // 5)
         return (start + timedelta(days=cal_days)).isoformat()
+
+
+def trading_day_evaluation_date(start: date, horizon_days: int) -> str:
+    """
+    The date `horizon_days` TRADING days after `start` (is_trading_day: weekends and market holidays do not count). This is what a
+    long horizon needs: a 250-day forecast made on a weekday ends 250 sessions later, not 250 weekdays (which drifts weeks off
+    over a year of holidays). Used for NEW predictions only; rows already stored keep the evaluation_date they were given by
+    _evaluation_date (the weekday-offset rule) and are never rewritten.
+    """
+    d, n = start, 0
+    while n < horizon_days:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            n += 1
+    return d.isoformat()
 
 
 def _horizon_label(horizon_days: int) -> str:
@@ -545,6 +619,9 @@ def insert_prediction(
     p_flat: Optional[float] = None,
     p_moderate_up: Optional[float] = None,
     p_strong_up: Optional[float] = None,
+    # The bucket-edges version the prompt used (tools.bucket_edges). Default 1 = the old fixed edges: only a writer that
+    # prompted with the horizon-scaled ranges (the APEX phase) passes the current version.
+    bucket_edges_version: int = 1,
     # Model selection metadata
     used_fallback: bool = False,
     parent_merged_id: Optional[int] = None,
@@ -609,7 +686,7 @@ def insert_prediction(
 
     # Derive evaluation_date
     if evaluation_date is None and horizon_days:
-        evaluation_date = _evaluation_date(today_date, horizon_days)
+        evaluation_date = trading_day_evaluation_date(today_date, horizon_days)
 
     # Use reasoning_text → reasoning for backward compat
     if reasoning_text and not reasoning:
@@ -646,12 +723,12 @@ def insert_prediction(
                         weight_regime, weights_used, valuation_score, guardrail_flags, raw_conviction_score,
                         scope, origin, origin_run_id, origin_time_utc, owner_scope, evidence_refs,
                         policy_version, model_used, guardrail_version, history_lineage, context_digest,
-                        prediction_role, instrument_type, leverage_factor)
+                        prediction_role, instrument_type, leverage_factor, bucket_edges_version)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -681,7 +758,7 @@ def insert_prediction(
                     policy_version, model_used, guardrail_version,
                     json.dumps(history_lineage, default=str) if history_lineage else None,
                     context_digest,
-                    prediction_role, instrument_type, leverage_factor,
+                    prediction_role, instrument_type, leverage_factor, int(bucket_edges_version),
                 ],
             )
             c.commit()
@@ -766,6 +843,59 @@ def get_matured_pending_predictions(today: str) -> list[dict]:
     return [_parse_pred_row(r) for r in rows]
 
 
+def get_pending_for_provisional(horizons: tuple[int, ...], today: str) -> list[dict]:
+    """Pending (not yet matured, not evaluated) predictions at these horizons made BEFORE today: the rows to mark."""
+    ph = ",".join("?" * len(horizons))
+    with _db() as c:
+        rows = c.execute(
+            f"""SELECT id, ticker, as_of_date, horizon_days, evaluation_date, start_price, predicted_direction,
+                       bucket_edges_version
+                FROM predictions
+                WHERE (evaluation_status IS NULL OR evaluation_status = 'pending')
+                  AND horizon_days IN ({ph}) AND as_of_date IS NOT NULL AND as_of_date < ?
+                  AND (evaluation_date IS NULL OR evaluation_date > ?)""",
+            [*horizons, today, today],
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_provisional_mark(prediction_id: int, marked_on: str, trading_days_elapsed: int, return_so_far: Optional[float],
+                            benchmark_so_far: Optional[float], excess_so_far: Optional[float]) -> None:
+    """Record (replace) the latest interim mark for one pending prediction. Touches only prediction_provisional_marks."""
+    with _db() as c:
+        c.execute(
+            """INSERT OR REPLACE INTO prediction_provisional_marks
+               (prediction_id, marked_on, trading_days_elapsed, return_so_far, benchmark_so_far, excess_so_far, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [prediction_id, marked_on, trading_days_elapsed, return_so_far, benchmark_so_far, excess_so_far, _now_cst()],
+        )
+        c.commit()
+
+
+def get_provisional_marks(horizon_days: int, *, scopes: tuple[str, ...] | None = None,
+                          roles: tuple[str, ...] | None = None) -> list[dict]:
+    """Interim marks of the predictions at this horizon that are STILL pending (a matured row's final result lives in
+    `predictions`; its stale mark is never returned). Optional scope / role filters match the final-metric readers."""
+    where, params = ["(p.evaluation_status IS NULL OR p.evaluation_status = 'pending')", "p.horizon_days = ?"], [horizon_days]
+    if scopes:
+        sc, sp = scope_clause(scopes)
+        where.append("p." + sc); params += sp
+    if roles:
+        rc, rp = role_clause(roles, alias="p")
+        where.append(rc); params += rp
+    ensure_schema()
+    with _db() as c:
+        rows = c.execute(
+            f"""SELECT p.id, p.ticker, p.as_of_date, p.evaluation_date, p.horizon_days, p.predicted_direction,
+                       p.bucket_edges_version, m.marked_on, m.trading_days_elapsed, m.return_so_far, m.benchmark_so_far,
+                       m.excess_so_far
+                FROM predictions p JOIN prediction_provisional_marks m ON m.prediction_id = p.id
+                WHERE {' AND '.join(where)}""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def update_prediction_outcome(
     prediction_id: int,
     actual_return: float,
@@ -802,6 +932,13 @@ def update_prediction_outcome(
         c.commit()
 
 
+# For readers of metrics_rolling that want ONE row per (date, horizon, segment, lookback): the rows of the newest bucket-edges
+# version present. (When only version 1 exists — the case until a horizon's edges actually change — this selects everything.)
+LATEST_EDGES_ONLY = ("bucket_edges_version = (SELECT MAX(m2.bucket_edges_version) FROM metrics_rolling m2 "
+                     "WHERE m2.metric_date = metrics_rolling.metric_date AND m2.horizon_days = metrics_rolling.horizon_days "
+                     "AND m2.segment = metrics_rolling.segment AND m2.lookback_days = metrics_rolling.lookback_days)")
+
+
 def upsert_rolling_metric(row: dict) -> None:
     with _db() as c:
         c.execute(
@@ -809,8 +946,8 @@ def upsert_rolling_metric(row: dict) -> None:
                (metric_date, horizon_days, segment, system_version, lookback_days,
                 directional_accuracy, in_range_pct, mean_excess_return,
                 mean_error_magnitude, high_conviction_accuracy, low_conviction_accuracy,
-                brier_score, mean_log_loss, num_predictions, computed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                brier_score, mean_log_loss, num_predictions, computed_at, bucket_edges_version)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 row["metric_date"], row["horizon_days"], row["segment"],
                 row["system_version"], row["lookback_days"],
@@ -818,7 +955,7 @@ def upsert_rolling_metric(row: dict) -> None:
                 row.get("mean_excess_return"), row.get("mean_error_magnitude"),
                 row.get("high_conviction_accuracy"), row.get("low_conviction_accuracy"),
                 row.get("brier_score"), row.get("mean_log_loss"), row.get("num_predictions"),
-                _now_cst(),
+                _now_cst(), int(row.get("bucket_edges_version") or 1),
             ],
         )
         c.commit()
@@ -845,8 +982,8 @@ def get_rolling_metrics(lookback_days: int = 90) -> list[dict]:
     today = _today_cst()
     with _db() as c:
         rows = c.execute(
-            """SELECT * FROM metrics_rolling
-               WHERE metric_date = ? AND lookback_days = ?
+            f"""SELECT * FROM metrics_rolling
+               WHERE metric_date = ? AND lookback_days = ? AND {LATEST_EDGES_ONLY}
                ORDER BY horizon_days, segment""",
             [today, lookback_days],
         ).fetchall()

@@ -1,0 +1,21 @@
+﻿iShares Core S&P 500 ETF
+Fund Holdings as of,"Oct 09, 2026"
+Inception Date,"May 15, 2000"
+Shares Outstanding,"1,000,000.00"
+Stock,"-"
+Bond,"-"
+Cash,"-"
+Other,"-"
+ 
+Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Quantity,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date
+"NVDA","NVIDIA CORP","Information Technology","Equity","41,325,677,271.60","7.40","41,325,677,271.60","220,000,000.00","187.86","United States","NASDAQ","USD","1.00","USD","-"
+"AAPL","APPLE INC","Information Technology","Equity","38,000,000,000.00","6.60","38,000,000,000.00","150,000,000.00","253.33","United States","NASDAQ","USD","1.00","USD","-"
+"JPM","JPMORGAN CHASE & CO","Financials","Equity","8,000,000,000.00","1.50","8,000,000,000.00","30,000,000.00","266.67","United States","New York Stock Exchange Inc.","USD","1.00","USD","-"
+"LLY","ELI LILLY","Health Care","Equity","7,000,000,000.00","1.10","7,000,000,000.00","9,000,000.00","777.78","United States","New York Stock Exchange Inc.","USD","1.00","USD","-"
+"BRKB","BERKSHIRE HATHAWAY INC CLASS B","Financials","Equity","6,000,000,000.00","1.00","6,000,000,000.00","12,000,000.00","500.00","United States","New York Stock Exchange Inc.","USD","1.00","USD","-"
+"XTSLA","BLK CSH FND TREASURY SL AGENCY","Cash and/or Derivatives","Money Market","500,000,000.00","0.40","500,000,000.00","500,000,000.00","1.00","United States","-","USD","1.00","USD","-"
+"USD","USD CASH","Cash and/or Derivatives","Cash","100,000,000.00","0.10","100,000,000.00","100,000,000.00","1.00","United States","-","USD","1.00","USD","-"
+"ESZ6","S&P 500 EMINI FUT DEC26","Cash and/or Derivatives","Futures","20,000,000.00","0.05","20,000,000.00","100.00","5000.00","United States","Chicago Mercantile Exchange","USD","1.00","USD","-"
+ 
+"The content contained herein is owned or licensed by BlackRock and is subject to copyright."
+"Holdings are subject to change."

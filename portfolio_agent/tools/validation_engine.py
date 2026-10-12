@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from portfolio_agent.tools.prediction_db import (
     LEGACY_REVIEW_SCOPES, SHARED_SCOPES, VALIDATION_ROLES, _db, not_challenger_sql, role_clause, scope_clause,
 )
+from portfolio_agent.tools import bucket_edges as be
 from portfolio_agent.tools.yfinance_tools import get_close
 from portfolio_agent.log import get_logger as _get_logger
 
@@ -33,6 +34,10 @@ def _today_cst() -> date:
 
 # Ordered list of (name, lower_bound_inclusive, upper_bound_exclusive).
 # None means unbounded on that side.
+#
+# These module constants are the 5-DAY, VERSION-1 edges (±1% / ±5%), kept for backward compatibility. Scoring a prediction uses
+# ITS OWN horizon's edges for the version it was made under — tools.bucket_edges.row_edges(row) — so a 250-day call is not
+# judged by a 5-day yardstick. Nothing in this module may use FLAT_THRESHOLD or these literals to score a row.
 RETURN_BUCKETS = [
     ("strong_down",   None,  -0.05),
     ("moderate_down", -0.05, -0.01),
@@ -50,20 +55,13 @@ _BUCKET_TO_PROB_KEY = {name: f"p_{name}" for name in _BUCKET_NAMES}
 # the model was actually told "flat" means, which made every FLAT call
 # nearly impossible to score correct (real 5-day moves rarely land inside
 # ±0.5%). Kept as a single constant so it can't drift out of sync again.
-FLAT_THRESHOLD = 0.01
+FLAT_THRESHOLD = be.FLAT_THRESHOLD        # 5d / version 1 only (see above)
 
 
-def actual_return_bucket(ret: float) -> str:
-    """Map an actual return (fraction, e.g. 0.03 = +3%) to its bucket name."""
-    if ret < -0.05:
-        return "strong_down"
-    if ret < -0.01:
-        return "moderate_down"
-    if ret < 0.01:
-        return "flat"
-    if ret < 0.05:
-        return "moderate_up"
-    return "strong_up"
+def actual_return_bucket(ret: float, horizon_days: int | None = 5, version: int | None = 1) -> str:
+    """Map an actual return (fraction, e.g. 0.03 = +3%) to its bucket name under the edges of (horizon_days, version).
+    The defaults — 5 days, version 1 — are exactly the original fixed edges."""
+    return be.bucket_of(ret, be.edges_for(horizon_days, version))
 
 
 def _extract_p_up(pred: dict) -> Optional[float]:
@@ -89,7 +87,8 @@ def compute_distribution_metrics(pred: dict, actual_ret: float) -> tuple[Optiona
     log_loss), or (None, None) if distribution is absent.
 
     p_up = P(moderate_up) + P(strong_up) derived from the 5-bucket distribution.
-    actual_up = 1 if actual_ret > +1%, else 0 (flat and down both count as "not up").
+    actual_up = 1 if actual_ret > +flat, else 0 (flat and down both count as "not up"); `flat` is the edge of the prediction's own
+    horizon and edges version (+1% for 5 days, version 1).
 
     Binary Brier = (p_up − actual_up)²   range [0, 1]
     Binary log-loss = −[a·log(p) + (1−a)·log(1−p)]
@@ -101,7 +100,7 @@ def compute_distribution_metrics(pred: dict, actual_ret: float) -> tuple[Optiona
     if p_up is None:
         return None, None
 
-    actual_up = 1.0 if actual_ret > FLAT_THRESHOLD else 0.0
+    actual_up = 1.0 if actual_ret > be.row_edges(pred).flat else 0.0
 
     brier = (p_up - actual_up) ** 2
 
@@ -133,7 +132,7 @@ def brier_5bucket(pred: dict, actual_ret: float) -> Optional[float]:
     p = _normalized_bucket_probs(pred)
     if p is None:
         return None
-    hit = _BUCKET_NAMES.index(actual_return_bucket(actual_ret))
+    hit = _BUCKET_NAMES.index(be.bucket_of(actual_ret, be.row_edges(pred)))
     return sum((pk - (1.0 if k == hit else 0.0)) ** 2 for k, pk in enumerate(p))
 
 
@@ -143,7 +142,7 @@ def logloss_5bucket(pred: dict, actual_ret: float) -> Optional[float]:
     p = _normalized_bucket_probs(pred)
     if p is None:
         return None
-    hit = _BUCKET_NAMES.index(actual_return_bucket(actual_ret))
+    hit = _BUCKET_NAMES.index(be.bucket_of(actual_ret, be.row_edges(pred)))
     return -math.log(max(p[hit], 1e-6))
 
 
@@ -156,7 +155,10 @@ class Outcome:
 
 
 def score_outcome(pred: dict, actual_return: float) -> Outcome:
-    actual_dir  = "UP" if actual_return > FLAT_THRESHOLD else "DOWN" if actual_return < -FLAT_THRESHOLD else "FLAT"
+    """Score one prediction with the edges it was MADE under (its horizon_days and bucket_edges_version; a dict without them
+    is a 5-day, version-1 row — the original behaviour)."""
+    edges       = be.row_edges(pred)
+    actual_dir  = be.direction(actual_return, edges)
     pred_dir    = (pred.get("predicted_direction") or "").upper()
     r_lo = (pred.get("predicted_return_low")  or 0.0) / 100
     r_hi = (pred.get("predicted_return_high") or 0.0) / 100
@@ -172,7 +174,7 @@ def score_outcome(pred: dict, actual_return: float) -> Outcome:
         return Outcome("strong_correct", 1.0)
     if dir_correct:
         return Outcome("directionally_correct", 0.7)
-    if abs(actual_return) > 0.02:
+    if abs(actual_return) > edges.significant:
         return Outcome("wrong_significant", 0.0)
     return Outcome("wrong_minor", 0.3)
 
@@ -202,7 +204,7 @@ def recompute_outcome_labels(dry_run: bool = False) -> dict:
 
     with _db() as c:
         rows = [dict(r) for r in c.execute(
-            """SELECT id, predicted_direction, predicted_return_low,
+            """SELECT id, predicted_direction, predicted_return_low, horizon_days, bucket_edges_version,
                       predicted_return_high, actual_return, outcome, outcome_score
                FROM predictions
                WHERE evaluation_status = 'evaluated' AND actual_return IS NOT NULL"""
@@ -241,6 +243,49 @@ def recompute_outcome_labels(dry_run: bool = False) -> dict:
 
 
 # ── Layer 1: Daily outcome assignment ─────────────────────────────────────────
+
+PROVISIONAL_HORIZONS = (63, 250)
+
+
+def _trading_days_between(start: date, end: date) -> int:
+    from portfolio_agent.tools.prediction_db import is_trading_day
+    n, d = 0, start
+    while d < end:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            n += 1
+    return n
+
+
+def update_provisional_marks(today: Optional[date] = None, horizons: tuple[int, ...] = PROVISIONAL_HORIZONS) -> dict:
+    """
+    Interim tracking for long-horizon predictions that have not matured: the return so far vs SPY so far, stored in
+    prediction_provisional_marks. It never writes to `predictions` (no outcome, status, bucket or score) and nothing in the final
+    metrics reads it -- a provisional mark is a progress report, not a result. Prices are fetched with no DB transaction open.
+    """
+    from portfolio_agent.tools.prediction_db import get_pending_for_provisional, upsert_provisional_mark
+    today = today or _today_cst()
+    marked = skipped = 0
+    for pred in get_pending_for_provisional(tuple(horizons), today.isoformat()):
+        try:
+            start = date.fromisoformat(pred["as_of_date"])
+            start_price = pred.get("start_price") or get_close(pred["ticker"], pred["as_of_date"])
+            now_price = get_close(pred["ticker"], today.isoformat())
+            spy_start, spy_now = get_close("SPY", pred["as_of_date"]), get_close("SPY", today.isoformat())
+            if not start_price or now_price is None:
+                skipped += 1
+                continue
+            ret = now_price / start_price - 1
+            bench = (spy_now / spy_start - 1) if (spy_start and spy_now) else None
+            upsert_provisional_mark(pred["id"], today.isoformat(), _trading_days_between(start, today), ret, bench,
+                                    (ret - bench) if bench is not None else None)
+            marked += 1
+        except Exception as exc:                       # one bad ticker must not stop the rest
+            skipped += 1
+            _log.warning(f"  [validation/provisional] {pred.get('ticker')} — {exc}", event_type="warning")
+    _log.info(f"  [validation/provisional] {marked} marked, {skipped} skipped", event_type="summary", marked=marked, skipped=skipped)
+    return {"marked": marked, "skipped": skipped}
+
 
 def evaluate_matured_predictions(today: Optional[date] = None, force: bool = False) -> dict:
     """
@@ -312,14 +357,15 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
             )
 
             outcome    = score_outcome(pred, actual_return)
-            actual_dir = "UP" if actual_return > FLAT_THRESHOLD else "DOWN" if actual_return < -FLAT_THRESHOLD else "FLAT"
+            edges      = be.row_edges(pred)                       # the edges this prediction was made under
+            actual_dir = be.direction(actual_return, edges)
             r_lo       = (pred.get("predicted_return_low")  or 0.0) / 100
             r_hi       = (pred.get("predicted_return_high") or 0.0) / 100
             in_range   = bool(r_lo != 0 or r_hi != 0) and (r_lo <= actual_return <= r_hi)
             midpoint   = (r_lo + r_hi) / 2 if (r_lo or r_hi) else 0.0
             error_mag  = abs(actual_return - midpoint)
 
-            bucket = actual_return_bucket(actual_return)
+            bucket = be.bucket_of(actual_return, edges)
             brier, log_loss = compute_distribution_metrics(pred, actual_return)
 
             update_prediction_outcome(
@@ -433,6 +479,7 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
             rows = c.execute(
                 f"""SELECT id, as_of_date, horizon_days, ticker,
                           COALESCE(system_version, 'v1.0')  AS sys_ver,
+                          COALESCE(bucket_edges_version, 1) AS edges_ver,
                           trigger_type,
                           actual_direction, predicted_direction,
                           in_predicted_range, excess_return, error_magnitude,
@@ -491,8 +538,11 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
                 seg = "portfolio"
             else:
                 seg = "watchlist"
-            groups[(d["horizon_days"], "all", d["sys_ver"])].append(d)
-            groups[(d["horizon_days"], seg, d["sys_ver"])].append(d)
+            # Cohorts never mix different bucket edges: group by the canonical edges version of this row's horizon (identical edges
+            # -> the same cohort, so a horizon whose edges did not change, like 5d, is never split).
+            ev = be.canonical_version(d["horizon_days"], d["edges_ver"])
+            groups[(d["horizon_days"], "all", d["sys_ver"], ev)].append(d)
+            groups[(d["horizon_days"], seg, d["sys_ver"], ev)].append(d)
 
         def _dir_acc_for(subset: list) -> Optional[float]:
             if not subset:
@@ -503,7 +553,7 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
                    (p.get("predicted_direction") or "").upper()
             ) / len(subset)
 
-        for (h_days, seg, ver), preds in groups.items():
+        for (h_days, seg, ver, edges_ver), preds in groups.items():
             n = len(preds)
 
             dir_acc = (
@@ -550,6 +600,7 @@ def recompute_rolling_metrics(today: Optional[date] = None) -> dict:
                 "horizon_days":           h_days,
                 "segment":                seg,
                 "system_version":         ver,
+                "bucket_edges_version":   edges_ver,
                 "lookback_days":          lookback_days,
                 "directional_accuracy":   dir_acc,
                 "in_range_pct":           in_range_pct,
@@ -1020,7 +1071,7 @@ def get_accuracy_heatmap_data(lookback_days: int | None = None, model_names: lis
 
 
 def get_calibration_data(lookback_days: int | None = None, model_names: list[str] | None = None, *,
-                         roles: tuple[str, ...] = VALIDATION_ROLES) -> dict:
+                         roles: tuple[str, ...] = VALIDATION_ROLES, edges_version: int | None = None) -> dict:
     """
     Returns all data needed for the calibration tab:
 
@@ -1032,8 +1083,10 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
 
     Binary metrics use:
       p_up = (p_moderate_up + p_strong_up) / 100   (normalised to [0, 1])
-      actual_up = 1 if actual_return > +1%, else 0
+      actual_up = 1 if actual_return > +flat, else 0 — `flat` being the edge of that row's own horizon and bucket-edges version
       Brier baseline = 0.25 (coin flip), log-loss baseline = ln(2) ≈ 0.693
+
+    edges_version: only rows MADE under that bucket-edges version (None = every version; each row is still judged by its own).
     """
     _sc, _sp = scope_clause(LEGACY_REVIEW_SCOPES)
     _rc, _rp = role_clause(roles)
@@ -1045,6 +1098,9 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
     if model_names:
         clauses.append(f"model_name IN ({','.join('?' * len(model_names))})")
         params.extend(model_names)
+    if edges_version is not None:
+        clauses.append("COALESCE(bucket_edges_version, 1) = ?")
+        params.append(int(edges_version))
     where = "WHERE " + " AND ".join(clauses)
     with _db() as c:
         rows = c.execute(
@@ -1053,7 +1109,7 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
                       actual_direction,
                       CASE WHEN UPPER(actual_direction) = UPPER(predicted_direction) THEN 1.0 ELSE 0.0 END AS dir_correct,
                       p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                      horizon_days,
+                      horizon_days, bucket_edges_version,
                       COALESCE(risk_segment, 'unknown') AS segment
                FROM predictions
                {where}""",
@@ -1081,7 +1137,7 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
     if dist_rows:
         brier_vals, ll_vals = [], []
         for r, p_up in dist_rows:
-            actual_up = 1.0 if (r.get("actual_return") or 0) > FLAT_THRESHOLD else 0.0
+            actual_up = 1.0 if (r.get("actual_return") or 0) > be.row_edges(r).flat else 0.0
             brier_vals.append((p_up - actual_up) ** 2)
             p_clip = max(min(p_up, 1 - 1e-6), 1e-6)
             ll_vals.append(-(actual_up * math.log(p_clip) + (1 - actual_up) * math.log(1 - p_clip)))
@@ -1091,7 +1147,7 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
     # ── Reliability diagram (10 bins of p_up) ─────────────────────────────────
     bins: list[list] = [[] for _ in range(10)]
     for r, p_up in dist_rows:
-        actual_up = 1.0 if (r.get("actual_return") or 0) > FLAT_THRESHOLD else 0.0
+        actual_up = 1.0 if (r.get("actual_return") or 0) > be.row_edges(r).flat else 0.0
         idx = min(int(p_up * 10), 9)
         bins[idx].append((p_up, actual_up))
 
@@ -1131,13 +1187,13 @@ def get_calibration_data(lookback_days: int | None = None, model_names: list[str
 
     # ── Per-horizon breakdown ──────────────────────────────────────────────────
     horizon_breakdown = {}
-    for h in [5, 21, 63]:
+    for h in [5, 21, 63, 250]:
         h_rows = [(r, p) for r, p in dist_rows if r.get("horizon_days") == h]
         if not h_rows:
             continue
         b_vals, l_vals = [], []
         for r, p_up in h_rows:
-            actual_up = 1.0 if (r.get("actual_return") or 0) > FLAT_THRESHOLD else 0.0
+            actual_up = 1.0 if (r.get("actual_return") or 0) > be.row_edges(r).flat else 0.0
             b_vals.append((p_up - actual_up) ** 2)
             p_clip = max(min(p_up, 1 - 1e-6), 1e-6)
             l_vals.append(-(actual_up * math.log(p_clip) + (1 - actual_up) * math.log(1 - p_clip)))

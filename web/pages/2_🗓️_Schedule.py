@@ -986,8 +986,18 @@ page_header(
 
 # ── Schedule Overview ─────────────────────────────────────────────────────────
 
+def _cadence_text() -> str:
+    """The horizons' cadence as stored in the DB (engine_settings.horizon_cadence_json), so this card never goes stale."""
+    try:
+        from portfolio_agent.tools import engine_settings_db as _esdb
+        _cad = _esdb.get_engine_settings()["horizon_cadence"]
+        return " · ".join(f"{h}d: {_esdb.CADENCE_LABELS[r]}" for h, r in sorted(_cad.items()))
+    except Exception:
+        return "cadence unavailable"
+
+
 _SCHEDULE_DEF = [
-    ("morning",    "light_mode",  "Morning",         "Mon–Fri  06:30 CST",                       "News + Research + Fundamentals + APEX predictions"),
+    ("morning",    "light_mode",  "Morning",         "Mon–Fri  06:30 CST",                       "News + Research + Fundamentals + APEX predictions · horizons — " + _cadence_text()),
     ("intraday",   "bolt",        "Intraday",        "Mon–Fri  11:00 / 13:00 / 15:00 CST",       "Event check + full pipeline (News/Research/Fundamentals/APEX 5d) for trending tickers · auto-runs Morning first if needed"),
     ("evening",    "nights_stay", "Evening",         "Mon–Fri  17:30 CST",                        "Validate matured predictions + recompute metrics + calibration outcome-fill + portfolio snapshot · auto-runs Morning first if needed"),
     ("daily",      "play_arrow",  "Full Daily",      "Manual trigger only",                        "Force-all: all phases for all tickers"),
@@ -1205,7 +1215,10 @@ try:
     with _dbc2(_DB) as _mc:
         _mrows = _mc.execute("""
             SELECT metric_date, horizon_days, num_predictions
-            FROM metrics_rolling WHERE lookback_days=90
+            FROM metrics_rolling WHERE lookback_days=90 AND bucket_edges_version = (
+                SELECT MAX(m2.bucket_edges_version) FROM metrics_rolling m2 WHERE m2.metric_date = metrics_rolling.metric_date
+                AND m2.horizon_days = metrics_rolling.horizon_days AND m2.segment = metrics_rolling.segment
+                AND m2.lookback_days = metrics_rolling.lookback_days)
         """).fetchall()
         for _mr in _mrows:
             _d = _mr[0]

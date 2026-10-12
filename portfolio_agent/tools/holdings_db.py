@@ -297,6 +297,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _migrate_positions_to_instruments(conn)
     _migrate_price_history_grain(conn)
     _migrate_taxonomy(conn)
+    _migrate_ledger(conn)
     # Indexes on rebuilt tables come after the migrations, once the final shape is in place.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_instrument ON positions (instrument_id)")
     conn.execute(_HOLDINGS_VIEW)
@@ -404,6 +405,15 @@ def _migrate_taxonomy(conn: sqlite3.Connection) -> None:
                      [normalize_account_type(old, name or "", default=AccountType.OTHER), old, aid])
 
 
+def _migrate_ledger(conn: sqlite3.Connection) -> None:
+    """Idempotent: the transaction ledger tables (tools.ledger_db) and accounts.lot_method (NULL = the portfolio_settings default)."""
+    from portfolio_agent.tools import ledger_db
+    ledger_db.create_schema(conn)
+    migrate_columns(conn, "import_runs", [("skipped", "INTEGER")])      # duplicates a CSV transaction import left out
+    migrate_columns(conn, "accounts", [("lot_method", "TEXT"),
+                                       ("ledger_start_date", "TEXT")])      # set when the account became ledger-managed (see ledger_service)
+
+
 def _migrate_positions_to_instruments(conn: sqlite3.Connection) -> None:
     """
     One-time rebuild of a positions table that still carries `ticker` as a
@@ -472,7 +482,7 @@ def get_portfolio_by_owner(owner: str, *, conn: sqlite3.Connection | None = None
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
 
-_ACCOUNT_EDITABLE = frozenset({"display_name", "account_type", "status", "holdings_source"})
+_ACCOUNT_EDITABLE = frozenset({"display_name", "account_type", "status", "holdings_source", "lot_method", "ledger_start_date"})
 
 
 def get_account(account_id: int, *, conn: sqlite3.Connection | None = None) -> dict | None:
@@ -556,8 +566,11 @@ def update_account(account_id: int, *, expected_version: int | None = None,
 
 
 def delete_account(account_id: int, *, conn: sqlite3.Connection | None = None) -> int:
-    """Hard-delete an account with its positions and cash. Price history (keyed externally) is untouched."""
+    """Hard-delete an account with its positions and cash. Price history (keyed externally) is untouched. REFUSED when the account has
+    ledger transactions: the ledger is append-only, so such an account is archived, never deleted."""
     with _db(conn) as conn:
+        if conn.execute("SELECT 1 FROM transactions WHERE account_id = ? LIMIT 1", [account_id]).fetchone() is not None:
+            raise ValueError("this account has ledger transactions, which are kept for the record: archive it instead of deleting it")
         n = conn.execute("DELETE FROM positions WHERE account_id = ?", [account_id]).rowcount
         conn.execute("DELETE FROM account_cash WHERE account_id = ?", [account_id])
         conn.execute("DELETE FROM accounts WHERE account_id = ?", [account_id])
@@ -966,7 +979,7 @@ def record_import_run(*, broker: str, accounts: list[str], filename: str | None,
 
 
 def update_import_run(run_id: int, *, conn: sqlite3.Connection | None = None, **counts) -> int:
-    bad = set(counts) - {"added", "updated", "removed", "positions", "cash_accounts"}
+    bad = set(counts) - {"added", "updated", "removed", "positions", "cash_accounts", "skipped"}
     if bad:
         raise ValueError(f"update_import_run: cannot set {sorted(bad)}")
     cols = list(counts)

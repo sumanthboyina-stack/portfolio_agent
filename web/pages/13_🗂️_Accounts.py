@@ -209,6 +209,14 @@ if _tile_c:
                         bump_holdings_version()
                         st.rerun()
 
+        # ── Transactions & ledger ─────────────────────────────────────────────────────
+_tile_ledger = section_tile("Transactions & ledger", badge_text="trades · lots · reconcile · CSV", expanded=False, key="accounts_ledger")
+if _tile_ledger:
+    with _tile_ledger:
+        from web.components.ledger_panel import render_ledger_panel
+        render_ledger_panel(_ctx, list_accounts_for(_ctx), key="accounts_ledger")
+
+
         # ── Import ────────────────────────────────────────────────────────────────────
 _tile_2 = section_tile("Import holdings", badge_text="choose file → map accounts → preview → confirm", expanded=False, key="accounts_2")
 if _tile_2:
