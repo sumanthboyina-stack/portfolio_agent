@@ -5,8 +5,9 @@ Streamlit), so it can be tested directly, in the style of test_validation_page_d
 Owner scoping: every read goes through services.ledger_service / account_service with the caller's RequestContext, which checks that the account
 belongs to the caller's own portfolio (NotAuthorized / NotFound otherwise) — there is no function here that takes an owner or reads a table directly.
 
-Out of scope (TODO hooks only, nothing built): time-weighted / money-weighted performance (TWR / IRR), a paper-trading UI, wash-sale adjustment,
-choosing specific lots in the form (the service supports SPECIFIC; the form does not offer it), and broker sync.
+Out of scope (TODO hooks only, nothing built): money-weighted performance (IRR), a paper-trading UI, wash-sale adjustment, choosing specific lots
+in the form (the service supports SPECIFIC; the form does not offer it), and broker sync. Portfolio-level Modified Dietz returns are composed in
+web/data/performance.py using owner-scoped transaction and observed price-history data.
 """
 from __future__ import annotations
 

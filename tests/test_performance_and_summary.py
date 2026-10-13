@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from web.data.performance import build_trend_series, normalize_index_series
-from web.data.portfolio import summarize_holdings, holdings_table_rows, account_id, group_holdings_by_account
+import pytest
+
 from portfolio_agent.tools.holdings_parser import parse_fidelity_csv, split_cash_rows
+from web.data.performance import (
+    benchmark_returns,
+    build_trend_series,
+    normalize_index_series,
+)
+from web.data.portfolio import (
+    account_id,
+    group_holdings_by_account,
+    holdings_table_rows,
+    summarize_holdings,
+)
 
 
 def _row(date, acct, ticker, shares, close, source="snapshot", cost=None):
@@ -49,6 +60,110 @@ def test_multi_account_rows_sum_per_date():
 def test_normalize_index_series():
     out = normalize_index_series({"^GSPC": {"2026-09-01": 100.0, "2026-09-02": 103.0}})
     assert out["^GSPC"]["2026-09-02"] == 3.0
+
+
+def test_ledger_performance_includes_cash_and_separates_external_deposits():
+    rows = [
+        _row("2026-09-01", "X1", "AAPL", 10, 100.0),
+        _row("2026-09-02", "X1", "AAPL", 10, 110.0),
+    ]
+    ledger_account = {("fidelity", "X1"): {"ledger_start_date": "2026-09-01"}}
+    transactions = [
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-01", "type": "OPENING_BALANCE",
+         "amount": 100.0, "quantity": None, "price": None},
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-02", "type": "DEPOSIT",
+         "amount": 200.0, "quantity": None, "price": None},
+    ]
+
+    series = build_trend_series(rows, ledger_accounts=ledger_account, transactions=transactions)
+
+    assert series["ledger_cash"] == [100.0, 300.0]
+    assert series["value"] == [1100.0, 1400.0]
+    assert series["investment_return_pct"] == pytest.approx([0.0, 100.0 / 1100.0 * 100])
+    assert series["return_start_date"] == "2026-09-01"
+    assert series["return_end_date"] == "2026-09-02"
+
+
+def test_ledger_performance_nets_transaction_fees_and_reports_cash_costs():
+    rows = [
+        _row("2026-09-01", "X1", "AAPL", 10, 100.0),
+        _row("2026-09-02", "X1", "AAPL", 10, 110.0),
+    ]
+    ledger_account = {("fidelity", "X1"): {"ledger_start_date": "2026-09-01"}}
+    transactions = [
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-01", "type": "OPENING_BALANCE",
+         "amount": 100.0, "quantity": None, "price": None},
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-02", "type": "FEE",
+         "amount": -10.0, "fees": None, "quantity": None, "price": None},
+    ]
+
+    series = build_trend_series(rows, ledger_accounts=ledger_account, transactions=transactions)
+
+    assert series["ledger_cash"] == [100.0, 90.0]
+    assert series["value"] == [1100.0, 1190.0]
+    assert series["investment_return_pct"] == pytest.approx([0.0, 90.0 / 1100.0 * 100])
+    assert series["ledger_fees"] == 10.0
+
+
+def test_security_only_view_excludes_ledger_cash_and_uses_share_changes_as_flows():
+    rows = [
+        _row("2026-09-01", "X1", "AAPL", 10, 100.0),
+        _row("2026-09-02", "X1", "AAPL", 20, 110.0),
+    ]
+    ledger_account = {
+        ("fidelity", "X1"): {"ledger_start_date": "2026-09-01", "include_cash": False}
+    }
+    transactions = [
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-01",
+         "type": "OPENING_BALANCE", "amount": 100.0},
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-02",
+         "type": "FEE", "amount": -10.0},
+    ]
+
+    series = build_trend_series(rows, ledger_accounts=ledger_account, transactions=transactions)
+
+    assert series["value"] == [1000.0, 2200.0]
+    assert series["ledger_cash"] == [0.0, 0.0]
+    assert series["ledger_cash_coverage"] == 0
+    assert series["ledger_fees"] == 0.0
+    assert series["investment_return_pct"] == pytest.approx([0.0, 10.0])
+
+
+def test_external_flow_timing_uses_modified_dietz_weight_between_snapshots():
+    rows = [
+        _row("2026-09-01", "X1", "AAPL", 10, 100.0),
+        _row("2026-09-11", "X1", "AAPL", 10, 110.0),
+    ]
+    ledger_account = {("fidelity", "X1"): {"ledger_start_date": "2026-09-01"}}
+    transactions = [
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-01", "type": "OPENING_BALANCE",
+         "amount": 0.0, "quantity": None, "price": None},
+        {"broker": "fidelity", "account_number": "X1", "date": "2026-09-06", "type": "DEPOSIT",
+         "amount": 100.0, "quantity": None, "price": None},
+    ]
+
+    series = build_trend_series(rows, ledger_accounts=ledger_account, transactions=transactions)
+
+    # The mid-period deposit receives half weight in the Modified Dietz denominator.
+    assert series["investment_return_pct"][-1] == pytest.approx(100.0 / 1050.0 * 100)
+
+
+def test_benchmark_returns_use_the_requested_window_and_report_actual_close_dates():
+    comparisons = benchmark_returns(
+        {"^GSPC": {
+            "2026-09-01": 100.0,
+            "2026-09-02": 101.0,
+            "2026-09-03": 105.0,
+            "2026-09-04": 110.0,
+        }},
+        "2026-09-02",
+        "2026-09-03",
+    )
+
+    assert comparisons["^GSPC"]["return_pct"] == pytest.approx(100 * (105 / 101 - 1))
+    assert comparisons["^GSPC"]["start_date"] == "2026-09-02"
+    assert comparisons["^GSPC"]["end_date"] == "2026-09-03"
+    assert comparisons["^GSPC"]["series_pct"] == {"2026-09-02": 0.0, "2026-09-03": pytest.approx(100 * (105 / 101 - 1))}
 
 
 def test_summary_keeps_unknown_values_unknown():

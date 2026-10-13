@@ -24,6 +24,13 @@ def _ops(**kw):
     return [e["operation"] for e in repo.get_audit_events(**kw)]
 
 
+def _foreign_context(name="someone-else"):
+    ctx = RequestContext(identity=_mint_identity_for_tests(name), source="test")
+    with repo.unit_of_work() as conn:
+        conn.execute("INSERT OR IGNORE INTO portfolios (owner) VALUES (?)", (name,))
+    return ctx
+
+
 def test_foreign_actor_cannot_touch_the_local_portfolio():
     a = seed_holding(_pos("AAPL", 1), "fidelity", "2026-09-01")
     stranger = RequestContext(identity=_mint_identity_for_tests("someone-else"), source="test")
@@ -32,6 +39,33 @@ def test_foreign_actor_cannot_touch_the_local_portfolio():
     with pytest.raises(svc.NotAuthorized):
         svc.create_account(stranger, broker="manual", display_name="Theirs")
     assert repo.get_position(a["id"])["shares"] == 1 and repo.list_accounts() and len(repo.list_accounts()) == 1
+
+
+def test_price_history_for_only_returns_unique_account_keys_owned_by_actor():
+    own = svc.create_account(CTX, broker="fidelity", account_number="OWN")
+    stranger = _foreign_context()
+    foreign = svc.create_account(stranger, broker="fidelity", account_number="FOREIGN")
+    repo.insert_price_history([
+        ("2026-09-01", "fidelity", "OWN", "AAPL", None, 100.0, 1.0, 100.0, 80.0,
+         repo.HISTORY_SOURCE_SNAPSHOT),
+        ("2026-09-01", "fidelity", "FOREIGN", "MSFT", None, 200.0, 1.0, 200.0, 180.0,
+         repo.HISTORY_SOURCE_SNAPSHOT),
+    ], replace=False)
+
+    assert own["portfolio_id"] != foreign["portfolio_id"]
+    assert {row["ticker"] for row in svc.get_price_history_for(CTX)} == {"AAPL"}
+
+
+def test_price_history_for_hides_keys_shared_across_portfolios():
+    svc.create_account(CTX, broker="manual", account_number="Shared")
+    stranger = _foreign_context()
+    svc.create_account(stranger, broker="manual", account_number="Shared")
+    repo.insert_price_history([
+        ("2026-09-01", "manual", "Shared", "AAPL", None, 100.0, 1.0, 100.0, 80.0,
+         repo.HISTORY_SOURCE_SNAPSHOT),
+    ], replace=False)
+
+    assert svc.get_price_history_for(CTX) == []
 
 
 def test_create_account_keys_unnumbered_accounts_by_name_and_rejects_duplicates():

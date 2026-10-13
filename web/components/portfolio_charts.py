@@ -116,6 +116,15 @@ def build_value_stack_chart(series: dict, fund_tickers: set[str] | frozenset[str
             hovertemplate="%{fullData.name}: <b>$%{y:,.0f}</b> (%{customdata}%)<extra></extra>",
         ))
         legend.append({"label": ticker_label(t, max_len=40), "color": color_of[t], "fund": is_fund})
+    cash_values = series.get("ledger_cash", [])
+    if cash_values and any(abs(float(value or 0.0)) > 0.005 for value in cash_values):
+        vals = [cash_values[all_dates.index(day)] for day in dates]
+        fig.add_trace(go.Bar(
+            x=dates, y=vals, name="Ledger cash",
+            marker=dict(color="#A8B3C2", line=dict(color=_SURFACE, width=0.5)),
+            hovertemplate="Ledger cash: <b>$%{y:,.2f}</b><extra></extra>",
+        ))
+        legend.append({"label": "Ledger cash", "color": "#A8B3C2", "fund": False})
     if rest:
         vals = [sum(ticker_value[t].get(d, 0.0) for t in rest) for d in dates]
         fig.add_trace(go.Bar(
@@ -221,15 +230,6 @@ def build_portfolio_trend_chart(series: dict, index_pct: dict[str, dict[str, flo
                     itemclick="toggle", itemdoubleclick="toggleothers"),
         xaxis=dict(
             showgrid=False, zeroline=False, tickfont=dict(size=11, color="#9CA3AF"), tickformat="%b %d, %Y",
-            rangeselector=dict(
-                buttons=[dict(count=7, label="1W", step="day", stepmode="backward"),
-                         dict(count=1, label="1M", step="month", stepmode="backward"),
-                         dict(count=3, label="3M", step="month", stepmode="backward"),
-                         dict(count=6, label="6M", step="month", stepmode="backward"),
-                         dict(step="all", label="All")],
-                x=1, xanchor="right", y=1.0, yanchor="bottom", bgcolor="#F9FAFB", bordercolor="#E5E7EB",
-                borderwidth=1, activecolor="#2563EB", font=dict(size=11, color="#374151"),
-            ),
         ),
         yaxis=dict(showgrid=True, gridcolor="#EEF2F7", gridwidth=1, zeroline=pct_axis, zerolinecolor="#E5E7EB",
                    zerolinewidth=1, tickprefix="" if pct_axis else "$", ticksuffix="%" if pct_axis else "",

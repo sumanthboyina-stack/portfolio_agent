@@ -249,6 +249,9 @@ def inject_global_css() -> None:
         align-items: center;
         justify-content: center;
         gap: 5px;
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
         padding: 0 9px;
         font-size: 0.92rem;
         font-weight: 500;
@@ -259,6 +262,7 @@ def inject_global_css() -> None:
         white-space: nowrap;
         transition: color 0.12s, border-color 0.12s;
     }
+    .nav-tab span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .nav-tab:hover { color: #2563EB; border-bottom-color: #BFDBFE; }
     .nav-tab.active {
         color: #2563EB;
@@ -679,18 +683,20 @@ def inject_global_css() -> None:
     }
     [data-testid="stPageLink"] a {
         display: flex !important; align-items: center !important; justify-content: center !important;
-        gap: 4px !important; width: max-content !important; max-width: none !important; overflow: visible !important;
+        gap: 4px !important; width: 100% !important; max-width: 100% !important; overflow: hidden !important;
         margin: 0 !important;
     }
-    [data-testid="stPageLink"] [data-testid="stMarkdownContainer"] { overflow: visible !important; max-width: none !important; }
+    [data-testid="stPageLink"] [data-testid="stMarkdownContainer"] {
+        overflow: hidden !important; max-width: 100% !important; min-width: 0 !important;
+    }
     [data-testid="stPageLink"] p {
         background: transparent !important;
         border: none !important;
         border-radius: 0 !important;
         padding: 0 8px 0 3px !important;
         font-size: 0.92rem !important;
-        overflow: visible !important;
-        text-overflow: clip !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
         font-weight: 500 !important;
         color: #6B7280 !important;
         height: 58px !important;
@@ -930,6 +936,7 @@ _NAV_PRIMARY = [
     ("portfolio",         "work",          "Portfolio",         "pages/5_💼_Portfolio.py"),
 ]
 _NAV_SECONDARY = [
+    ("wealth",      "savings",       "My Wealth",     "pages/15_🧭_My_Wealth.py"),
     ("health",      "monitor_heart", "Health",        "pages/3_🩺_Portfolio_Health.py"),
     ("validation",  "track_changes", "Validation",    "pages/6_🎯_Validation.py"),
     ("chat",        "smart_toy",     "Chat",          "pages/4_🤖_Chat.py"),
@@ -952,17 +959,12 @@ def top_nav(active: str = "dashboard") -> None:
     merged account/settings icon in the top-right corner — who's signed in,
     the settings pages (usage-ordered; admin-only ones grouped, colored, and
     hidden entirely from non-admins), and sign out, all in one dropdown."""
-    # column width scales with label length so longer labels (e.g. "Opportunity
-    # Engine") don't get clipped next to short ones (e.g. "Chat") in a uniform grid
-    def _w(label: str) -> float:
-        return 0.9 + 0.12 * len(label)
-
     n_primary = len(_NAV_PRIMARY)
     widths = (
-        [4.0]                  # brand
-        + [_w(label) for _, _, label, _ in _NAV_PRIMARY] + [0.3]
-        + [_w(label) for _, _, label, _ in _NAV_SECONDARY]
-        + [0.8, 0.7]           # flexible spacer, then the settings icon pinned right
+        [1.9]                  # brand
+        + [1.45] * n_primary + [0.15]
+        + [1.45] * len(_NAV_SECONDARY)
+        + [0.35, 0.65]         # flexible spacer, then the settings icon pinned right
     )
     cols = st.columns(widths, gap="small", vertical_alignment="center")
     divider_1 = 1 + n_primary

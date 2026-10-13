@@ -16,7 +16,7 @@ the selected scope unless labelled "All accounts".
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -35,7 +35,8 @@ from web.styles import (
 from web.data.portfolio import (
     group_holdings_by_account, account_id, scope_holdings, summarize_holdings, holdings_table_rows,    is_fund, sector_breakdown, label_breakdown, UNKNOWN_SECTOR,
 )
-from web.data.performance import build_trend_series, normalize_index_series
+from web.data.performance import benchmark_returns, build_trend_series
+from web.data.ledger import transactions_view
 from web.data.watchlist import (
     load_watchlist_tickers, watchlist_db_status,
     add_tickers as wl_add_tickers, remove_tickers as wl_remove_tickers,
@@ -47,10 +48,10 @@ from web.components.portfolio_charts import (
 from portfolio_agent.tools.company_names import get_company_names, get_company_name, search_companies
 from portfolio_agent.services.account_service import (
     set_position, remove_position, NotFound, VersionConflict,
-    list_holdings_for, get_cash_balances_for,
+    list_holdings_for, list_accounts_for, get_cash_balances_for, get_price_history_for,
 )
 from portfolio_agent.tools.holdings_db import (
-    get_holdings_version, get_price_history,
+    get_holdings_version,
     get_history_coverage, repair_legacy_history,
     HISTORY_SOURCE_LEGACY, HISTORY_SOURCE_RECONSTRUCTED, HISTORY_SOURCE_BACKFILL,
     HISTORY_SOURCE_SNAPSHOT, HISTORY_SOURCE_ATTRIBUTED,
@@ -367,7 +368,8 @@ def _sector_colors(n: int) -> list[str]:
     return [PALETTE[i] if i < 7 else OTHER_COLOR for i in range(n)]
 
 
-def _render_trend(history_rows: list[dict], scoped: list, scope: str, scope_label: str) -> None:
+def _render_trend(history_rows: list[dict], scoped: list, scope: str, scope_label: str,
+                  ctx, accounts: list[dict]) -> None:
     if scope != "all":
         history_rows = [r for r in history_rows
                         if account_id(r.get("broker"), r.get("account_number")) == scope]
@@ -387,7 +389,50 @@ def _render_trend(history_rows: list[dict], scoped: list, scope: str, scope_labe
         kind = ticker_type.get(t, "Stock")
         return (sel_type == "Stocks only" and kind == "Stock") or (sel_type == "Funds only" and kind == "Fund")
     filtered = [r for r in history_rows if _type_ok(r["ticker"])]
-    series = build_trend_series(filtered)
+    period_days = {"1M": 30, "3M": 90, "6M": 182, "1Y": 365, "All": None}
+    selected_period = st.segmented_control(
+        "Performance period", list(period_days), default="3M", key="performance_period",
+        label_visibility="collapsed",
+    ) or "3M"
+    all_dates = sorted({row["date"] for row in filtered})
+    if not all_dates:
+        st.caption("No history rows match this filter.")
+        return
+    end_date = all_dates[-1]
+    days = period_days[selected_period]
+    start_cutoff = (
+        (datetime.fromisoformat(end_date) - timedelta(days=days)).date().isoformat()
+        if days else all_dates[0]
+    )
+    filtered = [row for row in filtered if row["date"] >= start_cutoff]
+
+    ledger_accounts: dict[tuple[str, str], dict] = {}
+    transaction_rows: list[dict] = []
+    for account in accounts:
+        if scope != "all" and account_id(account.get("broker"), account.get("account_number")) != scope:
+            continue
+        if account.get("holdings_source") != "ledger":
+            continue
+        key = ((account.get("broker") or "").strip().lower(),
+               (account.get("account_number") or "").strip())
+        include_cash = sel_type == "All"
+        ledger_accounts[key] = {
+            "ledger_start_date": account.get("ledger_start_date"),
+            "include_cash": include_cash,
+        }
+        if include_cash:
+            for txn in transactions_view(ctx, account["account_id"], show_voided=False):
+                transaction_rows.append({
+                    **txn,
+                    "broker": key[0],
+                    "account_number": key[1],
+                })
+
+    series = build_trend_series(
+        filtered,
+        ledger_accounts=ledger_accounts,
+        transactions=transaction_rows,
+    )
     if not series["dates"]:
         st.caption("No history rows match this filter.")
         return
@@ -401,10 +446,7 @@ def _render_trend(history_rows: list[dict], scoped: list, scope: str, scope_labe
     fund_tickers = frozenset(t for t, k in ticker_type.items() if k == "Fund")
 
     if views[view_label] == "value":
-        periods = {"1W": 5, "1M": 21, "3M": 63, "6M": 126, "All": None}
-        period = st.segmented_control("Period", list(periods), default="1M", key="trend_period",
-                                      label_visibility="collapsed") or "1M"
-        fig, legend_items = build_value_stack_chart(series, fund_tickers, days=periods[period])
+        fig, legend_items = build_value_stack_chart(series, fund_tickers)
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
         with st.expander(f"Legend · {len(legend_items)} series, largest at the bottom of each bar", expanded=False):
             hatch = "background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.6) 0 2px,transparent 2px 5px);"
@@ -416,40 +458,113 @@ def _render_trend(history_rows: list[dict], scoped: list, scope: str, scope_labe
                 items.append(f'<div>{swatch}<span style="color:#374151">{_esc(it["label"])}</span>{suffix}</div>')
             st.markdown('<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 18px;'
                         'font-size:0.8rem">' + "".join(items) + "</div>", unsafe_allow_html=True)
-    else:
-        @st.cache_data(ttl=1800, show_spinner=False)
-        def _load_index_series(start_date: str, end_date: str) -> dict[str, dict[str, float]]:
-            from portfolio_agent.tools.yfinance_tools import get_closes_in_range
-            return {s: get_closes_in_range(s, start_date, end_date) for s in ("^GSPC", "^IXIC", "^DJI")}
-        index_pct = (normalize_index_series(_load_index_series(series["dates"][0], series["dates"][-1]))
-                     if views[view_label] != VIEW_GAIN else {})
-        st.plotly_chart(build_portfolio_trend_chart(series, index_pct, view=views[view_label]), width="stretch",
-                        config={"displayModeBar": False})
 
-    ret = [v for v in series["investment_return_pct"] if v is not None]
     first, last = series["dates"][0], series["dates"][-1]
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _load_index_series(start_date: str, end_date: str) -> dict[str, dict[str, float]]:
+        from portfolio_agent.tools.yfinance_tools import get_closes_in_range
+        return {s: get_closes_in_range(s, start_date, end_date) for s in ("^GSPC", "^IXIC", "^DJI")}
+
+    comparisons = {}
+    if series["return_start_date"] and series["return_end_date"]:
+        comparisons = benchmark_returns(
+            _load_index_series(series["return_start_date"], series["return_end_date"]),
+            series["return_start_date"],
+            series["return_end_date"],
+        )
+    if views[view_label] != "value":
+        chart_comparisons = comparisons
+        if views[view_label] == VIEW_CHANGE:
+            chart_comparisons = benchmark_returns(
+                _load_index_series(first, last), first, last,
+            )
+        index_pct = {symbol: row["series_pct"] for symbol, row in chart_comparisons.items()}
+        if views[view_label] == VIEW_GAIN:
+            index_pct = {}
+        st.plotly_chart(
+            build_portfolio_trend_chart(series, index_pct, view=views[view_label]),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+    ret = [v for v in series["investment_return_pct"] if v is not None]
     days = (datetime.fromisoformat(last) - datetime.fromisoformat(first)).days
     gain, gain_pct = series["gain_abs"][-1], series["gain_pct"][-1]
     gcol = SUCCESS if gain >= 0 else DANGER
-    ret_html = (f'<span style="color:#9CA3AF">Investment return&nbsp;&nbsp;<b style="color:{SUCCESS if ret[-1] >= 0 else DANGER}">'
-                f'{fmt_pct(ret[-1], signed=True)}</b><span style="color:#D1D5DB"> · {series["return_intervals"]} observed days</span></span>'
-                if ret else
-                '<span style="color:#9CA3AF">Investment return&nbsp;&nbsp;<b style="color:#374151">not yet computable</b>'
-                '<span style="color:#D1D5DB"> · needs consecutive observed snapshots</span></span>')
     st.markdown(
         f'<div style="display:flex;flex-wrap:wrap;gap:24px 40px;padding:8px 2px 4px;font-size:0.82rem;'
         f'border-top:1px solid #F3F4F6;margin-top:-4px">'
-        f'<span style="color:#9CA3AF">Period&nbsp;&nbsp;<b style="color:#374151">{first} → {last}</b>'
-        f'<span style="color:#D1D5DB"> · {days}d</span></span>'
+        f'<span style="color:#9CA3AF">Selected window&nbsp;&nbsp;<b style="color:#374151">{first} → {last}</b>'
+        f'<span style="color:#D1D5DB"> · {days}d · {selected_period}</span></span>'
         f'<span style="color:#9CA3AF">Recorded value&nbsp;&nbsp;<b style="color:#111827">{fmt_money(series["value"][-1])}</b>'
         f'<span style="color:#D1D5DB"> · {fmt_pct(series["recorded_change_pct"][-1], signed=True)} incl. buys/sells</span></span>'
-        f'<span style="color:#9CA3AF">Unrealized&nbsp;&nbsp;<b style="color:{gcol}">{fmt_money(gain, signed=True)}&nbsp;({fmt_pct(gain_pct, signed=True)})</b></span>'
-        f'{ret_html}</div>',
+        f'<span style="color:#9CA3AF">Unrealized&nbsp;&nbsp;<b style="color:{gcol}">{fmt_money(gain, signed=True)}&nbsp;({fmt_pct(gain_pct, signed=True)})</b></span></div>',
         unsafe_allow_html=True,
     )
-    st.caption(series["return_method"] + (f" {len(series['estimated_dates'])} of {len(series['dates'])} days are estimated "
-               "(today's shares × that day's price) and are excluded from the return." if series["estimated_dates"] else ""))
+    if ret:
+        return_start = series["return_start_date"]
+        return_end = series["return_end_date"]
+        return_value = next(
+            v for d, v in reversed(list(zip(series["dates"], series["investment_return_pct"])))
+            if v is not None
+        )
+        result_cols = st.columns(5)
+        result_cols[0].metric("Portfolio return", fmt_pct(return_value, signed=True),
+                              help="Time-weighted return over the observed period. Deposits and withdrawals are separated from performance.")
+        for col, symbol in zip(result_cols[1:4], ("^GSPC", "^IXIC", "^DJI")):
+            comparison = comparisons.get(symbol)
+            name = {"^GSPC": "S&P 500", "^IXIC": "Nasdaq", "^DJI": "Dow Jones"}[symbol]
+            col.metric(name, fmt_pct(comparison["return_pct"], signed=True) if comparison else "—",
+                       help="Market return over the available benchmark closes aligned to the selected window.")
+        sp500 = comparisons.get("^GSPC")
+        result_cols[4].metric(
+            "Vs. S&P 500",
+            fmt_pct(return_value - sp500["return_pct"], signed=True) if sp500 else "—",
+            help="Portfolio time-weighted return minus the S&P 500 return for the matched window.",
+        )
+        st.caption(
+            f"Return window: {return_start} → {return_end} · {series['return_intervals']} observed intervals. "
+            + (
+                f"Ledger-recorded fees in the selected period: "
+                f"{fmt_money(_fees_for_window(transaction_rows, return_start, return_end))}. "
+                f"Ledger cash included: {fmt_money(series['ledger_cash'][-1])} across "
+                f"{series['ledger_cash_coverage']} ledger-managed account(s)."
+                if sel_type == "All"
+                else "Security-type subset: account cash and ledger fees are excluded."
+            )
+            + (
+                f' Benchmark dates: {comparisons["^GSPC"]["start_date"]} → {comparisons["^GSPC"]["end_date"]}.'
+                if "^GSPC" in comparisons else " S&P 500 comparison unavailable for these dates."
+            )
+        )
+    else:
+        st.info("Investment return needs at least two consecutive observed snapshots.")
+    estimated_note = (
+        f" {len(series['estimated_dates'])} estimated dates are excluded from returns."
+        if series["estimated_dates"] else ""
+    )
+    st.caption(
+        series["return_method"] + estimated_note +
+        " Snapshot-managed accounts do not have historical cash or complete transaction-fee data; their return is based on observed security-share changes. "
+        + (
+            "Ledger cash and transaction fees are included only for ledger-managed accounts. "
+            if sel_type == "All"
+            else "Security-type subset returns exclude account cash and ledger transaction fees. "
+        )
+        + "Benchmarks use auto-adjusted index closes as a total-return proxy."
+    )
     _render_history_coverage()
+
+
+def _fees_for_window(transactions: list[dict], start_date: str, end_date: str) -> float:
+    """Recorded broker and explicit account fees after the opening snapshot through the closing snapshot."""
+    total = 0.0
+    for txn in transactions:
+        if not start_date < txn["date"] <= end_date:
+            continue
+        total += float(txn.get("fees") or 0.0)
+        if txn["type"] == "FEE":
+            total += abs(float(txn.get("amount") or 0.0))
+    return round(total, 2)
 
 
 def _render_history_coverage() -> None:
@@ -726,7 +841,8 @@ def _render_holdings_tab() -> None:
         ("Sector Allocation", f"{scope_label} · valued positions only", "pie_chart", False,
          lambda: _render_allocation(summary, scope_label, scoped)),
         ("Performance", f"{scope_label} · daily closes", "trending_up", False,
-         lambda: _render_trend(get_price_history(), scoped, scope, scope_label)),
+         lambda: _render_trend(get_price_history_for(ctx), scoped, scope, scope_label,
+                              ctx, list_accounts_for(ctx, include_archived=True))),
         ("Rebalance scenario", f"{scope_label} · explicit recalculation", "calculate", False,
          lambda: _render_rebalance(scoped, scope, scope_label)),
     ]

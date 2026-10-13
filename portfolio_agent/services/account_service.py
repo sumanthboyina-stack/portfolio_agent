@@ -672,5 +672,28 @@ def list_import_runs_for(ctx: RequestContext, *, limit: int = 25) -> list[dict]:
 
 def get_price_history_for(ctx: RequestContext, *, tickers: list[str] | None = None,
                           brokers: list[str] | None = None) -> list[dict]:
-    resolve_portfolio(ctx)
-    return repo.get_price_history(tickers=tickers, brokers=brokers)
+    portfolio = resolve_portfolio(ctx)
+    owned_accounts = repo.list_accounts(portfolio["portfolio_id"], include_archived=True)
+    owned_keys = {
+        ((account.get("broker") or "").strip().lower(), (account.get("account_number") or "").strip())
+        for account in owned_accounts
+    }
+    portfolio_ids_by_key: dict[tuple[str, str], set[int]] = {}
+    for account in repo.list_accounts(include_archived=True, include_paper=True):
+        key = ((account.get("broker") or "").strip().lower(), (account.get("account_number") or "").strip())
+        portfolio_ids_by_key.setdefault(key, set()).add(account["portfolio_id"])
+
+    # Price history is keyed by broker/account number rather than portfolio_id.
+    # If another portfolio reuses that external key, its historical rows cannot
+    # be safely attributed and must not be exposed through this request.
+    safe_keys = {
+        key for key in owned_keys
+        if len(portfolio_ids_by_key.get(key, set())) == 1
+        and portfolio_ids_by_key[key] == {portfolio["portfolio_id"]}
+    }
+    if not safe_keys:
+        return []
+    return [
+        row for row in repo.get_price_history(tickers=tickers, brokers=brokers)
+        if ((row.get("broker") or "").strip().lower(), (row.get("account_number") or "").strip()) in safe_keys
+    ]
