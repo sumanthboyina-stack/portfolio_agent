@@ -117,7 +117,7 @@ def render_ledger_panel(ctx, accounts: list[dict], *, key: str = "ledger") -> No
         st.caption("This account's positions are a snapshot (typed in or imported). Transactions recorded here are history only until you switch it "
                    "to the ledger.")
 
-    tabs = st.tabs(["Transactions", "Add", "Lots & gains", "Reconcile", "Import / export", "Ledger settings"])
+    tabs = st.tabs(["Transactions", "Add", "Lots & gains", "Activity", "Reconcile", "Import / export", "Ledger settings"])
     with tabs[0]:
         _tab_transactions(ctx, pick, key)
     with tabs[1]:
@@ -125,10 +125,12 @@ def render_ledger_panel(ctx, accounts: list[dict], *, key: str = "ledger") -> No
     with tabs[2]:
         _tab_lots(ctx, pick, info, key)
     with tabs[3]:
-        _tab_reconcile(ctx, pick, info, key)
+        _tab_activity(ctx, pick, key)
     with tabs[4]:
-        _tab_import_export(ctx, pick, info, key)
+        _tab_reconcile(ctx, pick, info, key)
     with tabs[5]:
+        _tab_import_export(ctx, pick, info, key)
+    with tabs[6]:
         _tab_settings(ctx, pick, info, key)
 
 
@@ -236,9 +238,15 @@ def _tab_lots(ctx, aid, info, key) -> None:
     lots = ld.lots_view(ctx, aid)
     st.markdown("**Open lots**")
     if lots:
-        st.dataframe(pd.DataFrame([{"Ticker": l["ticker"], "Opened": l["open_date"], "Shares": l["quantity"], "Unit cost": l["unit_cost"],
-                                    "Cost basis": l["cost_basis"], "From": l["origin"].replace("_", " ").title()} for l in lots]),
+        st.dataframe(pd.DataFrame([{"Ticker": l["ticker"], "Opened": l["open_date"], "Shares": l["quantity"],
+                                    "Unit cost": "unknown" if l["basis_unknown"] else l["unit_cost"],
+                                    "Cost basis": "unknown" if l["basis_unknown"] else l["cost_basis"],
+                                    "From": l["origin"].replace("_", " ").title()} for l in lots]),
                      hide_index=True, width="stretch")
+        if any(l["basis_unknown"] for l in lots):
+            st.caption("Lots marked unknown were opened without a cost basis, so their gains and losses are not calculated (a cost of 0 would make "
+                       "the whole value look like profit). Enter the real cost to fix it: switch the account back to snapshots, set each position's "
+                       "cost on Holdings, then switch to the ledger again.")
     else:
         st.caption("No open lots.")
     gains0 = ld.realized_gains_view(ctx, aid)
@@ -247,11 +255,14 @@ def _tab_lots(ctx, aid, info, key) -> None:
     st.markdown("**Realized gains**")
     if g["rows"]:
         st.dataframe(pd.DataFrame([{"Ticker": r["ticker"], "Shares": r["quantity"], "Opened": r["open_date"], "Closed": r["close_date"],
-                                    "Proceeds": r["proceeds"], "Cost basis": r["cost_basis"], "Gain": r["gain"], "Term": "Long" if r["period"] == "LONG" else "Short",
+                                    "Proceeds": r["proceeds"], "Cost basis": "unknown" if r["basis_unknown"] else r["cost_basis"],
+                                    "Gain": "unknown" if r["basis_unknown"] else r["gain"], "Term": "Long" if r["period"] == "LONG" else "Short",
                                     "Method": r["method"]} for r in g["rows"]]), hide_index=True, width="stretch")
         t = g["totals"]
         st.caption(f"Short-term {fmt_money(t['short_term'], signed=True)} · long-term {fmt_money(t['long_term'], signed=True)} · total {fmt_money(t['total'], signed=True)}. "
-                   "Long-term = held more than a year. Wash sales are not adjusted.")
+                   "Long-term = held more than a year. Wash sales are not adjusted."
+                   + (f" {t['unknown_basis_sales']} sale(s) of shares with an unknown cost ({fmt_money(t['unknown_basis_proceeds'])} proceeds) are not in these totals."
+                      if t["unknown_basis_sales"] else ""))
     else:
         st.caption("No sales recorded" + (f" in {year}." if year else " yet."))
 
@@ -299,10 +310,13 @@ def _tab_import_export(ctx, aid, info, key) -> None:
     st.divider()
     st.markdown("**Import transactions from a CSV**")
     if not info["is_ledger"]:
-        st.info("Transactions can only be imported into a ledger account. Switch this account to the ledger first (Ledger settings).", icon=material("info"))
+        st.info("Transactions can only be imported into a ledger account. Switch this account to the ledger first (Ledger settings). "
+                "You can still save a history file below, for the Activity summary.", icon=material("info"))
+        _history_upload(ctx, aid, info, key)
         return
-    st.caption("Any CSV: map its columns, review the preview, then import. Duplicates are skipped; nothing is written until you confirm. "
-               "Broker-specific formats are not built yet.")
+    st.caption("Fidelity's \"History for Account\" export and Vanguard's \"OfxDownload\" CSV are recognised automatically. Any other CSV: map its columns, review the preview, then import. "
+               "Duplicates, rows dated on or before this account's ledger start (already in its opening balance) and money-market sweeps are skipped; "
+               "nothing is written until you confirm.")
     up = st.file_uploader("CSV file", type=["csv", "txt"], key=f"{key}_up_{aid}")
     if up is None:
         return
@@ -328,11 +342,12 @@ def _tab_import_export(ctx, aid, info, key) -> None:
         return
     s = pv["summary"]
     st.markdown(_badge(f"{s['new']} new", "good") + " " + _badge(f"{s['duplicate']} duplicate", "neutral") + " " +
+                (_badge(f"{s['skipped']} skipped", "neutral") + " " if s.get("skipped") else "") +
                 _badge(f"{s['invalid']} invalid", "bad" if s["invalid"] else "neutral"), unsafe_allow_html=True)
     if pv["dry_run_error"]:
         st.error(f"The rows do not fit this account's ledger: {pv['dry_run_error']}", icon=material("error"))
     st.dataframe(pd.DataFrame([{"Line": r["line"], "Status": r["status"], "Type": r["type"], "Date": r["trade_date"], "Ticker": r["ticker"],
-                                "Qty": r["quantity"], "Cash": r["cash_amount"], "Notes": "; ".join(r["errors"] + r["warnings"]) or (r["duplicate_of"] or "")}
+                                "Qty": r["quantity"], "Cash": r["cash_amount"], "Notes": "; ".join(r["errors"] + r["warnings"]) or (r["skip_reason"] or r["duplicate_of"] or "")}
                                for r in pv["rows"][:300]]), hide_index=True, width="stretch")
     if st.button(f"Import {s['new']} new transaction{'s' if s['new'] != 1 else ''}", key=f"{key}_imp_go_{aid}", type="primary", disabled=not pv["can_import"],
                  icon=material("upload")):
@@ -343,6 +358,111 @@ def _tab_import_export(ctx, aid, info, key) -> None:
         except _ERRORS as exc:
             _flash(str(exc), "error")
         st.rerun()
+    _history_upload(ctx, aid, info, key)
+
+
+def _history_upload(ctx, aid, info, key) -> None:
+    """Save a broker history file's PAST activity (before the ledger started, or any of it on a snapshot account) for the Activity summary."""
+    st.divider()
+    st.markdown("**Save past activity as history**")
+    st.caption("For the activity before this account's ledger started. It is saved on the side for the Activity summary (dividends, interest, "
+               "deposits, sales); it never changes positions, lots or cash. Re-uploading the same file adds nothing."
+               + (f" Rows dated after {info['ledger_start_date']} are left for the transaction import above." if info["is_ledger"] and info.get("ledger_start_date") else ""))
+    up = st.file_uploader("History file (CSV)", type=["csv", "txt"], key=f"{key}_hup_{aid}")
+    if up is None:
+        return
+    raw = up.getvalue()
+    try:
+        sug = ld.import_suggestion(raw)
+    except _ERRORS as exc:
+        st.error(str(exc), icon=material("error"))
+        return
+    mapping = dict(sug["mapping"])
+    with st.expander("Columns (detected automatically)", expanded=False):
+        headers = [""] + sug["headers"]
+        cols = st.columns(3)
+        labels = {"date": "Date *", "type": "Type *", "ticker": "Ticker", "quantity": "Quantity", "price": "Price", "amount": "Amount", "fees": "Fees",
+                  "external_ref": "Reference / ID", "contribution_source": "Money source"}
+        for i, (f, lab) in enumerate(labels.items()):
+            cur = mapping.get(f) or ""
+            mapping[f] = cols[i % 3].selectbox(lab, headers, index=headers.index(cur) if cur in headers else 0,
+                                               key=f"{key}_hmap_{aid}_{f}_{up.file_id}") or None
+    try:
+        pv = ld.history_preview(ctx, aid, raw, mapping)
+    except _ERRORS as exc:
+        st.error(str(exc), icon=material("error"))
+        return
+    s = pv["summary"]
+    st.markdown(_badge(f"{s['new']} to save", "good") + " " + _badge(f"{s['duplicate']} already saved", "neutral") + " " +
+                (_badge(f"{s['skipped']} not activity", "neutral") + " " if s["skipped"] else "") +
+                (_badge(f"{s['later']} belong in the ledger", "warn") + " " if s["later"] else "") +
+                _badge(f"{s['invalid']} invalid", "bad" if s["invalid"] else "neutral"), unsafe_allow_html=True)
+    t = pv["totals"]
+    if s["new"]:
+        st.caption(f"Will add: dividends {fmt_money(t['dividends'])} · interest {fmt_money(t['interest'])} · deposits {fmt_money(t['deposits'])} · "
+                   f"withdrawals {fmt_money(t['withdrawals'])} · {t['sale_count']} sale(s) {fmt_money(t['sale_proceeds'])} · "
+                   f"{t['purchase_count']} purchase(s) {fmt_money(t['purchases'])}")
+    st.dataframe(pd.DataFrame([{"Line": r["line"], "Status": r["status"], "Type": r["type"], "Date": r["trade_date"], "Ticker": r["ticker"],
+                                "Qty": r["quantity"], "Cash": r["amount"], "Notes": "; ".join(r["errors"]) or (r["reason"] or "")}
+                               for r in pv["rows"][:300]]), hide_index=True, width="stretch")
+    if st.button(f"Save {s['new']} row{'s' if s['new'] != 1 else ''} as history", key=f"{key}_hgo_{aid}", type="primary", disabled=not pv["can_save"],
+                 icon=material("history")):
+        try:
+            out = ld.history_commit(ctx, aid, raw, mapping, up.name)
+            _flash(f"Saved {out['saved']} row(s) as history ({out['duplicates']} already saved, {out['skipped']} not activity, {out['later']} left for the ledger).")
+        except _ERRORS as exc:
+            _flash(str(exc), "error")
+        st.rerun()
+
+
+def _tab_activity(ctx, aid, key) -> None:
+    try:
+        first = ld.activity_view(ctx, aid)
+    except _ERRORS as exc:
+        st.error(str(exc), icon=material("error"))
+        return
+    if not first["years"]:
+        st.caption("No activity yet. Record transactions in the ledger, or save a broker history file under Import / export → Save past activity as history.")
+        return
+    year = st.selectbox("Year", first["years"][::-1], key=f"{key}_ay_{aid}")
+    a = ld.activity_view(ctx, aid, year)
+    t = a["totals"]
+    st.caption(f"{a['first_date']} → {a['last_date']} · {a['from_history']} saved-history rows + {a['from_ledger']} ledger transactions")
+    r1 = st.columns(4)
+    r1[0].metric("Dividends", fmt_money(t["dividends"]))
+    r1[1].metric("Interest", fmt_money(t["interest"]))
+    r1[2].metric("Deposits", fmt_money(t["deposits"]))
+    r1[3].metric("Withdrawals", fmt_money(t["withdrawals"]))
+    r2 = st.columns(4)
+    r2[0].metric("Purchases", fmt_money(t["purchases"]), help=f"{t['purchase_count']} buy(s), dividend reinvestments included")
+    r2[1].metric("Sale proceeds", fmt_money(t["sale_proceeds"]), help=f"{t['sale_count']} sale(s), {t['shares_sold']:,.4g} shares")
+    r2[2].metric("Fees", fmt_money(t["fees"]))
+    r2[3].metric("Employer match (cash)", fmt_money(t["employer_match_cash"]))
+    st.caption("Gains and losses on sales are not shown here: they need the cost of the shares sold, which this history does not have. "
+               "Sales after the ledger start have their gains under Lots & gains.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if a["deposit_sources"]:
+            st.markdown("**Deposits by source**")
+            st.dataframe(pd.DataFrame([{"Source": k, "Amount": v} for k, v in a["deposit_sources"].items()]), hide_index=True, width="stretch")
+        if a["sales"]:
+            st.markdown("**Sales**")
+            st.dataframe(pd.DataFrame([{"Date": s_["date"], "Ticker": s_["ticker"], "Shares": s_["quantity"], "Proceeds": s_["proceeds"]} for s_ in a["sales"]]),
+                         hide_index=True, width="stretch")
+    with c2:
+        if a["dividends_by_ticker"]:
+            st.markdown("**Dividends by holding**")
+            st.dataframe(pd.DataFrame([{"Ticker": k, "Amount": v} for k, v in a["dividends_by_ticker"].items()]), hide_index=True, width="stretch")
+    if a["from_history"]:
+        with st.expander("Remove saved history", icon=material("delete")):
+            st.caption("Deletes the history rows saved for this account (not ledger transactions). You can save the file again at any time.")
+            if st.checkbox("I understand", key=f"{key}_hclr_ok_{aid}") and st.button("Delete saved history", key=f"{key}_hclr_{aid}"):
+                try:
+                    n = ld.history_clear(ctx, aid)
+                    _flash(f"Removed {n} saved history row(s).")
+                except _ERRORS as exc:
+                    _flash(str(exc), "error")
+                st.rerun()
 
 
 def _tab_settings(ctx, aid, info, key) -> None:

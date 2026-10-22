@@ -272,7 +272,7 @@ _HOLDINGS_VIEW = """CREATE VIEW holdings AS
            p.cost_basis_total, p.current_price, p.current_value,
            a.display_name AS account_name, a.account_number, a.account_type, a.broker,
            p.sector, p.as_of_date, p.synced_at, p.price_as_of,
-           p.account_id, a.portfolio_id, p.version, p.source_import_id,
+           p.account_id, a.portfolio_id, p.version, p.source_import_id, p.vested_value,
            p.instrument_id, i.name AS instrument_name,
            i.instrument_type, i.asset_class, i.sub_asset_class, i.leverage_factor, i.proxy_ticker,
            i.classification_source
@@ -409,7 +409,10 @@ def _migrate_ledger(conn: sqlite3.Connection) -> None:
     """Idempotent: the transaction ledger tables (tools.ledger_db) and accounts.lot_method (NULL = the portfolio_settings default)."""
     from portfolio_agent.tools import ledger_db
     ledger_db.create_schema(conn)
-    migrate_columns(conn, "import_runs", [("skipped", "INTEGER")])      # duplicates a CSV transaction import left out
+    migrate_columns(conn, "import_runs", [("skipped", "INTEGER")])                    # duplicates a CSV transaction import left out
+    migrate_columns(conn, "positions", [("vested_value", "REAL")])                    # retirement plans: the vested part of the position's value (NULL = not stated)
+    migrate_columns(conn, "accounts", [("plan_name", "TEXT"), ("provider", "TEXT"), ("vested_balance", "REAL"),   # retirement-plan facts (all nullable)
+                                       ("loan_balance", "REAL"), ("statement_period_end", "TEXT")])
     migrate_columns(conn, "accounts", [("lot_method", "TEXT"),
                                        ("ledger_start_date", "TEXT")])      # set when the account became ledger-managed (see ledger_service)
 
@@ -482,7 +485,8 @@ def get_portfolio_by_owner(owner: str, *, conn: sqlite3.Connection | None = None
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
 
-_ACCOUNT_EDITABLE = frozenset({"display_name", "account_type", "status", "holdings_source", "lot_method", "ledger_start_date"})
+_ACCOUNT_EDITABLE = frozenset({"display_name", "account_type", "status", "holdings_source", "lot_method", "ledger_start_date",
+                               "plan_name", "provider", "vested_balance", "loan_balance", "statement_period_end"})
 
 
 def get_account(account_id: int, *, conn: sqlite3.Connection | None = None) -> dict | None:
@@ -573,6 +577,7 @@ def delete_account(account_id: int, *, conn: sqlite3.Connection | None = None) -
             raise ValueError("this account has ledger transactions, which are kept for the record: archive it instead of deleting it")
         n = conn.execute("DELETE FROM positions WHERE account_id = ?", [account_id]).rowcount
         conn.execute("DELETE FROM account_cash WHERE account_id = ?", [account_id])
+        conn.execute("DELETE FROM account_history WHERE account_id = ?", [account_id])      # saved history is a summary aid, not the append-only record
         conn.execute("DELETE FROM accounts WHERE account_id = ?", [account_id])
     return n
 
@@ -750,7 +755,7 @@ def relabel_price_history_ticker(old_ticker: str, new_ticker: str, *,
 # ── Positions ─────────────────────────────────────────────────────────────────
 
 _POSITION_COLUMNS = ("instrument_id", "description", "shares", "avg_cost", "cost_basis_total", "current_price",
-                     "current_value", "sector", "as_of_date", "price_as_of", "source_import_id")
+                     "current_value", "sector", "as_of_date", "price_as_of", "source_import_id", "vested_value")
 _POSITION_EDITABLE = frozenset(_POSITION_COLUMNS) | {"ticker"}   # ticker is translated to instrument_id
 _POSITION_SELECT = "SELECT p.*, i.ticker FROM positions p JOIN instruments i ON i.instrument_id = p.instrument_id"
 
@@ -775,6 +780,7 @@ def position_fields(h: dict, as_of_date: str) -> dict:
         "sector": h.get("sector"),
         "as_of_date": row_as_of,
         "price_as_of": price_as_of,
+        "vested_value": h.get("vested_value"),           # a retirement plan's vested part of current_value, only where a statement states it
     }
 
 

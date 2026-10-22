@@ -20,6 +20,6 @@ echo "  Layer 4   — Screener outcome scoring"
 echo "========================================"
 
 cd /Users/sumanthboyina/portfolio-agent
-/Users/sumanthboyina/portfolio-agent/.venv/bin/python -u main.py --batch evening
+/usr/bin/caffeinate -i /Users/sumanthboyina/portfolio-agent/.venv/bin/python -u main.py --batch evening
 
 echo "  Finished : $(date)"

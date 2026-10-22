@@ -666,316 +666,323 @@ def render_drill_down(drill_ticker: str, drill_date: str | None, owner: str | No
     )
     st.markdown(header_html, unsafe_allow_html=True)
 
-    # ── Reasoning ─────────────────────────────────────────────────────────────
-    with st.expander("Reasoning", icon=material("notes"), expanded=True):
-        reasoning = row.get("reasoning") or row.get("reasoning_text") or "—"
-        st.markdown(
-            f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:14px 18px;'
-            f'border-radius:8px;font-size:0.85rem;color:#334155;line-height:1.65">'
-            f'{reasoning}</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            f"Model: **{row.get('model_name', '—')}** ({row.get('model_provider', '—')})  "
-            f"· Changed from previous: {'Yes' if row.get('changed_from_previous') else 'No'}"
-            + (f"  · Prev: {row['previous_prediction']}" if row.get("previous_prediction") else "")
-        )
+    from web.components.valuation_detail import render_valuation_tab
 
-    # ── Inputs at prediction time ─────────────────────────────────────────────
-    with st.expander("Inputs at Prediction Time", icon=material("bar_chart"), expanded=True):
-        f_score = row.get("fundamental_score")
-        r_score = row.get("research_score")
-        m_score = row.get("macro_score")
-        n_score = row.get("news_score")
-        pt = row.get("pt_mean")
-        cp = row.get("start_price") or row.get("pt_current_price")
-        upside = ((pt - cp) / cp * 100) if (pt and cp and cp > 0) else None
-        upside_str = f"(+{upside:.2f}%)" if upside is not None else ""
-
-        ic1, ic2, ic3, ic4 = st.columns(4)
-        score_items = [
-            (ic1, "Fundamentals", f_score, f"Snapshot score: {row.get('snapshot_fundamentals_score', '—')}"),
-            (ic2, "Analyst Research", r_score, f"Price target: ${pt:.2f} {upside_str}" if pt else "Price target: —"),
-            (ic3, "Macro Environment", m_score, "Interest rates, inflation, risk regime"),
-            (ic4, "News Sentiment", n_score, f"Sentiment score: {row.get('snapshot_news_score', '—')}"),
-        ]
-        for col, label, score, detail in score_items:
-            with col:
-                s_color = _score_color(score)
-                s_str = str(int(score)) if score is not None else "—"
-                arrow = _score_arrow(score)
-                st.markdown(
-                    f'<div style="background:white;border:1px solid #E2E8F0;border-radius:8px;'
-                    f'padding:12px 14px;text-align:center">'
-                    f'<div style="font-size:0.72rem;font-weight:700;color:#94A3B8;'
-                    f'text-transform:uppercase;margin-bottom:6px">{label}</div>'
-                    f'<div style="font-size:1.8rem;font-weight:800;color:{s_color}">'
-                    f'{s_str}<span style="font-size:1rem">{arrow}</span></div>'
-                    f'<div style="font-size:0.72rem;color:#64748B;margin-top:4px">{detail}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-    # ── Price chart — the pre-trade sanity check: where's price relative to the
-    # range, breakout or bounce, where's support. Right next to the reasoning/
-    # radar/probability blocks, not a separate site you have to tab out to.
-    with st.expander("Price Chart", icon=material("trending_up"), expanded=True):
-        _period_label = st.radio(
-            "Period", ["1mo", "3mo", "6mo", "1y"], index=2,
-            horizontal=True, key=f"price_chart_period_{drill_ticker}",
-            label_visibility="collapsed",
-        )
-        fig_price = _plot_price_chart(drill_ticker, period=_period_label)
-        if fig_price is not None:
-            st.plotly_chart(fig_price, use_container_width=True, config={"displayModeBar": False})
-        else:
-            st.info(f"No price history available for {drill_ticker}.", icon=material("trending_up"))
-
-    # ── Probability distribution (full) ──────────────────────────────────────
-    has_prob = any(
-        row.get(k) is not None
-        for k in ["p_strong_down", "p_moderate_down", "p_flat", "p_moderate_up", "p_strong_up"]
-    )
-    with st.expander("Return Probability Distribution", icon=material("insights"), expanded=True):
-        if has_prob:
-            pc1, pc2 = st.columns([2, 1])
-            with pc1:
-                fig_prob = _plot_prob_full(row)
-                st.plotly_chart(fig_prob, use_container_width=True, config={"displayModeBar": False})
-            with pc2:
-                bull_pct = (row.get("p_moderate_up") or 0) + (row.get("p_strong_up") or 0)
-                bear_pct = (row.get("p_strong_down") or 0) + (row.get("p_moderate_down") or 0)
-                flat_pct = row.get("p_flat") or 0
-                st.markdown(
-                    f'<div style="display:flex;flex-direction:column;gap:8px;margin-top:20px">'
-                    f'<div style="background:{SUCCESS_LIGHT};color:{SUCCESS};padding:8px 14px;'
-                    f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'{icon_html("trending_up", 15)} Bullish {bull_pct:.2f}%</div>'
-                    f'<div style="background:{NEUTRAL_LIGHT};color:{NEUTRAL};padding:8px 14px;'
-                    f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'{icon_html("trending_flat", 15)} Flat {flat_pct:.2f}%</div>'
-                    f'<div style="background:{DANGER_LIGHT};color:{DANGER};padding:8px 14px;'
-                    f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
-                    f'{icon_html("trending_down", 15)} Bearish {bear_pct:.2f}%</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("Probability distribution data not available for this prediction.", icon=material("bar_chart"))
-
-    # ── Score radar ───────────────────────────────────────────────────────────
-    with st.expander("Score Radar", icon=material("track_changes"), expanded=False):
-        rc1, rc2 = st.columns([1, 1])
-        with rc1:
-            fig_radar = _plot_score_radar(row)
-            st.plotly_chart(fig_radar, use_container_width=True, config={"displayModeBar": False})
-        with rc2:
+    # The prediction and the valuation behind it are two views of the same ticker: one drill-down, two tabs.
+    _tab_pred, _tab_val = st.tabs([f"{material('insights')} Prediction", f"{material('calculate')} Valuation"])
+    with _tab_val:
+        render_valuation_tab(drill_ticker, key="drill_")
+    with _tab_pred:
+        # ── Reasoning ─────────────────────────────────────────────────────────────
+        with st.expander("Reasoning", icon=material("notes"), expanded=True):
+            reasoning = row.get("reasoning") or row.get("reasoning_text") or "—"
             st.markdown(
-                '<p style="font-size:0.82rem;font-weight:700;color:#0F172A;margin-bottom:8px">'
-                'Score Breakdown</p>',
+                f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:14px 18px;'
+                f'border-radius:8px;font-size:0.85rem;color:#334155;line-height:1.65">'
+                f'{reasoning}</div>',
                 unsafe_allow_html=True,
             )
-            score_breakdown = [
-                ("Composite Score",   row.get("composite_score")),
-                ("Fundamentals",      row.get("fundamental_score")),
-                ("Valuation",         row.get("valuation_score")),
-                ("Analyst Research",  row.get("research_score")),
-                ("Macro Environment", row.get("macro_score")),
-                ("News Sentiment",    row.get("news_score")),
+            st.caption(
+                f"Model: **{row.get('model_name', '—')}** ({row.get('model_provider', '—')})  "
+                f"· Changed from previous: {'Yes' if row.get('changed_from_previous') else 'No'}"
+                + (f"  · Prev: {row['previous_prediction']}" if row.get("previous_prediction") else "")
+            )
+
+        # ── Inputs at prediction time ─────────────────────────────────────────────
+        with st.expander("Inputs at Prediction Time", icon=material("bar_chart"), expanded=True):
+            f_score = row.get("fundamental_score")
+            r_score = row.get("research_score")
+            m_score = row.get("macro_score")
+            n_score = row.get("news_score")
+            pt = row.get("pt_mean")
+            cp = row.get("start_price") or row.get("pt_current_price")
+            upside = ((pt - cp) / cp * 100) if (pt and cp and cp > 0) else None
+            upside_str = f"(+{upside:.2f}%)" if upside is not None else ""
+
+            ic1, ic2, ic3, ic4 = st.columns(4)
+            score_items = [
+                (ic1, "Fundamentals", f_score, f"Snapshot score: {row.get('snapshot_fundamentals_score', '—')}"),
+                (ic2, "Analyst Research", r_score, f"Price target: ${pt:.2f} {upside_str}" if pt else "Price target: —"),
+                (ic3, "Macro Environment", m_score, "Interest rates, inflation, risk regime"),
+                (ic4, "News Sentiment", n_score, f"Sentiment score: {row.get('snapshot_news_score', '—')}"),
             ]
-            for lbl, val in score_breakdown:
-                s_str = f"{val:.2f}" if val is not None else "—"
-                pct = min(100, (val / 10) * 100) if val is not None else 0
-                bar_color = _score_color(val)
-                st.markdown(
-                    f'<div style="display:flex;align-items:center;gap:8px;margin:4px 0">'
-                    f'<span style="width:90px;font-size:0.75rem;color:#475569">{lbl}</span>'
-                    f'<div style="flex:1;height:6px;background:#E2E8F0;border-radius:3px">'
-                    f'<div style="width:{pct:.2f}%;height:100%;background:{bar_color};border-radius:3px"></div></div>'
-                    f'<span style="font-size:0.78rem;font-weight:700;color:{bar_color};min-width:30px">{s_str}</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-    # ── Agent Panel ───────────────────────────────────────────────────────────
-    with st.expander("Agent Panel", icon=material("account_balance"), expanded=True):
-        try:
-            panel = json.loads(row.get("panel_summary") or "{}")
-        except Exception:
-            panel = {}
-
-        # The Valuation card gets a second badge (UNDERVALUED/FAIRLY_VALUED/
-        # OVERVALUED) alongside its 1-10 score — unlike the other 4 analysts,
-        # valuation has a natural cheap/fair/expensive framing that the raw
-        # score alone doesn't convey, and it's the same label the Valuation
-        # page shows as its headline. Best-effort: absent if not yet computed.
-        _VALUATION_LABEL_STYLE = {
-            "UNDERVALUED":   (SUCCESS, SUCCESS_LIGHT, "UNDERVALUED"),
-            "FAIRLY_VALUED": (WARNING, WARNING_LIGHT, "FAIRLY VALUED"),
-            "OVERVALUED":    (DANGER, DANGER_LIGHT, "OVERVALUED"),
-        }
-        valuation_label_badge = ""
-        try:
-            from portfolio_agent.tools.valuation_db import get_stored_valuation
-            _stored_valuation = get_stored_valuation(drill_ticker)
-            _val_label = _stored_valuation.get("valuation_label") if _stored_valuation else None
-            if _val_label in _VALUATION_LABEL_STYLE:
-                _vl_color, _vl_bg, _vl_text = _VALUATION_LABEL_STYLE[_val_label]
-                valuation_label_badge = (
-                    f'<span style="background:{_vl_bg};color:{_vl_color};padding:2px 8px;'
-                    f'border-radius:10px;font-weight:700;font-size:0.72rem;margin-left:4px;'
-                    f'display:inline-flex;align-items:center;gap:4px">'
-                    f'{status_dot_html(_vl_color, 6)}{_vl_text}</span>'
-                )
-        except Exception:
-            pass
-
-        if panel and any(panel.get(k) for k in ["chen_verdict", "malhotra_verdict", "webb_verdict", "varga_verdict", "park_verdict"]):
-            agents = [
-                ("FUNDAMENTALS",  "Earnings, balance sheet & margins",       panel.get("chen_verdict", "—"),     PRIMARY, ""),
-                ("VALUATION",     "DCF intrinsic value & margin of safety",  panel.get("malhotra_verdict", "—"), DANGER,  valuation_label_badge),
-                ("RESEARCH",      "Analyst targets & broker coverage",       panel.get("webb_verdict", "—"),     PURPLE,  ""),
-                ("MACRO",         "Interest rates, inflation & regime",      panel.get("varga_verdict", "—"),    WARNING, ""),
-                ("NEWS",          "Sentiment & recent headlines",            panel.get("park_verdict", "—"),     SUCCESS, ""),
-            ]
-            pcols = st.columns(5)
-            for pcol, (name, description, verdict, color, extra_badge) in zip(pcols, agents):
-                with pcol:
-                    m = re.search(r"\((\d+(?:\.\d+)?)/10\)", verdict)
-                    score_val = m.group(1) if m else None
-                    clean_verdict = re.sub(r"\(\d+(?:\.\d+)?/10\)\s*[—\-]?\s*", "", verdict).strip()
-                    score_badge = (
-                        f'<span style="background:{color}22;color:{color};padding:2px 8px;'
-                        f'border-radius:10px;font-weight:700;font-size:0.78rem">{score_val}/10</span>'
-                        if score_val else ""
-                    )
+            for col, label, score, detail in score_items:
+                with col:
+                    s_color = _score_color(score)
+                    s_str = str(int(score)) if score is not None else "—"
+                    arrow = _score_arrow(score)
                     st.markdown(
-                        f'<div style="border:1px solid {color}44;border-top:3px solid {color};'
-                        f'padding:10px 12px;border-radius:8px;background:{color}08;min-height:100px">'
-                        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">'
-                        f'<span style="font-size:0.68rem;font-weight:700;color:{color};letter-spacing:0.06em">'
-                        f'{name}</span><span>{score_badge}{extra_badge}</span></div>'
-                        f'<div style="font-size:0.68rem;color:#64748B;margin-bottom:4px">{description}</div>'
-                        f'<div style="font-size:0.8rem;color:#1E293B;line-height:1.4">{clean_verdict}</div>'
+                        f'<div style="background:white;border:1px solid #E2E8F0;border-radius:8px;'
+                        f'padding:12px 14px;text-align:center">'
+                        f'<div style="font-size:0.72rem;font-weight:700;color:#94A3B8;'
+                        f'text-transform:uppercase;margin-bottom:6px">{label}</div>'
+                        f'<div style="font-size:1.8rem;font-weight:800;color:{s_color}">'
+                        f'{s_str}<span style="font-size:1rem">{arrow}</span></div>'
+                        f'<div style="font-size:0.72rem;color:#64748B;margin-top:4px">{detail}</div>'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
-            if panel.get("key_debate"):
+
+        # ── Price chart — the pre-trade sanity check: where's price relative to the
+        # range, breakout or bounce, where's support. Right next to the reasoning/
+        # radar/probability blocks, not a separate site you have to tab out to.
+        with st.expander("Price Chart", icon=material("trending_up"), expanded=True):
+            _period_label = st.radio(
+                "Period", ["1mo", "3mo", "6mo", "1y"], index=2,
+                horizontal=True, key=f"price_chart_period_{drill_ticker}",
+                label_visibility="collapsed",
+            )
+            fig_price = _plot_price_chart(drill_ticker, period=_period_label)
+            if fig_price is not None:
+                st.plotly_chart(fig_price, use_container_width=True, config={"displayModeBar": False})
+            else:
+                st.info(f"No price history available for {drill_ticker}.", icon=material("trending_up"))
+
+        # ── Probability distribution (full) ──────────────────────────────────────
+        has_prob = any(
+            row.get(k) is not None
+            for k in ["p_strong_down", "p_moderate_down", "p_flat", "p_moderate_up", "p_strong_up"]
+        )
+        with st.expander("Return Probability Distribution", icon=material("insights"), expanded=True):
+            if has_prob:
+                pc1, pc2 = st.columns([2, 1])
+                with pc1:
+                    fig_prob = _plot_prob_full(row)
+                    st.plotly_chart(fig_prob, use_container_width=True, config={"displayModeBar": False})
+                with pc2:
+                    bull_pct = (row.get("p_moderate_up") or 0) + (row.get("p_strong_up") or 0)
+                    bear_pct = (row.get("p_strong_down") or 0) + (row.get("p_moderate_down") or 0)
+                    flat_pct = row.get("p_flat") or 0
+                    st.markdown(
+                        f'<div style="display:flex;flex-direction:column;gap:8px;margin-top:20px">'
+                        f'<div style="background:{SUCCESS_LIGHT};color:{SUCCESS};padding:8px 14px;'
+                        f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
+                        f'{icon_html("trending_up", 15)} Bullish {bull_pct:.2f}%</div>'
+                        f'<div style="background:{NEUTRAL_LIGHT};color:{NEUTRAL};padding:8px 14px;'
+                        f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
+                        f'{icon_html("trending_flat", 15)} Flat {flat_pct:.2f}%</div>'
+                        f'<div style="background:{DANGER_LIGHT};color:{DANGER};padding:8px 14px;'
+                        f'border-radius:8px;font-size:0.85rem;font-weight:700;text-align:center">'
+                        f'{icon_html("trending_down", 15)} Bearish {bear_pct:.2f}%</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.info("Probability distribution data not available for this prediction.", icon=material("bar_chart"))
+
+        # ── Score radar ───────────────────────────────────────────────────────────
+        with st.expander("Score Radar", icon=material("track_changes"), expanded=False):
+            rc1, rc2 = st.columns([1, 1])
+            with rc1:
+                fig_radar = _plot_score_radar(row)
+                st.plotly_chart(fig_radar, use_container_width=True, config={"displayModeBar": False})
+            with rc2:
                 st.markdown(
-                    f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-left:3px solid {PRIMARY};'
-                    f'padding:8px 12px;border-radius:4px;margin-top:8px;font-size:0.82rem;color:#334155">'
-                    f'<b>Key debate:</b> {panel["key_debate"]}</div>',
+                    '<p style="font-size:0.82rem;font-weight:700;color:#0F172A;margin-bottom:8px">'
+                    'Score Breakdown</p>',
                     unsafe_allow_html=True,
                 )
-        else:
-            st.caption("Agent panel summary not available for this prediction.")
+                score_breakdown = [
+                    ("Composite Score",   row.get("composite_score")),
+                    ("Fundamentals",      row.get("fundamental_score")),
+                    ("Valuation",         row.get("valuation_score")),
+                    ("Analyst Research",  row.get("research_score")),
+                    ("Macro Environment", row.get("macro_score")),
+                    ("News Sentiment",    row.get("news_score")),
+                ]
+                for lbl, val in score_breakdown:
+                    s_str = f"{val:.2f}" if val is not None else "—"
+                    pct = min(100, (val / 10) * 100) if val is not None else 0
+                    bar_color = _score_color(val)
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;gap:8px;margin:4px 0">'
+                        f'<span style="width:90px;font-size:0.75rem;color:#475569">{lbl}</span>'
+                        f'<div style="flex:1;height:6px;background:#E2E8F0;border-radius:3px">'
+                        f'<div style="width:{pct:.2f}%;height:100%;background:{bar_color};border-radius:3px"></div></div>'
+                        f'<span style="font-size:0.78rem;font-weight:700;color:{bar_color};min-width:30px">{s_str}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
 
-    # ── Why did it change? ────────────────────────────────────────────────────
-    with st.expander("Why did it change?", icon=material("search"), expanded=False):
-        from portfolio_agent.tools.prediction_db import get_score_change_breakdown
+        # ── Agent Panel ───────────────────────────────────────────────────────────
+        with st.expander("Agent Panel", icon=material("account_balance"), expanded=True):
+            try:
+                panel = json.loads(row.get("panel_summary") or "{}")
+            except Exception:
+                panel = {}
 
-        change = get_score_change_breakdown(drill_ticker)
-        if change is None:
-            st.caption("Not enough prediction history yet to show a day-over-day breakdown.")
-        else:
-            y, t = change["yesterday"], change["today"]
-            st.markdown(
-                f'<div style="font-size:0.85rem;color:#334155;margin-bottom:10px">'
-                f'<b>{y["recommendation"]} {y["composite_score"]:.2f}</b> ({y["as_of_date"]}) '
-                f'&nbsp;→&nbsp; <b>{t["recommendation"]} {t["composite_score"]:.2f}</b> ({t["as_of_date"]})'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            for b in change["breakdown"]:
-                color = SUCCESS if b["contribution"] > 0 else (DANGER if b["contribution"] < 0 else NEUTRAL)
-                sign = "+" if b["contribution"] > 0 else ""
+            # The Valuation card gets a second badge (UNDERVALUED/FAIRLY_VALUED/
+            # OVERVALUED) alongside its 1-10 score — unlike the other 4 analysts,
+            # valuation has a natural cheap/fair/expensive framing that the raw
+            # score alone doesn't convey, and it's the same label the Valuation
+            # page shows as its headline. Best-effort: absent if not yet computed.
+            _VALUATION_LABEL_STYLE = {
+                "UNDERVALUED":   (SUCCESS, SUCCESS_LIGHT, "UNDERVALUED"),
+                "FAIRLY_VALUED": (WARNING, WARNING_LIGHT, "FAIRLY VALUED"),
+                "OVERVALUED":    (DANGER, DANGER_LIGHT, "OVERVALUED"),
+            }
+            valuation_label_badge = ""
+            try:
+                from portfolio_agent.tools.valuation_db import get_stored_valuation
+                _stored_valuation = get_stored_valuation(drill_ticker)
+                _val_label = _stored_valuation.get("valuation_label") if _stored_valuation else None
+                if _val_label in _VALUATION_LABEL_STYLE:
+                    _vl_color, _vl_bg, _vl_text = _VALUATION_LABEL_STYLE[_val_label]
+                    valuation_label_badge = (
+                        f'<span style="background:{_vl_bg};color:{_vl_color};padding:2px 8px;'
+                        f'border-radius:10px;font-weight:700;font-size:0.72rem;margin-left:4px;'
+                        f'display:inline-flex;align-items:center;gap:4px">'
+                        f'{status_dot_html(_vl_color, 6)}{_vl_text}</span>'
+                    )
+            except Exception:
+                pass
+
+            if panel and any(panel.get(k) for k in ["chen_verdict", "malhotra_verdict", "webb_verdict", "varga_verdict", "park_verdict"]):
+                agents = [
+                    ("FUNDAMENTALS",  "Earnings, balance sheet & margins",       panel.get("chen_verdict", "—"),     PRIMARY, ""),
+                    ("VALUATION",     "DCF intrinsic value & margin of safety",  panel.get("malhotra_verdict", "—"), DANGER,  valuation_label_badge),
+                    ("RESEARCH",      "Analyst targets & broker coverage",       panel.get("webb_verdict", "—"),     PURPLE,  ""),
+                    ("MACRO",         "Interest rates, inflation & regime",      panel.get("varga_verdict", "—"),    WARNING, ""),
+                    ("NEWS",          "Sentiment & recent headlines",            panel.get("park_verdict", "—"),     SUCCESS, ""),
+                ]
+                pcols = st.columns(5)
+                for pcol, (name, description, verdict, color, extra_badge) in zip(pcols, agents):
+                    with pcol:
+                        m = re.search(r"\((\d+(?:\.\d+)?)/10\)", verdict)
+                        score_val = m.group(1) if m else None
+                        clean_verdict = re.sub(r"\(\d+(?:\.\d+)?/10\)\s*[—\-]?\s*", "", verdict).strip()
+                        score_badge = (
+                            f'<span style="background:{color}22;color:{color};padding:2px 8px;'
+                            f'border-radius:10px;font-weight:700;font-size:0.78rem">{score_val}/10</span>'
+                            if score_val else ""
+                        )
+                        st.markdown(
+                            f'<div style="border:1px solid {color}44;border-top:3px solid {color};'
+                            f'padding:10px 12px;border-radius:8px;background:{color}08;min-height:100px">'
+                            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">'
+                            f'<span style="font-size:0.68rem;font-weight:700;color:{color};letter-spacing:0.06em">'
+                            f'{name}</span><span>{score_badge}{extra_badge}</span></div>'
+                            f'<div style="font-size:0.68rem;color:#64748B;margin-bottom:4px">{description}</div>'
+                            f'<div style="font-size:0.8rem;color:#1E293B;line-height:1.4">{clean_verdict}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                if panel.get("key_debate"):
+                    st.markdown(
+                        f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-left:3px solid {PRIMARY};'
+                        f'padding:8px 12px;border-radius:4px;margin-top:8px;font-size:0.82rem;color:#334155">'
+                        f'<b>Key debate:</b> {panel["key_debate"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.caption("Agent panel summary not available for this prediction.")
+
+        # ── Why did it change? ────────────────────────────────────────────────────
+        with st.expander("Why did it change?", icon=material("search"), expanded=False):
+            from portfolio_agent.tools.prediction_db import get_score_change_breakdown
+
+            change = get_score_change_breakdown(drill_ticker)
+            if change is None:
+                st.caption("Not enough prediction history yet to show a day-over-day breakdown.")
+            else:
+                y, t = change["yesterday"], change["today"]
                 st.markdown(
-                    f'<div style="display:flex;align-items:baseline;gap:10px;margin:4px 0">'
-                    f'<span style="font-weight:800;color:{color};min-width:44px">{sign}{b["contribution"]:.2f}</span>'
-                    f'<span style="font-weight:700;color:#0F172A;min-width:90px">{b["source"]}</span>'
-                    f'<span style="font-size:0.82rem;color:#64748B">{b["rationale"] or "—"}</span>'
+                    f'<div style="font-size:0.85rem;color:#334155;margin-bottom:10px">'
+                    f'<b>{y["recommendation"]} {y["composite_score"]:.2f}</b> ({y["as_of_date"]}) '
+                    f'&nbsp;→&nbsp; <b>{t["recommendation"]} {t["composite_score"]:.2f}</b> ({t["as_of_date"]})'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
-            net = change["net_change"]
-            net_color = SUCCESS if (net or 0) > 0 else (DANGER if (net or 0) < 0 else NEUTRAL)
+                for b in change["breakdown"]:
+                    color = SUCCESS if b["contribution"] > 0 else (DANGER if b["contribution"] < 0 else NEUTRAL)
+                    sign = "+" if b["contribution"] > 0 else ""
+                    st.markdown(
+                        f'<div style="display:flex;align-items:baseline;gap:10px;margin:4px 0">'
+                        f'<span style="font-weight:800;color:{color};min-width:44px">{sign}{b["contribution"]:.2f}</span>'
+                        f'<span style="font-weight:700;color:#0F172A;min-width:90px">{b["source"]}</span>'
+                        f'<span style="font-size:0.82rem;color:#64748B">{b["rationale"] or "—"}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                net = change["net_change"]
+                net_color = SUCCESS if (net or 0) > 0 else (DANGER if (net or 0) < 0 else NEUTRAL)
+                st.markdown(
+                    f'<p style="margin-top:10px;font-size:0.85rem;font-weight:800;color:{net_color}">'
+                    f'Net change: {net:+.2f}</p>' if net is not None else '',
+                    unsafe_allow_html=True,
+                )
+                if not change["weights_available"]:
+                    st.caption(
+                        "Exact weight mix wasn't recorded for one of these days — showing an "
+                        "approximate breakdown using base weights."
+                    )
+
+        # ── Historical predictions for this ticker ────────────────────────────────
+        _drill_hist_name = _cname(drill_ticker)
+        _drill_hist_label = f"{drill_ticker} ({_drill_hist_name})" if _drill_hist_name else drill_ticker
+        with st.expander(f"Historical Predictions — {_drill_hist_label}", icon=material("calendar_month"), expanded=False):
+            hist_df = _load_ticker_history(drill_ticker)
+            if hist_df.empty:
+                st.info(f"No prediction history found for {drill_ticker}.", icon=material("bar_chart"))
+            else:
+                display_cols = [
+                    "as_of_date", "horizon_days", "recommendation", "prediction",
+                    "composite_score", "conviction_score", "evaluation_status", "outcome",
+                ]
+                rename_map = {
+                    "as_of_date":  "Prediction Date",
+                    "horizon_days":     "Forecast Horizon",
+                    "recommendation":   "Recommendation",
+                    "prediction":       "Sentiment",
+                    "composite_score":  "Composite Score",
+                    "conviction_score": "Conviction",
+                    "evaluation_status":"Status",
+                    "outcome":          "Outcome",
+                }
+                hist_display = hist_df[display_cols].rename(columns=rename_map).copy()
+                hist_display["Forecast Horizon"] = hist_display["Forecast Horizon"].apply(
+                    lambda h: f"{int(h)}d" if pd.notna(h) else "—"
+                )
+                hist_display["Composite Score"] = hist_display["Composite Score"].round(2)
+                hist_display["Conviction"]       = hist_display["Conviction"].round(2)
+                hist_display["Status"]           = hist_display["Status"].fillna("pending")
+                hist_display["Outcome"]          = hist_display["Outcome"].fillna("—")
+                st.dataframe(hist_display, use_container_width=True, hide_index=True)
+
+        # ── Edge data ─────────────────────────────────────────────────────────────
+        with st.expander("Edge & Validation Data", icon=material("track_changes"), expanded=False):
+            h_days = row.get("horizon_days")
+            segment = row.get("risk_segment")
+            edge = _load_edge_data(int(h_days), segment) if h_days else None
+            if edge:
+                acc = edge.get("directional_accuracy")
+                n = edge.get("num_predictions", 0)
+                acc_str = f"{acc*100:.2f}%" if acc is not None else "—"
+                edge_html = (
+                    f'<div style="background:{SUCCESS_LIGHT};border:1px solid {SUCCESS}44;'
+                    f'padding:12px 16px;border-radius:8px;">'
+                    f'<div style="font-size:0.82rem;color:#0F172A">'
+                    f'<b>{h_days}d horizon</b> · Segment: {segment or "all"} · '
+                    f'Directional accuracy: <b style="color:{SUCCESS}">{acc_str}</b> · '
+                    f'n={n} predictions</div></div>'
+                ) if (acc is not None and (acc >= 0.52)) else (
+                    f'<div style="background:{WARNING_LIGHT};border:1px solid {WARNING}44;'
+                    f'padding:12px 16px;border-radius:8px;">'
+                    f'<div style="font-size:0.82rem;color:#0F172A">'
+                    f'<b>{h_days}d horizon</b> · Segment: {segment or "all"} · '
+                    f'Directional accuracy: <b style="color:{WARNING}">{acc_str}</b> · '
+                    f'n={n} ({icon_html("warning", 12)} below baseline)</div></div>'
+                )
+                st.markdown(edge_html, unsafe_allow_html=True)
+            else:
+                st.info(
+                    "No validation metrics available for this horizon/segment. "
+                    "Run the evaluation pipeline to generate accuracy data.",
+                    icon=material("info"),
+                )
             st.markdown(
-                f'<p style="margin-top:10px;font-size:0.85rem;font-weight:800;color:{net_color}">'
-                f'Net change: {net:+.2f}</p>' if net is not None else '',
+                f'<div style="margin-top:8px;font-size:0.78rem;color:#64748B">'
+                f'For full validation history, visit the '
+                f'<a href="/Validation" style="color:{PRIMARY}">Validation page</a>.</div>',
                 unsafe_allow_html=True,
             )
-            if not change["weights_available"]:
-                st.caption(
-                    "Exact weight mix wasn't recorded for one of these days — showing an "
-                    "approximate breakdown using base weights."
-                )
-
-    # ── Historical predictions for this ticker ────────────────────────────────
-    _drill_hist_name = _cname(drill_ticker)
-    _drill_hist_label = f"{drill_ticker} ({_drill_hist_name})" if _drill_hist_name else drill_ticker
-    with st.expander(f"Historical Predictions — {_drill_hist_label}", icon=material("calendar_month"), expanded=False):
-        hist_df = _load_ticker_history(drill_ticker)
-        if hist_df.empty:
-            st.info(f"No prediction history found for {drill_ticker}.", icon=material("bar_chart"))
-        else:
-            display_cols = [
-                "as_of_date", "horizon_days", "recommendation", "prediction",
-                "composite_score", "conviction_score", "evaluation_status", "outcome",
-            ]
-            rename_map = {
-                "as_of_date":  "Prediction Date",
-                "horizon_days":     "Forecast Horizon",
-                "recommendation":   "Recommendation",
-                "prediction":       "Sentiment",
-                "composite_score":  "Composite Score",
-                "conviction_score": "Conviction",
-                "evaluation_status":"Status",
-                "outcome":          "Outcome",
-            }
-            hist_display = hist_df[display_cols].rename(columns=rename_map).copy()
-            hist_display["Forecast Horizon"] = hist_display["Forecast Horizon"].apply(
-                lambda h: f"{int(h)}d" if pd.notna(h) else "—"
-            )
-            hist_display["Composite Score"] = hist_display["Composite Score"].round(2)
-            hist_display["Conviction"]       = hist_display["Conviction"].round(2)
-            hist_display["Status"]           = hist_display["Status"].fillna("pending")
-            hist_display["Outcome"]          = hist_display["Outcome"].fillna("—")
-            st.dataframe(hist_display, use_container_width=True, hide_index=True)
-
-    # ── Edge data ─────────────────────────────────────────────────────────────
-    with st.expander("Edge & Validation Data", icon=material("track_changes"), expanded=False):
-        h_days = row.get("horizon_days")
-        segment = row.get("risk_segment")
-        edge = _load_edge_data(int(h_days), segment) if h_days else None
-        if edge:
-            acc = edge.get("directional_accuracy")
-            n = edge.get("num_predictions", 0)
-            acc_str = f"{acc*100:.2f}%" if acc is not None else "—"
-            edge_html = (
-                f'<div style="background:{SUCCESS_LIGHT};border:1px solid {SUCCESS}44;'
-                f'padding:12px 16px;border-radius:8px;">'
-                f'<div style="font-size:0.82rem;color:#0F172A">'
-                f'<b>{h_days}d horizon</b> · Segment: {segment or "all"} · '
-                f'Directional accuracy: <b style="color:{SUCCESS}">{acc_str}</b> · '
-                f'n={n} predictions</div></div>'
-            ) if (acc is not None and (acc >= 0.52)) else (
-                f'<div style="background:{WARNING_LIGHT};border:1px solid {WARNING}44;'
-                f'padding:12px 16px;border-radius:8px;">'
-                f'<div style="font-size:0.82rem;color:#0F172A">'
-                f'<b>{h_days}d horizon</b> · Segment: {segment or "all"} · '
-                f'Directional accuracy: <b style="color:{WARNING}">{acc_str}</b> · '
-                f'n={n} ({icon_html("warning", 12)} below baseline)</div></div>'
-            )
-            st.markdown(edge_html, unsafe_allow_html=True)
-        else:
-            st.info(
-                "No validation metrics available for this horizon/segment. "
-                "Run the evaluation pipeline to generate accuracy data.",
-                icon=material("info"),
-            )
-        st.markdown(
-            f'<div style="margin-top:8px;font-size:0.78rem;color:#64748B">'
-            f'For full validation history, visit the '
-            f'<a href="/Validation" style="color:{PRIMARY}">Validation page</a>.</div>',
-            unsafe_allow_html=True,
-        )

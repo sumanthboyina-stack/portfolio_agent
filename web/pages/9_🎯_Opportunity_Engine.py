@@ -21,7 +21,7 @@ from web.styles import (
 )
 from web.data.watchlist import load_watchlist_tickers, add_tickers
 from web.data.predictions import _load_predictions
-from web.components.predictions_cards import render_action_items, render_all_predictions
+from web.components.predictions_cards import render_action_items, render_all_predictions, render_drill_down
 from portfolio_agent.tools.opportunity_engine import (
     get_daily_opportunities, get_opportunity_history, latest_trending_opportunity_date,
 )
@@ -66,6 +66,8 @@ page_header(
     icon="track_changes",
 )
 
+st.page_link("pages/7_🔮_Predictions.py", label="Predictions for your holdings and watchlist",
+             icon=material("insights"))
 st.markdown(
     '<p style="font-size:0.85rem;color:#64748B;margin-bottom:4px">'
     'Candidates that received a full APEX analysis today (fundamentals, research, macro, news) '
@@ -100,6 +102,11 @@ opportunities = _cached_opportunities(10)
 
 existing_tickers = set(load_watchlist_tickers())
 at_cap = len(existing_tickers) >= 70
+
+# ── Drill-down — opened by any "Details" / "View Details" button on this page; Prediction + Valuation tabs ──
+_owner = current_context("web:opportunity_engine").actor
+if _drill_ticker := st.session_state.get("drill_ticker"):
+    render_drill_down(_drill_ticker, st.session_state.get("drill_date"), owner=_owner)
 
 # ── Section 1: Today's Top Opportunities (APEX-vetted BUY/WATCH) ──────────────
 
@@ -191,6 +198,11 @@ else:
                         f'{hist_html}',
                     )
                 with row_r:
+                    if st.button("Details", icon=material("query_stats"), key=f"oe_details_{ticker}", use_container_width=True,
+                                 help="Prediction, reasoning and the DCF valuation behind it"):
+                        st.session_state["drill_ticker"] = ticker
+                        st.session_state["drill_date"] = None      # latest prediction per horizon
+                        st.rerun()
                     if at_cap or ticker in existing_tickers:
                         st.button(
                             "On list" if ticker in existing_tickers else "Full",

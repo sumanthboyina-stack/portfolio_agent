@@ -33,7 +33,7 @@ from portfolio_agent.services.account_service import (
     delete_account_permanently,
 )
 from portfolio_agent.tools.holdings_import import (
-    BROKER_LABELS, ImportPlan, ImportResult, ParsedUpload, build_plan, commit_plan, parse_upload,
+    BROKER_LABELS, ImportOptions, ImportPlan, ImportResult, ParsedUpload, build_plan, commit_plan, parse_upload,
 )
 from web.auth import current_context
 
@@ -98,7 +98,8 @@ def render_import_flow(key: str, on_close: Callable[[], None] | None = None) -> 
         broker = c1.selectbox("Broker", list(BROKER_META), key=f"{key}_broker",
                               format_func=lambda k: BROKER_META[k]["label"],
                               help="Fidelity and Vanguard CSVs are detected automatically; anything else is read by the generic extractor.")
-        uploaded = c2.file_uploader("Holdings export (CSV or Excel)", type=["csv", "xlsx", "xls"], key=f"{key}_file")
+        uploaded = c2.file_uploader("Holdings export (CSV or Excel) or a retirement-plan statement (PDF)", type=["csv", "xlsx", "xls", "pdf"],
+                                    key=f"{key}_file")
         with st.container():
             st.caption(BROKER_META[broker]["instructions"])
             st.caption("An import **replaces the complete holdings** of each account in the file (including positions "
@@ -144,7 +145,7 @@ def render_import_flow(key: str, on_close: Callable[[], None] | None = None) -> 
     if state["step"] == "preview":
         st.markdown(_steps_html(2), unsafe_allow_html=True)
         try:
-            plan: ImportPlan = build_plan(parsed, state["labels"])
+            plan: ImportPlan = build_plan(parsed, state["labels"], options=_statement_options(key) if parsed.statement is not None else None)
         except Exception as exc:
             st.error(f"Could not prepare the import: {esc(exc)}", icon=material("error"))
             if st.button("Start over", key=f"{key}_restart_err"):
@@ -163,6 +164,8 @@ def render_import_flow(key: str, on_close: Callable[[], None] | None = None) -> 
             f'<span style="color:#6B7280">cash for <b>{t["cash_accounts"]}</b> account{"s" if t["cash_accounts"] != 1 else ""}</span></div>',
             unsafe_allow_html=True,
         )
+        if plan.is_statement:
+            _render_statement_header(plan, key)
         for a in plan.accounts:
             if a.ledger_managed:
                 with st.container(border=True):
@@ -195,6 +198,10 @@ def render_import_flow(key: str, on_close: Callable[[], None] | None = None) -> 
                                                 "was": st.column_config.NumberColumn("Shares (before)", format="%.3f")})
                 if a.unchanged:
                     st.caption(f"Unchanged: {esc(', '.join(a.unchanged))}")
+                if plan.is_statement:
+                    _render_statement_account_extras(plan, a, key)
+        if plan.is_statement:
+            _render_funds_without_ticker(plan, state, key)
         b1, b2 = st.columns([1, 1])
         if b1.button("Confirm & import", type="primary", key=f"{key}_confirm", icon=material("check")):
             with st.spinner("Importing and fetching prices…"):
@@ -205,6 +212,164 @@ def render_import_flow(key: str, on_close: Callable[[], None] | None = None) -> 
         if b2.button("Start over", key=f"{key}_restart2"):
             reset_import_flow(key)
             st.rerun()
+
+
+# ── Retirement-plan statements (PDF) ─────────────────────────────────────────
+
+def _statement_options(key: str) -> ImportOptions:
+    """The person's choices from the preview widgets (read from session state, so the plan is rebuilt with them on every change)."""
+    ss = st.session_state
+    funds: dict[str, dict] = {}
+    for k, v in list(ss.items()):
+        if not isinstance(k, str):
+            continue
+        for tag, field in ((f"{key}_fp_", "proxy"), (f"{key}_ft_", "ticker"), (f"{key}_fm_", "map_to")):
+            if k.startswith(tag):
+                funds.setdefault(k[len(tag):], {})[field] = v or ""
+    amap = {k[len(f"{key}_am_"):]: v for k, v in list(ss.items()) if isinstance(k, str) and k.startswith(f"{key}_am_") and isinstance(v, int)}
+    rm = ss.get(f"{key}_remove_missing")
+    return ImportOptions(remove_missing=bool(rm) if rm is not None else None, funds=funds, account_map=amap)
+
+
+def _render_statement_header(plan: ImportPlan, key: str) -> None:
+    m = plan.statement_meta
+    bits = [m.get("plan_name"), m.get("provider"), (f"{m['period_start']} → {m['period_end']}" if m.get("period_start") and m.get("period_end") else m.get("period_end"))]
+    st.markdown(f'<div style="font-size:0.85rem;color:#374151;margin:2px 0 6px"><b>Retirement-plan statement</b> · '
+                + " · ".join(esc(b) for b in bits if b) + "</div>", unsafe_allow_html=True)
+    ck = plan.check or {}
+    if ck.get("ending_balance") is not None and ck.get("sum_of_rows") is not None:
+        ok = bool(ck.get("ok"))
+        st.markdown(f'<div style="font-size:0.8rem;color:{SUCCESS if ok else WARNING}">Funds add up to <b>{fmt_money(ck["sum_of_rows"])}</b> · statement '
+                    f'ending balance <b>{fmt_money(ck["ending_balance"])}</b>'
+                    + ("" if ok else f' · difference <b>{fmt_money(ck["difference"])}</b>') + "</div>", unsafe_allow_html=True)
+    extras = []
+    if plan.loan_balance is not None:
+        extras.append(f"plan loan balance <b>{fmt_money(plan.loan_balance)}</b> (recorded on the account; not a holding)")
+    if plan.vested_balance is not None:
+        total = (plan.check or {}).get("ending_balance") or (plan.check or {}).get("sum_of_rows")
+        extras.append(f"vested <b>{fmt_money(plan.vested_balance)}</b>" + (f" · unvested <b>{fmt_money(max(0.0, total - plan.vested_balance))}</b>" if total else ""))
+    if extras:
+        st.markdown('<div style="font-size:0.8rem;color:#374151">' + " · ".join(extras) + "</div>", unsafe_allow_html=True)
+    for w in plan.warnings:
+        st.warning(w, icon=material("warning"))
+    st.checkbox("Also remove positions in these accounts that are not on this statement", value=False, key=f"{key}_remove_missing",
+                help="Off by default: a quarterly statement does not have to list everything an account holds, so what it leaves out is kept.")
+
+
+def _render_statement_account_extras(plan: ImportPlan, a, key: str) -> None:
+    if a.matched_existing:
+        st.caption(f"Matched to your existing account {esc(a.label)}.")
+    if a.kept_missing:
+        st.caption(f"Kept (not on this statement): {esc(', '.join(a.kept_missing))}")
+    from portfolio_agent.services.account_service import list_accounts_for
+    mine = [x for x in list_accounts_for(current_context("web:import")) if not x.get("is_paper")]
+    if mine:
+        ids = [None] + [x["account_id"] for x in mine]
+        labels = {None: "Automatic (match by name, else a new account)", **{x["account_id"]: f"{x.get('display_name') or x['account_number']} · {broker_label(x['broker'])}" for x in mine}}
+        st.selectbox("Import into", ids, key=f"{key}_am_{a.account_number}", format_func=lambda i: labels[i], index=0)
+
+
+def _render_funds_without_ticker(plan: ImportPlan, state: dict, key: str) -> None:
+    rows = [(a, r) for a in plan.accounts for r in a.funds_no_ticker]
+    if not rows:
+        return
+    st.markdown("**Funds with no ticker**")
+    st.caption("A fund your plan prices itself (a collective trust, a stable value or cash-reserve fund) has no market symbol. It is kept as a fund with no "
+               "ticker: matched to the one you already hold, or created new. Its price comes from this statement and is dated by it. A proxy ticker "
+               "(a market symbol that behaves like it) is optional and only used for analysis — it is never shown as your holding.")
+    from portfolio_agent.services.account_service import list_cit_instruments_for
+    owned = list_cit_instruments_for(current_context("web:import"))
+    sugg = state.setdefault("suggestions", {})
+    from portfolio_agent.tools.fund_name_lookup import looks_like_public_fund
+    cand_rows = [r for _, r in rows if not r.get("resolved_by") and looks_like_public_fund(r.get("fund_name"), r.get("instrument_hint"))]
+    if cand_rows and st.button("Look up possible tickers for funds that look like public funds", key=f"{key}_lookup", icon=material("search")):
+        from portfolio_agent.tools.fund_name_lookup import suggest_tickers
+        with st.spinner("Searching by fund name…"):
+            sugg.update(suggest_tickers([dict(r, ticker_less=True) for r in cand_rows]))
+        st.rerun()
+    for a, r in rows:
+        fk = r["fund_key"]
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([3.2, 1.3, 1.3, 1.6])
+            c1.markdown(f"**{esc(r['fund_name'])}**<br><span style='font-size:0.75rem;color:#64748B'>{esc(a.label)} · {esc(r.get('instrument_hint') or '')}</span>",
+                        unsafe_allow_html=True)
+            c2.markdown(f"<div style='font-size:0.8rem'>Units<br><b>{'—' if r.get('shares') is None else _fmt_shares(r['shares'])}</b></div>", unsafe_allow_html=True)
+            c3.markdown(f"<div style='font-size:0.8rem'>Price<br><b>{'—' if r.get('current_price') is None else fmt_money(r['current_price'])}</b></div>", unsafe_allow_html=True)
+            c4.markdown(f"<div style='font-size:0.8rem'>Value<br><b>{'—' if r.get('current_value') is None else fmt_money(r['current_value'])}</b></div>", unsafe_allow_html=True)
+            if r.get("resolved_by"):
+                st.caption(f"Using your confirmed ticker {esc(r['ticker'])} — it will be treated and priced like any other fund.")
+            elif r["cit_status"] == "matched":
+                st.caption(f"Matched to a fund you already hold: {esc(r.get('cit_name') or r['ticker'])}")
+            else:
+                st.caption("New fund with no ticker" + (" (several of your funds look alike, so none was assumed)" if r.get("ambiguous") else "") + ".")
+            d1, d2, d3 = st.columns(3)
+            d1.text_input("Proxy ticker (optional)", key=f"{key}_fp_{fk}", placeholder="e.g. VOO").upper()
+            opts = ["", "__new__"] + [c["ticker"] for c in owned]
+            d2.selectbox("Treat as", opts, key=f"{key}_fm_{fk}", format_func=lambda o: {"": "Automatic", "__new__": "A new fund"}.get(o, f"Existing: {next((c['name'] or c['ticker'] for c in owned if c['ticker'] == o), o)}"))
+            if sugg.get(fk):
+                topts = [""] + [c["symbol"] for c in sugg[fk]]
+                d3.selectbox("Suggested ticker (confirm to use)", topts, key=f"{key}_ft_{fk}",
+                             format_func=lambda t: "None — keep as a fund with no ticker" if not t else
+                             f"{t} · {next(c['name'] for c in sugg[fk] if c['symbol'] == t)} ({next(c['score'] for c in sugg[fk] if c['symbol'] == t):.0%} match)")
+
+
+# ── Fact-sheet breakdown for a fund with no ticker ───────────────────────────
+
+_BREAKDOWN_SECTORS = ["Technology", "Healthcare", "Financial Services", "Consumer Cyclical", "Communication Services", "Consumer Defensive",
+                      "Basic Materials", "Energy", "Industrials", "Utilities", "Real Estate"]
+_BREAKDOWN_CLASSES = [("stock", "Stocks"), ("bond", "Bonds"), ("cash", "Cash"), ("other", "Other")]
+
+
+def render_manual_breakdown_form(key: str = "mb") -> None:
+    """
+    Type in what a plan fact sheet says a fund with no ticker is made of: asset-class percentages (must add up to 100), optional sector percentages
+    (the share of the stock part; must add up to 100 if any is given), and the date of the fact sheet. It is PRIVATE to you and replaces a proxy
+    ticker for that fund in look-through and Portfolio Health. Saved through fund_data_service.set_manual_breakdown (validated, audited).
+    """
+    from portfolio_agent.services import fund_data_service as fds
+    from portfolio_agent.services.account_service import list_cit_instruments_for
+    ctx = current_context("web:breakdown")
+    funds = list_cit_instruments_for(ctx)
+    if not funds:
+        st.caption("Funds with no ticker that you hold will appear here.")
+        return
+    by = {f["ticker"]: f for f in funds}
+    pick = st.selectbox("Fund", list(by), key=f"{key}_fund", format_func=lambda t: by[t]["name"] or t)
+    try:
+        cur = fds.get_manual_breakdown_for(ctx, pick)
+    except Exception as exc:
+        st.error(str(exc), icon=material("error"))
+        return
+    if cur:
+        st.caption("Your current breakdown: " + ", ".join(f"{k} {v:g}%" for k, v in cur["asset_class"].items()) + (f" (as of {cur['as_of']})" if cur.get("as_of") else ""))
+    cols = st.columns(4)
+    ac = {k: cols[i].number_input(f"{label} (%)", 0.0, 100.0, float((cur or {}).get("asset_class", {}).get(k, 0.0)), 1.0, key=f"{key}_ac_{pick}_{k}")
+          for i, (k, label) in enumerate(_BREAKDOWN_CLASSES)}
+    total = sum(ac.values())
+    (st.success if abs(total - 100.0) <= 0.01 else st.warning)(f"Asset classes add up to {total:g}%" + ("" if abs(total - 100.0) <= 0.01 else " — they must add up to 100%."))
+    sec: dict = {}
+    with st.expander("Sector split of the stock part (optional)"):
+        scols = st.columns(3)
+        for i, name in enumerate(_BREAKDOWN_SECTORS):
+            sec[name] = scols[i % 3].number_input(f"{name} (%)", 0.0, 100.0, float(((cur or {}).get("sector") or {}).get(name, 0.0)), 1.0, key=f"{key}_sc_{pick}_{name}")
+        stotal = sum(sec.values())
+        if stotal:
+            (st.success if abs(stotal - 100.0) <= 0.01 else st.warning)(f"Sectors add up to {stotal:g}%")
+    asof = st.date_input("Fact sheet date", value=date.today(), max_value=date.today(), key=f"{key}_asof_{pick}")
+    b1, b2 = st.columns(2)
+    if b1.button("Save breakdown", type="primary", key=f"{key}_save", icon=material("check"), disabled=abs(total - 100.0) > 0.01):
+        try:
+            fds.set_manual_breakdown(ctx, pick, {k: v for k, v in ac.items() if v}, {k: v for k, v in sec.items() if v} or None, as_of=asof.isoformat())
+            st.session_state["holdings_flash"] = f"Saved your breakdown for {by[pick]['name'] or pick}."
+        except (ValueError, PermissionError) as exc:
+            st.session_state["holdings_flash"] = f"Could not save: {exc}"
+        bump_holdings_version()
+        st.rerun()
+    if cur and b2.button("Remove my breakdown", key=f"{key}_clear", icon=material("delete")):
+        fds.clear_manual_breakdown(ctx, pick)
+        bump_holdings_version()
+        st.session_state["holdings_flash"] = "Breakdown removed."
+        st.rerun()
 
 
 # ── Manual position entry (shared) ───────────────────────────────────────────

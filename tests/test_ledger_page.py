@@ -102,9 +102,10 @@ def test_lots_and_realized_gains_views():
     assert [(l["ticker"], l["quantity"], l["unit_cost"]) for l in lots] == [("VTI", 8, 120.0)]
     g = ld.realized_gains_view(ME, a)
     assert [(r["quantity"], r["period"]) for r in g["rows"]] == [(10, "LONG"), (2, "SHORT")]
-    assert g["totals"] == {"short_term": 60.0, "long_term": 500.0, "total": 560.0} and g["years"] == [date.today().year]
+    assert g["totals"] == {"short_term": 60.0, "long_term": 500.0, "total": 560.0, "unknown_basis_sales": 0, "unknown_basis_proceeds": 0} \
+        and g["years"] == [date.today().year]
     assert ld.realized_gains_view(ME, a, year=1999) == {"years": g["years"], "year": 1999, "rows": [],
-                                                       "totals": {"short_term": 0.0, "long_term": 0.0, "total": 0.0}}
+                                                       "totals": {"short_term": 0.0, "long_term": 0.0, "total": 0.0, "unknown_basis_sales": 0, "unknown_basis_proceeds": 0}}
 
 
 def test_overview_for_ledger_and_snapshot_accounts():
@@ -251,7 +252,7 @@ def test_the_panel_renders_a_ledger_account_with_struck_voided_rows_and_badges()
     at = _run()
     html = " ".join(m.value for m in at.markdown)
     assert "line-through" in html and "voids #" in html and "No approval" in html and "without approval" in html
-    assert [t.label for t in at.tabs] == ["Transactions", "Add", "Lots & gains", "Reconcile", "Import / export", "Ledger settings"]
+    assert [t.label for t in at.tabs] == ["Transactions", "Add", "Lots & gains", "Activity", "Reconcile", "Import / export", "Ledger settings"]
     assert any("derived from the ledger" in c.value for c in at.caption) and a
 
 
@@ -285,9 +286,9 @@ def test_the_panel_add_form_records_a_transaction_and_void_works():
     assert [t["voided_by"] is not None for t in led.list_transactions(ME, a) if t["txn_type"] == "DEPOSIT"] == [True] and pick
 
 
-def test_the_accounts_page_has_the_ledger_tile_and_the_panel_never_touches_the_database_directly():
+def test_the_accounts_panel_has_the_ledger_tile_and_the_panel_never_touches_the_database_directly():
     from pathlib import Path as P
-    page = (P(__file__).resolve().parents[1] / "web" / "pages" / "13_🗂️_Accounts.py").read_text()
+    page = (P(__file__).resolve().parents[1] / "web" / "components" / "accounts_panel.py").read_text()
     assert "Transactions & ledger" in page and "render_ledger_panel" in page
     panel = (P(__file__).resolve().parents[1] / "web" / "components" / "ledger_panel.py").read_text()
     data = (P(__file__).resolve().parents[1] / "web" / "data" / "ledger.py").read_text()

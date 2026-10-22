@@ -173,6 +173,61 @@ def create_account(ctx: RequestContext, *, broker: str, display_name: str | None
         return acct
 
 
+_RETIREMENT_FIELDS = ("plan_name", "provider", "vested_balance", "loan_balance", "statement_period_end")
+
+
+def _clean_retirement(fields: dict) -> dict:
+    """Validate the retirement-plan fields that were passed (a value of None / "" clears one). Amounts are dollars >= 0; the date is ISO."""
+    out: dict = {}
+    for k, v in fields.items():
+        if k in ("plan_name", "provider"):
+            out[k] = (str(v).strip() or None) if v is not None else None
+        elif k in ("vested_balance", "loan_balance"):
+            if v in (None, ""):
+                out[k] = None
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{k}: not a number") from None
+            if not (f >= 0) or f != f or f == float("inf"):
+                raise ValueError(f"{k}: must be zero or more")
+            out[k] = round(f, 2)
+        elif k == "statement_period_end":
+            if v in (None, ""):
+                out[k] = None
+                continue
+            try:
+                out[k] = date.fromisoformat(str(v)[:10]).isoformat()
+            except ValueError:
+                raise ValueError("statement_period_end: not a date (YYYY-MM-DD)") from None
+        else:
+            raise ValueError(f"unknown retirement-plan field {k!r}")
+    return out
+
+
+def set_retirement_details(ctx: RequestContext, account_id: int, *, expected_version: int | None = None, reason: str | None = None,
+                           conn: sqlite3.Connection | None = None, **fields) -> dict:
+    """
+    Record facts about a retirement-plan account (401(k) / 403(b) / 457(b)): plan_name, provider, vested_balance, loan_balance, statement_period_end
+    (all optional; only the fields passed change, None clears one). These describe the plan; none of them is a holding. A LOAN balance is money
+    borrowed from the account, not an investment, and is never counted in investable value; a vested balance below the account's value means the
+    difference is unvested. One transaction with its audit event.
+    """
+    clean = _clean_retirement(fields)
+    with repo.unit_of_work(conn) as c:
+        acct = _owned_account(ctx, account_id, c, allow_archived=True)
+        _check_version(acct, expected_version, "account")
+        before = {k: acct.get(k) for k in clean}
+        if clean:
+            repo.update_account(account_id, conn=c, **clean)
+        after_acct = repo.get_account(account_id, conn=c)
+        if before != {k: after_acct.get(k) for k in clean}:
+            _audit(ctx, c, "set_retirement_details", portfolio_id=acct["portfolio_id"], account_id=account_id, before=before,
+                   after={k: after_acct.get(k) for k in clean}, reason=reason)
+        return after_acct
+
+
 def rename_account(ctx: RequestContext, account_id: int, name: str, *, expected_version: int | None = None,
                    reason: str | None = None, conn: sqlite3.Connection | None = None) -> dict:
     """Change the display name. Identity (broker + account number, ids, history) is unchanged."""
@@ -360,13 +415,14 @@ def _changed(old: dict, new: dict) -> bool:
             or round(old.get("cost_basis_total") or 0, 2) != round(new.get("cost_basis_total") or 0, 2))
 
 
-def replace_account_snapshot(ctx: RequestContext, account_id: int, rows: list[dict], *, as_of_date: str,
+def replace_account_snapshot(ctx: RequestContext, account_id: int, rows: list[dict], *, as_of_date: str, remove_missing: bool = True,
                              source_import_id: int | None = None, conn: sqlite3.Connection) -> dict:
     """
     Make the account's positions equal *rows* — the complete, authoritative
     snapshot a broker file gives for that account. Existing tickers are
     updated IN PLACE (position ids and audit trails survive), new tickers are
-    inserted, tickers absent from the file are removed. Only ever called for
+    inserted, tickers absent from the file are removed (unless remove_missing is False, which keeps them: a quarterly plan statement does not
+    list everything an account holds). Only ever called for
     an account the user explicitly selected in a validated import plan; never
     a general-purpose upsert.
     """
@@ -387,7 +443,7 @@ def replace_account_snapshot(ctx: RequestContext, account_id: int, rows: list[di
         else:
             repo.insert_position(account_id, f, source_import_id=source_import_id, conn=conn)
             added.append(t)
-    removed = sorted(set(existing) - seen)
+    removed = sorted(set(existing) - seen) if remove_missing else []        # remove_missing=False: positions absent from the rows are kept
     for t in removed:
         repo.delete_position(existing[t]["position_id"], conn=conn)
     _audit(ctx, conn, "import_snapshot", portfolio_id=acct["portfolio_id"], account_id=account_id,
@@ -578,16 +634,23 @@ def apply_auto_classification(ctx: RequestContext, instrument_id: int, classific
         return after
 
 
+SYNTHETIC_INSTRUMENT_TYPES = (InstrumentType.CIT.value, InstrumentType.STABLE_VALUE.value, InstrumentType.MONEY_MARKET.value)
+
+
 def create_synthetic_instrument(ctx: RequestContext, *, plan_name: str, fund_name: str,
                                 asset_class: str = AssetClass.UNKNOWN.value, sub_asset_class: str | None = None,
                                 proxy_ticker: str | None = None, reason: str | None = None,
+                                instrument_type: str = InstrumentType.CIT.value,
                                 conn: sqlite3.Connection | None = None) -> dict:
     """
     Create (or return, if it already exists) the instrument for a fund with no ticker — typically a 401(k)
     collective investment trust. Its key is the synthetic "CIT:<PLAN>-<FUND>": never priced from the market and
     never predicted. Its price is entered by hand (set_position_price); proxy_ticker (e.g. VOO for an S&P 500
-    CIT) is for analytics only. The new row is a manual classification of type CIT.
+    CIT) is for analytics only. The new row is a manual classification of `instrument_type`: CIT (default), or STABLE_VALUE / MONEY_MARKET
+    for a plan's stable value or cash-reserve fund. An instrument that already exists is returned unchanged (its type is never overwritten).
     """
+    if instrument_type not in SYNTHETIC_INSTRUMENT_TYPES:
+        raise ValueError(f"instrument_type must be one of {list(SYNTHETIC_INSTRUMENT_TYPES)}, not {instrument_type!r}")
     ticker = synthetic_cit_ticker(plan_name, fund_name)
     if asset_class not in ASSET_CLASSES:
         raise ValueError(f"asset_class must be one of {sorted(ASSET_CLASSES)}, not {asset_class!r}")
@@ -601,7 +664,7 @@ def create_synthetic_instrument(ctx: RequestContext, *, plan_name: str, fund_nam
             return existing
         inst = repo.get_or_create_instrument(ticker, name=f"{fund_name.strip()} ({plan_name.strip()})" if plan_name.strip()
                                              else fund_name.strip(), conn=c)
-        repo.update_instrument(inst["instrument_id"], conn=c, instrument_type=InstrumentType.CIT.value,
+        repo.update_instrument(inst["instrument_id"], conn=c, instrument_type=instrument_type,
                                asset_class=str(asset_class),
                                sub_asset_class=(sub_asset_class or "").strip().upper().replace(" ", "_") or None,
                                proxy_ticker=proxy, classification_source=ClassificationSource.MANUAL.value,
@@ -658,6 +721,24 @@ def list_holdings_for(ctx: RequestContext) -> list:
 def list_accounts_for(ctx: RequestContext, *, include_archived: bool = False) -> list[dict]:
     portfolio = resolve_portfolio(ctx)
     return repo.list_accounts(portfolio["portfolio_id"], include_archived=include_archived)
+
+
+def list_cit_instruments_for(ctx: RequestContext) -> list[dict]:
+    """The funds with no ticker (synthetic "CIT:..." instruments) that THIS actor holds, with the accounts holding each. Instruments are shared
+    across owners, so ownership is read from the actor's own positions: nobody else's funds are visible."""
+    portfolio = resolve_portfolio(ctx)
+    out: dict[int, dict] = {}
+    with repo.unit_of_work() as c:
+        for a in repo.list_accounts(portfolio["portfolio_id"], include_archived=True, include_paper=True, conn=c):
+            for p in repo.list_positions(a["account_id"], conn=c):
+                if is_synthetic_ticker(p["ticker"]):
+                    inst = out.get(p["instrument_id"])
+                    if inst is None:
+                        i = repo.get_instrument(p["instrument_id"], conn=c) or {}
+                        inst = out[p["instrument_id"]] = {"instrument_id": p["instrument_id"], "ticker": p["ticker"], "name": i.get("name"),
+                                                          "instrument_type": i.get("instrument_type"), "proxy_ticker": i.get("proxy_ticker"), "account_ids": []}
+                    inst["account_ids"].append(a["account_id"])
+    return sorted(out.values(), key=lambda x: x["ticker"])
 
 
 def get_cash_balances_for(ctx: RequestContext) -> list[dict]:

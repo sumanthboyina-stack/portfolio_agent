@@ -172,6 +172,13 @@ def _start_job(flag: str) -> tuple[int, Path, str]:
         stderr=subprocess.STDOUT,                   # merge stderr into stdout
         env=env,
     )
+    # Keep the Mac from idle-sleeping for as long as the job lives: asyncio timeouts and
+    # open API connections stall across a sleep (a 90 s timeout fired 27 min late).
+    # -w ties caffeinate to the job's pid, so it exits with it and the pid we track is unchanged.
+    try:
+        subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(proc.pid)])
+    except OSError:
+        pass
     return proc.pid, log_path, run_id
 
 

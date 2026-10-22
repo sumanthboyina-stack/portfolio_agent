@@ -66,6 +66,7 @@ HEALTH_SETTINGS_SPEC: dict = {
     "health_max_avg_correlation_action":  (0.90, 0.0, 1.0),
     "health_unknown_share_tolerance_pct": (10.0, 0.0, 100.0),  # more than this % of a mix unknown: the check cannot be GOOD
     "health_unpriced_action_pct":         (25.0, 0.0, 100.0),  # holdings without a price above this % of value: ACTION
+    "health_exclude_unvested":            (1.0, 0.0, 1.0),     # 1 = leave unvested employer money out of every health total (shown separately); 0 = count it
     "health_stale_fund_data_multiple":    (2.0, 1.0, 100.0),   # fund data older than this many refresh intervals is stale
 }
 HEALTH_SETTINGS_DEFAULTS: dict = {k: v[0] for k, v in HEALTH_SETTINGS_SPEC.items()}
@@ -92,6 +93,13 @@ FUND_SOURCE_SETTINGS_SPEC: dict = {
 }
 FUND_SOURCE_SETTINGS_DEFAULTS: dict = {k: v[0] for k, v in FUND_SOURCE_SETTINGS_SPEC.items()}
 
+# Price freshness for funds priced from a statement (401(k) collective trusts, stable value, plan cash reserve): how many days after the statement date
+# its price still counts as current. ~ one quarter plus slack; after that the Portfolio Health data-quality check says it needs the next statement.
+STATEMENT_PRICE_SETTINGS_SPEC: dict = {
+    "statement_price_max_age_days": (100.0, 1.0, 730.0),
+}
+STATEMENT_PRICE_SETTINGS_DEFAULTS: dict = {k: v[0] for k, v in STATEMENT_PRICE_SETTINGS_SPEC.items()}
+
 # Which fund-data sources are asked, in this order (a JSON list in portfolio_settings.fund_provider_order_json). Seed default only.
 KNOWN_FUND_PROVIDERS = ("issuer_csv", "nport", "yfinance")
 DEFAULT_FUND_PROVIDER_ORDER = ["issuer_csv", "nport", "yfinance"]
@@ -116,7 +124,7 @@ def _validate_provider_order(order) -> list[str]:
     if len(set(order)) != len(order):
         raise ValueError("fund_provider_order: a source can appear only once")
     return list(order)
-_NUMERIC_EXTRA_SPEC: dict = {**HEALTH_SETTINGS_SPEC, **FUND_SOURCE_SETTINGS_SPEC}
+_NUMERIC_EXTRA_SPEC: dict = {**HEALTH_SETTINGS_SPEC, **FUND_SOURCE_SETTINGS_SPEC, **STATEMENT_PRICE_SETTINGS_SPEC}
 
 SEED_QUIZ_QUESTIONS: list[dict] = [
     {"id": "horizon", "text": "When will you need most of this money?", "default_option": "3to10",
@@ -640,6 +648,6 @@ def _write_portfolio(fields: dict, updated_by: str, expected_version: int | None
 
 def reset_portfolio_settings_to_defaults(*, updated_by: str, conn: sqlite3.Connection | None = None) -> dict:
     return _write_portfolio({"default_emergency_reserve_amount": DEFAULT_EMERGENCY_RESERVE_AMOUNT,
-                             **PORTFOLIO_SETTINGS_EXTRA_DEFAULTS, **HEALTH_SETTINGS_DEFAULTS, **FUND_SOURCE_SETTINGS_DEFAULTS,
+                             **PORTFOLIO_SETTINGS_EXTRA_DEFAULTS, **HEALTH_SETTINGS_DEFAULTS, **FUND_SOURCE_SETTINGS_DEFAULTS, **STATEMENT_PRICE_SETTINGS_DEFAULTS,
                              "fund_provider_order_json": json.dumps(DEFAULT_FUND_PROVIDER_ORDER)},
                             updated_by, None, conn)

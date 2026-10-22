@@ -15,6 +15,7 @@ sys.path.insert(0, str(_ROOT))
 from web.styles import inject_global_css, page_header, section_title, section_tile, top_nav, material, icon_html
 from web.data.predictions import _latest_as_of_date, _load_edge_data, _load_predictions
 from web.components.predictions_cards import render_action_items, render_all_predictions, render_drill_down, render_system_strip
+from web.components.valuation_detail import render_valuation_screen
 
 _DB = _ROOT / "data" / "portfolio.db"
 
@@ -161,6 +162,10 @@ if not df_portfolio.empty:
         for field in ("held", "weight_pct", "restricted", "restricted_reason", "blackout", "needs_pre_clearance"):
             df_portfolio[field] = df_portfolio["ticker"].str.upper().map(lambda t: overlay.get(t, {}).get(field))
 
+# ── Drill-down — opened by any "View Details" button here or on the Opportunity Engine; Prediction + Valuation tabs ──
+if drill_ticker := st.session_state.get("drill_ticker"):
+    render_drill_down(drill_ticker, st.session_state.get("drill_date"), owner=_owner)
+
 # ── Section 1: Action Items (portfolio) ───────────────────────────────────────
 _tile_actions = section_tile("Action Items", badge_text="your holdings + watchlist", expanded=True, key="pred_actions")
 if _tile_actions:
@@ -184,12 +189,14 @@ if _tile_all:
 if not df_opps.empty:
     st.caption(
         f"{len(df_opps['ticker'].unique())} trending-discovery ticker(s) analyzed for {selected_date} — "
-        "see the **Opportunity Engine** page for these, ranked against your portfolio."
+        "see the Opportunity Engine page for these, ranked against your portfolio."
     )
+st.page_link("pages/9_🎯_Opportunity_Engine.py", label="New opportunities, ranked against your portfolio",
+             icon=material("rocket_launch"))
 
-# ── Piece 5: Drill-down ───────────────────────────────────────────────────────
-drill_ticker = st.session_state.get("drill_ticker")
-drill_date = st.session_state.get("drill_date")
-
-if drill_ticker:
-    render_drill_down(drill_ticker, drill_date, owner=_owner)
+# ── Valuation screen — every ticker's DCF, ranked by margin of safety (was the Valuation page) ──
+_tile_val = section_tile("Valuation screen", badge_text="DCF · margin of safety · any ticker", expanded=False, key="pred_valuation")
+if _tile_val:
+    with _tile_val:
+        st.caption("A single ticker's valuation is also a tab in its drill-down: open View Details on any prediction or opportunity.")
+        render_valuation_screen(_owner)

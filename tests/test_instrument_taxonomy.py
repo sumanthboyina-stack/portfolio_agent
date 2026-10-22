@@ -520,7 +520,11 @@ def _accounts_page():
     styles.top_nav = lambda *a, **k: None
     auth.require_login = lambda: None
     auth.current_context = lambda source: local_context(source)
-    runpy.run_path(str(root / "web/pages/13_🗂️_Accounts.py"), run_name="__main__")
+    import streamlit as st
+    import web.components.accounts_panel as panel
+    panel.current_context = auth.current_context
+    st.session_state["portfolio_section"] = "accounts"      # the Accounts & Imports section of the Portfolio page
+    runpy.run_path(str(root / "web/pages/5_💼_Portfolio.py"), run_name="__main__")
 
 
 def test_accounts_page_renders_type_classification_and_cit_controls():

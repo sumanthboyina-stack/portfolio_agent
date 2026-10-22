@@ -92,3 +92,17 @@ def _no_live_identifier_or_sec_calls(monkeypatch):
     monkeypatch.setattr(issuer_holdings.IssuerCSVProvider, "_download", _dl)
     monkeypatch.setattr(idm.OpenFigiClient, "map", _map)
     monkeypatch.setattr(sec_nport.SecClient, "get", _get)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_llm_extraction(monkeypatch):
+    """
+    The holdings / statement extractors call a language model through litellm. No test may reach one: unless a test patches `litellm.completion`
+    (or the extractor's `_call_llm`) with a canned answer, every model "fails" like an outage, so the extractor returns an empty answer and
+    nothing raises. The real `_call_llm` failover loop still runs, so tests of it keep working.
+    """
+    import litellm
+
+    def _blocked(*args, **kwargs):
+        raise RuntimeError("live LLM calls are blocked in tests")
+    monkeypatch.setattr(litellm, "completion", _blocked)

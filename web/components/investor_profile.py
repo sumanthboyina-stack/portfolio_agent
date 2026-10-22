@@ -380,6 +380,10 @@ def render_investor_admin(ctx) -> None:
                                         index=list(sdb.STANDING_LOT_METHODS).index(ps.get("default_lot_method") or "FIFO"),
                                         help="Used when a sale and its account name no method. The method is stored on each sale when it is "
                                              "recorded, so changing this never changes past sales.")
+                stmt_days = st.number_input("Statement prices stay current for (days)", 1.0, 730.0, float(ps["statement_price_max_age_days"]), 5.0,
+                                            help="A fund your plan prices itself (collective trust, stable value, plan cash reserve) takes its price from the "
+                                                 "quarterly statement. This many days after the statement date it is flagged 'needs next statement'. "
+                                                 "100 is one quarter plus slack.")
                 snap = st.checkbox("Save a daily Portfolio Health snapshot", value=bool(ps["health_snapshot_enabled"]))
                 st.caption(f"Version {ps['version']} · updated {ps['updated_at'][:16].replace('T', ' ')}"
                            + (f" by {ps['updated_by']}" if ps.get("updated_by") else ""))
@@ -390,7 +394,7 @@ def render_investor_admin(ctx) -> None:
                 _admin_call(lambda: svc.reset_portfolio_settings(ctx) if reset else svc.update_portfolio_settings(
                     ctx, expected_version=ps["version"], etf_data_ttl_hours=etf_ttl, mutual_fund_data_ttl_hours=mf_ttl,
                     lookthrough_min_coverage_pct=cov, lookthrough_max_depth=int(depth), high_expense_ratio_pct=exp,
-                    health_snapshot_enabled=snap, default_lot_method=lot_pick, sec_fund_ids_refresh_days=ids_days, nport_requests_per_second=nport_rps,
+                    health_snapshot_enabled=snap, statement_price_max_age_days=stmt_days, default_lot_method=lot_pick, sec_fund_ids_refresh_days=ids_days, nport_requests_per_second=nport_rps,
                     nport_http_timeout_seconds=nport_to, openfigi_enabled=1.0 if figi_on else 0.0,
                     openfigi_batch_size=int(figi_batch), mapping_refresh_days=map_days,
                     openfigi_max_ids_per_refresh=int(figi_max)), "Portfolio settings " + ("reset." if reset else "saved."))
@@ -417,6 +421,9 @@ def render_investor_admin(ctx) -> None:
                 d1, d2 = st.columns(2)
                 unp = d1.number_input("Unpriced value: ACTION above (%)", 0.0, 100.0, float(ps["health_unpriced_action_pct"]), 5.0)
                 stale = d2.number_input("Fund data stale after (× refresh interval)", 1.0, 100.0, float(ps["health_stale_fund_data_multiple"]), 0.5)
+                excl_unv = st.checkbox("Leave unvested employer money out of the health checks", value=bool(ps["health_exclude_unvested"]),
+                                       help="A 401(k) employer match you have not vested in yet is not yours. On: it is left out of every total and shown "
+                                            "separately. Only where a statement states the vested amount; nothing is assumed.")
                 st.caption(f"Version {ps['version']} · updated {ps['updated_at'][:16].replace('T', ' ')}"
                            + (f" by {ps['updated_by']}" if ps.get("updated_by") else ""))
                 b1, b2 = st.columns(2)
@@ -424,7 +431,7 @@ def render_investor_admin(ctx) -> None:
                 reset = b2.form_submit_button("Reset all portfolio settings (incl. reserve)")
             if save or reset:
                 _admin_call(lambda: svc.reset_portfolio_settings(ctx) if reset else svc.update_portfolio_settings(
-                    ctx, expected_version=ps["version"], health_action_band_multiple=mult, health_watch_limit_fraction=frac,
+                    ctx, expected_version=ps["version"], health_exclude_unvested=1.0 if excl_unv else 0.0, health_action_band_multiple=mult, health_watch_limit_fraction=frac,
                     health_unknown_share_tolerance_pct=tol, health_min_effective_n_watch=n_w, health_min_effective_n_action=n_a,
                     health_max_avg_correlation_watch=c_w, health_max_avg_correlation_action=c_a, health_unpriced_action_pct=unp,
                     health_stale_fund_data_multiple=stale), "Health thresholds " + ("reset." if reset else "saved."))

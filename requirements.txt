@@ -10,6 +10,7 @@ anthropic==0.102.0
 yfinance==1.3.0
 pandas==3.0.3
 openpyxl>=3.1.0        # engine for pd.read_excel (.xlsx holdings uploads)
+pdfplumber>=0.11.0     # text layer of retirement-plan PDF statements (text PDFs only; no OCR)
 
 # FRED macroeconomic data
 requests==2.34.1

@@ -2,8 +2,9 @@
 Generic CSV transaction import — the pure part: reading a file, suggesting a column mapping, normalising each row into a planned ledger
 transaction, and deduplicating. No database, no network (services.ledger_service reads the account's existing transactions and writes).
 
-Broker-specific parsers are OUT OF SCOPE (TODO: one mapping preset per broker once real files are available); this takes any CSV and lets the
-person map its columns to the ledger's fields:
+Broker-specific parsers are OUT OF SCOPE except two: Fidelity's "History for Account" export and Vanguard's "OfxDownload" CSV are recognised by
+their headers and rewritten into the generic columns below before anything else sees it (see _fidelity_rows, _vanguard_rows). Any other CSV is
+taken as is, and the person maps its columns to the ledger's fields:
 
     date (required) · type (required) · ticker · quantity · price · amount · fees · external_ref · contribution_source
 
@@ -70,13 +71,14 @@ class CsvImportError(ValueError):
 class PlannedRow:
     line: int                                   # 1-based line number in the file (the header is line 1)
     raw: dict
-    status: str                                 # new | duplicate | invalid
+    status: str                                 # new | duplicate | skipped | invalid
     txn_type: str | None = None
     fields: dict = field(default_factory=dict)  # arguments for the ledger verb: trade_date, ticker, quantity, price, amount, fees, external_ref, contribution_source
     cash_amount: float | None = None            # signed cash effect (the dedupe key uses it)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     duplicate_of: str | None = None             # "external_ref" | "same transaction"
+    skip_reason: str | None = None              # why a row is left out without being an error (status "skipped")
 
 
 def read_csv(raw: bytes) -> tuple[list[str], list[dict]]:
@@ -98,6 +100,9 @@ def read_csv(raw: bytes) -> tuple[list[str], list[dict]]:
         dialect = csv.excel
     reader = csv.reader(io.StringIO(text), dialect)
     rows = [r for r in reader]
+    vanguard = _vanguard_section(rows)
+    if vanguard is not None:
+        return list(FIDELITY_COLUMNS), _vanguard_rows(vanguard)
     while rows and not any(c.strip() for c in rows[0]):
         rows.pop(0)
     if not rows:
@@ -108,7 +113,80 @@ def read_csv(raw: bytes) -> tuple[list[str], list[dict]]:
     body = [r for r in rows[1:] if any(c.strip() for c in r)]
     if len(body) > MAX_ROWS:
         raise CsvImportError(f"more than {MAX_ROWS} rows")
-    return headers, [{h: (r[i].strip() if i < len(r) else "") for i, h in enumerate(headers) if h} for r in body]
+    dicts = [{h: (r[i].strip() if i < len(r) else "") for i, h in enumerate(headers) if h} for r in body]
+    if _FIDELITY_HEADERS <= set(headers):
+        return list(FIDELITY_COLUMNS), _fidelity_rows(dicts)
+    return headers, dicts
+
+
+# ── Fidelity "History for Account" preset ─────────────────────────────────────
+# Fidelity's export cannot go through the generic mapping: the trade type is only inside the free-text Action ("YOU BOUGHT NETFLIX INC (NFLX)
+# (Cash)"), its "Type" column is always "Cash", the amounts live in columns named "Price ($)" / "Amount ($)", the settlement date is blank
+# for most rows, and the file ends with disclaimer lines. So it is recognised by its headers and rewritten into the generic columns; the
+# rest of the import (mapping, preview, dedupe, replay, apply) then runs exactly as for any CSV.
+
+_FIDELITY_HEADERS = frozenset({"Run Date", "Action", "Symbol", "Quantity", "Price ($)", "Amount ($)"})
+FIDELITY_COLUMNS = ("Date", "Type", "Ticker", "Quantity", "Price", "Amount", "Fees", "Reference", "Money source", "Original action")
+PRESET_COLUMNS = FIDELITY_COLUMNS            # the generic columns every broker preset rewrites into
+_SKIP = "SKIP:"
+
+
+def _fidelity_rows(rows: list[dict]) -> list[dict]:
+    out = []
+    for r in rows:
+        day = parse_date(r.get("Run Date", ""))
+        if day is None:                                    # the disclaimer / "Date downloaded" lines at the end
+            continue
+        action = re.sub(r"\s+", " ", r.get("Action", "")).strip()
+        up = action.upper()
+        sym = (r.get("Symbol") or "").strip().upper()
+        money_market = "MONEY MARKET" in up or "MONEY MARKET" in (r.get("Description") or "").upper()
+
+        def _n(col):
+            try:
+                return parse_number(r.get(col, ""))
+            except ValueError:
+                return None
+        qty, price, amount = _n("Quantity"), _n("Price ($)"), _n("Amount ($)")
+        fees = round(abs(_n("Commission ($)") or 0.0) + abs(_n("Fees ($)") or 0.0), 2)
+        row = {"Date": day, "Type": action, "Ticker": sym, "Quantity": "", "Price": "", "Amount": "", "Fees": "", "Reference": "",
+               "Money source": "", "Original action": action}
+
+        if up.startswith(("YOU BOUGHT", "YOU SOLD", "REINVESTMENT")):
+            if money_market:
+                row["Type"] = f"{_SKIP} money-market sweep — it is the account's cash here, not a holding"
+            else:
+                buy = not up.startswith("YOU SOLD")
+                row["Type"] = "BUY" if buy else "SELL"
+                row["Quantity"] = "" if qty is None else str(abs(qty))
+                row["Fees"] = f"{fees:.2f}" if fees else ""
+                if amount is not None and qty:
+                    # The listed price is rounded; the cash that actually moved is exact, so the price is derived from it (the generic planner
+                    # does the same, with a warning, when a price is blank).
+                    base = abs(amount) - fees if buy else abs(amount) + fees
+                    row["Price"] = f"{base / abs(qty):.8f}" if base > 0 else ""
+                elif price is not None:
+                    row["Price"] = str(price)
+                row["Amount"] = "" if amount is None else str(amount)
+        elif up.startswith("DIVIDEND RECEIVED"):
+            # a money-market fund's dividend is interest on the account's cash; a stock's dividend belongs to that stock
+            row["Type"], row["Ticker"] = ("INTEREST", "") if money_market else ("DIVIDEND", sym)
+            row["Amount"] = "" if amount is None else str(amount)
+        elif up.startswith("INTEREST EARNED"):
+            row["Type"], row["Ticker"] = "INTEREST", ""
+            row["Amount"] = "" if amount is None else str(amount)
+        elif up.startswith("JOURNALED SPP PURCHASE CREDIT"):
+            row["Type"], row["Ticker"], row["Money source"] = "DEPOSIT", "", "ESPP"      # payroll money that funds the ESPP purchase right after it
+            row["Amount"] = "" if amount is None else str(amount)
+        elif up.startswith("ELECTRONIC FUNDS TRANSFER RECEIVED"):
+            row["Type"], row["Ticker"] = "DEPOSIT", ""
+            row["Amount"] = "" if amount is None else str(amount)
+        elif up.startswith(("ELECTRONIC FUNDS TRANSFER PAID", "ELECTRONIC FUNDS TRANSFER SENT")):
+            row["Type"], row["Ticker"] = "WITHDRAWAL", ""
+            row["Amount"] = "" if amount is None else str(amount)
+        # anything else keeps its Action text as the type, so it shows up as an invalid row naming exactly what was not recognised
+        out.append(row)
+    return out
 
 
 def suggest_mapping(headers: list[str]) -> dict[str, str | None]:
@@ -181,8 +259,10 @@ def normalize_type(v: str) -> str | None:
 # ── planning ──────────────────────────────────────────────────────────────────
 
 def plan_rows(rows: list[dict], mapping: dict[str, str | None], *, existing_external_ids: set[str],
-              existing_keys: dict, today: date | None = None) -> list[PlannedRow]:
-    """Normalise every row and mark it new / duplicate / invalid. `existing_*` come from ledger_db.existing_for_dedupe for the target account."""
+              existing_keys: dict, today: date | None = None, ledger_start_date: str | None = None) -> list[PlannedRow]:
+    """Normalise every row and mark it new / duplicate / skipped / invalid. `existing_*` come from ledger_db.existing_for_dedupe for the target
+    account. A row dated ON OR BEFORE `ledger_start_date` is skipped, not invalid: the account's opening balance is what it held that day, so that
+    activity is already inside it (importing it again would count it twice), and the ledger refuses anything dated before its start anyway."""
     from portfolio_agent.tools.ledger_db import dedupe_key
     today = today or date.today()
     keys = dict(existing_keys)                       # consumed as rows match, so identical rows are matched by count
@@ -191,12 +271,22 @@ def plan_rows(rows: list[dict], mapping: dict[str, str | None], *, existing_exte
     get = lambda r, f: (r.get(mapping[f], "") if mapping.get(f) else "")
     for i, r in enumerate(rows, start=2):
         pr = PlannedRow(line=i, raw=r, status="new")
+        raw_type = get(r, "type") or ""
+        if raw_type.upper().startswith(_SKIP):          # a row the preset recognised but that is not a ledger event
+            pr.status, pr.skip_reason = "skipped", raw_type[len(_SKIP):].strip()
+            out.append(pr)
+            continue
         try:
             _normalise(pr, r, get, today)
         except ValueError as exc:
             pr.errors.append(str(exc))
         if pr.errors:
             pr.status = "invalid"
+            out.append(pr)
+            continue
+        if ledger_start_date and pr.fields["trade_date"] <= ledger_start_date:
+            pr.status = "skipped"
+            pr.skip_reason = f"dated {pr.fields['trade_date']}, on or before the ledger start ({ledger_start_date}) — already in the opening balance"
             out.append(pr)
             continue
         ref = pr.fields.get("external_ref")
@@ -286,7 +376,7 @@ def _normalise(pr: PlannedRow, r: dict, get, today: date) -> None:
 
 
 def summarize(plan: list[PlannedRow]) -> dict:
-    c = {"new": 0, "duplicate": 0, "invalid": 0}
+    c = {"new": 0, "duplicate": 0, "skipped": 0, "invalid": 0}
     for p in plan:
         c[p.status] += 1
     return {**c, "rows": len(plan), "warnings": sum(len(p.warnings) for p in plan)}
@@ -297,3 +387,85 @@ def import_order(plan: list[PlannedRow]) -> list[PlannedRow]:
     appears to come before the purchase it needs just because of how the file was sorted."""
     pri = {"SELL": 2, "WITHDRAWAL": 2, "FEE": 2}
     return sorted((p for p in plan if p.status == "new"), key=lambda p: (p.fields["trade_date"], pri.get(p.txn_type, 1), p.line))
+
+
+# ── Vanguard "OfxDownload" CSV preset ─────────────────────────────────────────
+# One file, two tables: the positions (Investment Name, Symbol, Shares, Share Price, Total Value) first, then — after blank lines — the
+# transactions (Trade Date, Transaction Type, ..., Net Amount). Only the second table is a ledger's business, so it is found by its header
+# and the positions table is ignored (positions come in through Update holdings). The money-market settlement fund is this account's cash
+# here, so the "Sweep in / out" rows and the fund's own reinvestments only move cash between two places that are one number, and are skipped.
+
+_VANGUARD_HEADERS = frozenset({"Trade Date", "Transaction Type", "Share Price", "Net Amount"})
+
+
+def _vanguard_section(rows: list[list[str]]) -> list[dict] | None:
+    """The transaction rows (as dicts) of a Vanguard OfxDownload CSV, or None when this is not one."""
+    for i, r in enumerate(rows):
+        cells = [c.strip() for c in r]
+        if _VANGUARD_HEADERS <= set(cells):
+            data = []
+            for rr in rows[i + 1:]:
+                if not any(c.strip() for c in rr):
+                    if data:
+                        break                                    # the table ends at its first blank line
+                    continue
+                data.append({h: (rr[j].strip() if j < len(rr) else "") for j, h in enumerate(cells) if h})
+            return data
+    return None
+
+
+def _vanguard_rows(rows: list[dict]) -> list[dict]:
+    out = []
+    for r in rows:
+        day = parse_date(r.get("Trade Date", ""))
+        if day is None:
+            continue
+        ttype = re.sub(r"\s+", " ", r.get("Transaction Type", "")).strip()
+        tl = ttype.lower()
+        sym = (r.get("Symbol") or "").strip().upper()
+        money_market = "MONEY MARKET" in (r.get("Investment Name") or "").upper()
+
+        def _n(col):
+            try:
+                return parse_number(r.get(col, ""))
+            except ValueError:
+                return None
+        qty, net = _n("Shares"), _n("Net Amount")
+        fees = round(abs(_n("Commissions and Fees") or 0.0), 2)
+        original = f"{ttype} — {r.get('Transaction Description', '').strip()}".strip(" —")
+        row = {"Date": day, "Type": ttype, "Ticker": sym, "Quantity": "", "Price": "", "Amount": "", "Fees": "", "Reference": "",
+               "Money source": "", "Original action": original}
+        if tl in ("buy", "sell") or (tl == "reinvestment" and not money_market):
+            buy = tl != "sell"
+            row["Type"] = "BUY" if buy else "SELL"
+            row["Quantity"] = "" if qty is None else str(abs(qty))
+            row["Fees"] = f"{fees:.2f}" if fees else ""
+            if net is not None and qty:
+                # Share counts are rounded to three decimals in the file but the cash is exact, so the price is derived from the cash.
+                base = abs(net) - fees if buy else abs(net) + fees
+                row["Price"] = f"{base / abs(qty):.8f}" if base > 0 else ""
+            row["Amount"] = "" if net is None else str(net)
+        elif tl == "reinvestment":                               # reinvested into the money-market fund: cash stays cash
+            row["Type"] = f"{_SKIP} money-market reinvestment — the fund is this account's cash, not a holding"
+        elif tl in ("sweep in", "sweep out"):
+            row["Type"] = f"{_SKIP} sweep to or from the money-market settlement fund — the same cash, moved between two places"
+        elif tl.startswith("corp action (cusip change"):
+            row["Type"] = f"{_SKIP} CUSIP change — the shares leave and return under the new CUSIP; nothing changed economically"
+        elif tl == "dividend" or tl.startswith("capital gain"):
+            row["Type"], row["Ticker"] = ("INTEREST", "") if money_market else ("DIVIDEND", sym)
+            row["Amount"] = "" if net is None else str(net)
+        elif tl == "interest":
+            row["Type"], row["Ticker"] = "INTEREST", ""
+            row["Amount"] = "" if net is None else str(net)
+        elif tl == "fee":
+            row["Type"] = "FEE"
+            row["Amount"] = "" if net is None else str(net)
+        elif tl == "contribution":
+            row["Type"], row["Ticker"] = "DEPOSIT", ""
+            row["Amount"] = "" if net is None else str(net)
+        elif tl == "withdrawal":
+            row["Type"], row["Ticker"] = "WITHDRAWAL", ""
+            row["Amount"] = "" if net is None else str(net)
+        # anything else keeps its Transaction Type as the type, so it shows up as an invalid row naming exactly what was not recognised
+        out.append(row)
+    return out

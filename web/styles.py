@@ -936,11 +936,8 @@ _NAV_PRIMARY = [
     ("portfolio",         "work",          "Portfolio",         "pages/5_💼_Portfolio.py"),
 ]
 _NAV_SECONDARY = [
-    ("wealth",      "savings",       "My Wealth",     "pages/15_🧭_My_Wealth.py"),
-    ("health",      "monitor_heart", "Health",        "pages/3_🩺_Portfolio_Health.py"),
     ("validation",  "track_changes", "Validation",    "pages/6_🎯_Validation.py"),
     ("chat",        "smart_toy",     "Chat",          "pages/4_🤖_Chat.py"),
-    ("valuation",   "calculate",     "Valuation",     "pages/10_📐_Valuation.py"),
 ]
 # (key, icon, label, path, admin_only) — ordered by how often each is actually
 # used, not alphabetically. admin_only entries are hidden from the menu
@@ -948,7 +945,6 @@ _NAV_SECONDARY = [
 _NAV_ADMIN = [
     ("profile",       "person",          "Profile",             "pages/12_👤_Profile.py",     False),
     ("schedule",      "calendar_month",  "Schedule",            "pages/2_🗓️_Schedule.py",     False),
-    ("accounts",      "account_balance", "Accounts & Imports",  "pages/13_🗂️_Accounts.py",    False),
     ("validation_qa", "science",         "Validation QA",       "pages/11_🔬_Validation_QA.py", False),
     ("database",      "database",        "Database",            "pages/1_📊_Database.py",      True),
     ("restricted",    "block",           "Restricted List",     "pages/8_🚫_Restricted_List.py", True),

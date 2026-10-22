@@ -14,6 +14,6 @@ echo "  Phase 3 — News (triage + agent)"
 echo "========================================"
 
 cd /Users/sumanthboyina/portfolio-agent
-/Users/sumanthboyina/portfolio-agent/.venv/bin/python -u main.py --daily
+/usr/bin/caffeinate -i /Users/sumanthboyina/portfolio-agent/.venv/bin/python -u main.py --daily
 
 echo "  Finished : $(date)"

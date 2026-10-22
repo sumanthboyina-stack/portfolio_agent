@@ -295,8 +295,8 @@ def test_run_all_detectors_detects_and_persists_material_news():
     from portfolio_agent.events.db import get_pending_events
     import portfolio_agent.tools.news_db as news_db
 
-    from datetime import date as _date
-    today = _date.today().isoformat()                    # (a fixed date made this test fail once the real date moved past its look-back window)
+    from datetime import datetime as _dt, timezone as _tz
+    today = _dt.now(_tz.utc).date().isoformat()          # events are stamped in UTC: the local date is a day behind for part of every evening
     with news_db._db() as conn:
         conn.execute(
             """INSERT INTO news_filter_log

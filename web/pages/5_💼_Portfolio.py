@@ -4,13 +4,18 @@ view current positions, all DB-backed (portfolio_agent.tools.holdings_db).
 Also hosts the Watchlist tab (tracked-but-not-owned tickers) alongside
 Holdings, sharing this screen.
 
-Page order: scope selector → header (Update holdings · Manage accounts) →
-value & data-quality summary → holdings table → allocation & performance →
-rebalance scenario. Imports and account administration live on the Accounts &
-Imports page (web/pages/13_🗂️_Accounts.py); "Update holdings" opens the same
-shared import workflow (web/components/holdings_import.py) in a dialog. On an
-empty portfolio the page shows an onboarding state instead. Everything follows
-the selected scope unless labelled "All accounts".
+One screen for everything about your own holdings, split into sections (only the
+selected one is rendered — see web/components/portfolio_sections.py):
+  Overview            — tracked assets, accounts, goals, activity (was the My Wealth page)
+  Holdings            — scope selector → header → value summary → holdings table →
+                        allocation & performance → rebalance scenario
+  Watchlist           — tracked-but-not-owned tickers
+  Accounts & Imports  — accounts, classification, ledger, imports (was the Accounts page)
+  Health              — the portfolio checkup (was the Portfolio Health page)
+"Update holdings" in Holdings opens the same shared import workflow
+(web/components/holdings_import.py) in a dialog. On an empty portfolio Holdings shows an
+onboarding state instead. Everything in Holdings follows the selected scope unless
+labelled "All accounts".
 """
 
 from __future__ import annotations
@@ -63,6 +68,10 @@ from web.components.holdings_import import (
 )
 
 from web.auth import current_context, require_login
+from web.components.portfolio_sections import pick_section, go_to_section_button
+from web.components.wealth_overview import render_wealth_overview
+from web.components.accounts_panel import render_accounts_panel
+from web.components.portfolio_health import render_health_page
 
 st.set_page_config(
     page_title="APEX — Portfolio",
@@ -78,10 +87,11 @@ with st.sidebar:
     st.markdown('<p style="font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6B7280;margin:0 0 10px">Portfolio</p>', unsafe_allow_html=True)
 
 page_header(
-    "Portfolio Manager",
-    subtitle="Your imported holdings, by account",
+    "Portfolio",
+    subtitle="Your accounts, holdings, watchlist and portfolio health",
     icon="work",
 )
+_section = pick_section()
 
 
 
@@ -128,7 +138,9 @@ def _render_value_summary(summary: dict, scope_label: str) -> None:
     unreal = summary["unrealized"]
     c3.metric("Unrealized gain/loss", fmt_money(unreal, signed=True) if unreal is not None else "—",
               delta=fmt_pct(summary["unrealized_pct"], signed=True) if summary["unrealized_pct"] is not None else None,
-              help="Securities value minus recorded cost basis, for positions with both.")
+              help="Value minus recorded cost basis, over the positions that have both."
+                   + (f" Based on {summary['cost_known_count']} of {summary['valued_count']} valued positions; the rest have no recorded cost, so "
+                      f"they are left out rather than counted as profit." if summary["cost_known_count"] < summary["valued_count"] else ""))
     c4.metric("Positions", summary["holding_count"])
 
     n, valued = summary["holding_count"], summary["valued_count"]
@@ -744,10 +756,8 @@ def _render_rebalance(scoped: list, scope: str, scope_label: str) -> None:
 
 
 # ── 6. Header actions: Update holdings / Manage accounts ─────────────────────
-# Imports and account administration live on the Accounts & Imports page; the
-# Portfolio page keeps a prominent entry point into the SAME import workflow.
-
-_ACCOUNTS_PAGE = "pages/13_🗂️_Accounts.py"
+# Imports and account administration live in the Accounts & Imports section; Holdings
+# keeps a prominent entry point into the SAME import workflow.
 
 
 def _close_dialogs() -> None:
@@ -781,10 +791,11 @@ def _render_portfolio_header(scope_label: str, summary: dict, accounts: list[dic
             + (f'<span style="color:{WARNING}"> ({fr["price_missing"]} missing)</span>' if fr["price_missing"] else "")
             + '</div>', unsafe_allow_html=True)
     if h2.button("Update holdings", key="open_import", type="primary", icon=material("upload"), width="stretch",
-                 help="Import a broker holdings file — the same workflow as Accounts & Imports."):
+                 help="Import a broker holdings file — the same workflow as the Accounts & Imports section."):
         st.session_state["show_import_dialog"] = True
     with h3:
-        st.page_link(_ACCOUNTS_PAGE, label="Manage accounts", icon=material("account_balance"), width="stretch")
+        go_to_section_button("Manage accounts", "accounts", key="open_accounts_section",
+                             icon=material("account_balance"), width="stretch")
     if st.session_state.get("show_import_dialog"):
         _update_holdings_dialog()
     if st.session_state.get("show_add_dialog"):
@@ -1027,10 +1038,13 @@ def _render_watchlist_tab() -> None:
 
             if not display_tickers:
                 st.info("No tickers match your filter — the Add Ticker tile above still adds to the full watchlist.", icon=material("search"))
-tab_holdings, tab_watchlist = st.tabs([
-    f"{material('work')} Holdings", f"{material('list_alt')} Watchlist",
-])
-with tab_holdings:
+if _section == "overview":
+    render_wealth_overview(current_context("web:wealth"))
+elif _section == "holdings":
     _render_holdings_tab()
-with tab_watchlist:
+elif _section == "watchlist":
     _render_watchlist_tab()
+elif _section == "accounts":
+    render_accounts_panel()
+elif _section == "health":
+    render_health_page(current_context("web:health"))

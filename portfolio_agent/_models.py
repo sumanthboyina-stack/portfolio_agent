@@ -3,7 +3,7 @@ LLM model registry — task-aware routing with multi-provider failover.
 
 Hierarchy principle:
   Low-reasoning tasks  (triage, flash, fast):   free Gemini/Groq/Cerebras/OpenRouter first;
-                                                 GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet
+                                                 GPT-4o-mini → Claude-Haiku → GPT-4o
                                                  as paid last-resort when all free models are exhausted.
   High-reasoning tasks (analyst, reasoning):     paid quality-first → OR high-reasoning → Groq
 
@@ -11,26 +11,25 @@ Task → model mapping (in priority order):
 
   triage    Gemini-2.5-Flash-Lite → Gemini-2.5-Flash → Groq-70B → Cerebras-120B
             → OR-Nemotron-Nano → OR-Granite-8B
-            → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet  (paid last resort)
+            → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
             Bulk news batch classification.
             ⚠ Cerebras has 8K context cap — batch size may need reducing when it kicks in.
 
   flash     Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
             → OR-Granite-8B
-            → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet  (paid last resort)
+            → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
             Fundamentals / research batch LLM.
 
   fast      Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
             → OR-Ring-1T
-            → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet  (paid last resort)
+            → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
             Clearance, technical. Uses ADK tools.
 
-  analyst   Claude-Sonnet → GPT-4o → GPT-5 → o3 → Claude-Haiku → Gemini-Flash → GPT-mini
-            → Gemini-Flash-Lite → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3
-            → OR-Mistral-Med-3.5 → Groq-70B
-            Macro regime, risk synthesis. Uses ADK tools.
+  analyst   GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3
+            → OR-Mistral-Med-3.5
+            Macro regime, risk synthesis (morning/daily batch: Claude-Sonnet removed). Uses ADK tools.
 
-  reasoning Claude-Sonnet → GPT-4o → GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max
+  reasoning Claude-Sonnet → GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max
             → OR-Grok-4.3 → Groq-70B
             Interactive APEX chat (single-ticker). Daily batch APEX uses a separate,
             deterministic plan: one champion model plus an ordered fallback list from
@@ -174,7 +173,6 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_GPT_MINI,          "openai",      "GPT-4o-mini"),
         (_HAIKU,             "anthropic",   "Claude-Haiku"),
         (_GPT_4O,            "openai",      "GPT-4o"),
-        (_SONNET,            "anthropic",   "Claude-Sonnet"),
     ],
     "flash": [
         (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
@@ -189,7 +187,6 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_GPT_MINI,          "openai",      "GPT-4o-mini"),
         (_HAIKU,             "anthropic",   "Claude-Haiku"),
         (_GPT_4O,            "openai",      "GPT-4o"),
-        (_SONNET,            "anthropic",   "Claude-Sonnet"),
     ],
     "fast": [
         (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
@@ -202,14 +199,11 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_GPT_MINI,          "openai",      "GPT-4o-mini"),
         (_HAIKU,             "anthropic",   "Claude-Haiku"),
         (_GPT_4O,            "openai",      "GPT-4o"),
-        (_SONNET,            "anthropic",   "Claude-Sonnet"),
     ],
     # High-reasoning: paid direct providers first, then OR high-reasoning fallbacks only.
     # Haiku, Flash, Flash-Lite, GPT-4o-mini, Groq-70B intentionally excluded —
     # APEX predictions must never fall back to lower-end models.
     "analyst": [
-        (_SONNET,            "anthropic",   "Claude-Sonnet"),
-        (_GPT_4O,            "openai",      "GPT-4o"),
         (_GPT_5,             "openai",      "GPT-5"),
         (_O3,                "openai",      "o3"),
         (_OR_CLAUDE_OPUS48,  "openrouter",  "OR-Claude-Opus-4.8"),
@@ -225,7 +219,6 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         # in the linear chain.
         # Lower-end models (Haiku, Flash, Groq) intentionally excluded.
         (_SONNET,           "anthropic",   "Claude-Sonnet"),
-        (_GPT_4O,           "openai",      "GPT-4o"),
         (_GPT_5,            "openai",      "GPT-5"),
         (_O3,               "openai",      "o3"),
         (_OR_CLAUDE_OPUS48, "openrouter",  "OR-Claude-Opus-4.8"),

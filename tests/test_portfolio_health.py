@@ -730,7 +730,8 @@ def _health_page():
     from portfolio_agent.domain import LOCAL_OWNER
     who = st.session_state.get("_owner", LOCAL_OWNER)
     auth.current_context = lambda source: RequestContext(identity=_mint_identity_for_tests(who), source=source)
-    runpy.run_path(str(root / "web/pages/3_🩺_Portfolio_Health.py"), run_name="__main__")
+    st.session_state["portfolio_section"] = "health"        # the Health section of the Portfolio page
+    runpy.run_path(str(root / "web/pages/5_💼_Portfolio.py"), run_name="__main__")
 
 
 def _home_card():
@@ -747,7 +748,7 @@ def _home_card():
     st.write("done")
 
 
-def test_the_health_page_renders_and_is_in_the_nav():
+def test_the_health_section_renders_and_is_not_its_own_nav_entry():
     from streamlit.testing.v1 import AppTest
     acct = _account()
     _diversified(acct, 6, 1000.0)
@@ -760,8 +761,10 @@ def test_the_health_page_renders_and_is_in_the_nav():
     assert scope.options[0].startswith("Household") and len(scope.options) >= 3                        # household + account + tax bucket
     scope.select_index(1).run()
     assert not at.exception, [e.value for e in at.exception]
-    from web.styles import _NAV_SECONDARY
-    assert any(k == "health" and p.endswith("3_🩺_Portfolio_Health.py") for k, _, _, p in _NAV_SECONDARY)
+    from web.components.portfolio_sections import SECTIONS
+    from web.styles import _NAV_ADMIN, _NAV_PRIMARY, _NAV_SECONDARY
+    assert "health" in SECTIONS                                                                       # a section of the Portfolio page...
+    assert not any(k in ("health", "wealth", "accounts") for k, *_ in _NAV_PRIMARY + _NAV_SECONDARY + _NAV_ADMIN)   # ...not a nav entry
 
 
 def test_the_health_page_for_a_user_with_no_portfolio_says_so_instead_of_failing():

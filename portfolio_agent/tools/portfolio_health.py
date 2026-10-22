@@ -54,6 +54,7 @@ RC_EXPENSE_RATIO_UNKNOWN = "EXPENSE_RATIO_UNKNOWN"
 RC_TYPE_UNKNOWN = "INSTRUMENT_TYPE_UNKNOWN"
 RC_UNPRICED = "UNPRICED_HOLDINGS"
 RC_PRICE_STALE = "PRICE_STALE"
+RC_STATEMENT_PRICE_STALE = "STATEMENT_PRICE_STALE"             # a fund priced from a statement whose statement is older than the allowed age
 RC_PRICE_DATE_UNKNOWN = "PRICE_DATE_UNKNOWN"
 RC_FUND_DATA_STALE = "FUND_DATA_STALE"
 RC_FUND_DATA_MISSING = "FUND_DATA_MISSING"
@@ -118,13 +119,14 @@ class PortfolioHealth:
     profile: dict                  # {profile, source, reserve_amount, reserve_source}
     reason_codes: tuple
     health_version: str = HEALTH_VERSION
+    unvested: dict = field(default_factory=dict)   # {"excluded": bool, "total": $, "accounts": [{account_id, name, amount}]}: unvested plan money, shown apart
 
     def scopes(self) -> list[ScopeHealth]:
         return [self.household, *self.by_account.values(), *self.by_tax_treatment.values()]
 
     def to_dict(self) -> dict:
         return {"owner_scope": self.owner_scope, "as_of": self.as_of, "built_at": self.built_at, "version": self.version,
-                "health_version": self.health_version, "profile": self.profile, "reason_codes": list(self.reason_codes),
+                "health_version": self.health_version, "profile": self.profile, "reason_codes": list(self.reason_codes), "unvested": self.unvested,
                 "household": self.household.to_dict(),
                 "accounts": {k: v.to_dict() for k, v in self.by_account.items()},
                 "tax_treatments": {k: v.to_dict() for k, v in self.by_tax_treatment.items()}}
@@ -147,6 +149,7 @@ class HealthInputs:
     now: datetime | None = None
     issuer_key: dict = field(default_factory=dict)          # {symbol: merged issuer key} (e.g. GOOG / GOOGL share a CIK)
     clearance: dict | None = None                           # ledger_db.clearance_counts: {missing, unknown, approved, not_required, missing_tickers}
+    unvested: dict = field(default_factory=dict)            # see PortfolioHealth.unvested
 
 
 # ── Small pure helpers ────────────────────────────────────────────────────────
@@ -636,7 +639,8 @@ def _data_quality(sc: _Scope, inp: HealthInputs) -> HealthCheck:
     total = sc.res.total_value
     if not sc.positions:
         return _empty("data_quality", "Data quality")
-    from portfolio_agent.tools.price_freshness import is_price_stale
+    from portfolio_agent.tools.price_freshness import is_price_stale, is_statement_priced, is_statement_price_stale
+    stmt_days = float(st.get("statement_price_max_age_days") or 100)
     issues: dict = {}
 
     def add(code, ticker, value=0.0):
@@ -656,11 +660,18 @@ def _data_quality(sc: _Scope, inp: HealthInputs) -> HealthCheck:
             unpriced_value += float(h.get("shares") or 0) * float(h.get("avg_cost") or 0)     # best-effort size of what is unpriced
         if itype == "UNKNOWN":
             add(RC_TYPE_UNKNOWN, t, _value(h))
-        stale = is_price_stale(h.get("price_as_of"), itype, now)
-        if stale is True:
-            add(RC_PRICE_STALE, t)
-        elif stale is None and _value(h) > 0:
-            add(RC_PRICE_DATE_UNKNOWN, t)
+        if is_statement_priced(itype, t):                    # a fund with no market price: as fresh as its statement (portfolio_settings.statement_price_max_age_days)
+            stale = is_statement_price_stale(h.get("price_as_of"), now, stmt_days)
+            if stale is True:
+                add(RC_STATEMENT_PRICE_STALE, t)
+            elif stale is None and _value(h) > 0:
+                add(RC_PRICE_DATE_UNKNOWN, t)
+        else:
+            stale = is_price_stale(h.get("price_as_of"), itype, now)
+            if stale is True:
+                add(RC_PRICE_STALE, t)
+            elif stale is None and _value(h) > 0:
+                add(RC_PRICE_DATE_UNKNOWN, t)
     ttl = {"etf": float(st["etf_data_ttl_hours"]), "mf": float(st["mutual_fund_data_ttl_hours"])}
     mult = float(st["health_stale_fund_data_multiple"])
     for h in holdings_here:
@@ -692,6 +703,7 @@ def _data_quality(sc: _Scope, inp: HealthInputs) -> HealthCheck:
     unpriced_pct = _pct(unpriced_value, total + unpriced_value)
     status = A if (RC_UNPRICED in issues and unpriced_pct > float(st["health_unpriced_action_pct"])) else W
     labels = {RC_UNPRICED: "no price", RC_TYPE_UNKNOWN: "type not classified", RC_PRICE_STALE: "price out of date",
+              RC_STATEMENT_PRICE_STALE: f"needs next statement (price older than {stmt_days:.0f} days)",
               RC_PRICE_DATE_UNKNOWN: "price date unknown", RC_FUND_DATA_STALE: "fund data stale",
               RC_FUND_DATA_MISSING: "no fund data", RC_NO_BREAKDOWN: "no breakdown or proxy (CIT / stable value)",
               RC_LOOKTHROUGH_PARTIAL: f"fund contents only {sc.res.coverage_pct:.0f}% known"}
@@ -761,7 +773,7 @@ def evaluate(inp: HealthInputs, *, version: str = "", as_of: date | None = None)
         household=household, by_account=by_account, by_tax_treatment=by_tax,
         profile={"profile": pol.profile, "source": pol.profile_source, "reserve_amount": pol.emergency_reserve_amount,
                  "reserve_source": pol.emergency_reserve_source},
-        reason_codes=tuple(codes))
+        reason_codes=tuple(codes), unvested=inp.unvested)
 
 
 # ── Gather (the only part that reads) ─────────────────────────────────────────
@@ -781,6 +793,7 @@ def gather_inputs(owner: str, portfolio: dict, *, now: datetime | None = None) -
     holdings = list(repo.get_holdings(portfolio_id=pid))
     cash = list(repo.get_cash_balances(portfolio_id=pid))
     accounts = {a["account_id"]: a for a in repo.list_accounts(pid)}
+    holdings, unvested = apply_vesting(holdings, accounts, exclude=bool(float(settings.get("health_exclude_unvested", 1.0))))
     exposures = pa.compute_exposures_for_owner(owner, portfolio, holdings=holdings, cash=cash, policy=policy)
     fund_tickers = sorted({str(h.get("ticker", "")).upper() for h in holdings if _is_fund_like(h.get("instrument_type"))})
     views = fds.load_fund_views(owner, fund_tickers, max_depth=int(settings["lookthrough_max_depth"])) if fund_tickers else {}
@@ -817,17 +830,42 @@ def gather_inputs(owner: str, portfolio: dict, *, now: datetime | None = None) -
         ikey[t] = exposures.issuer_of.get(t) or cik.get(t, t)
     return HealthInputs(owner=owner, policy=policy, settings=settings, holdings=holdings, cash=cash, accounts=accounts,
                         exposures=exposures, views=views, restricted=restricted, share_class_peers=peers,
-                        fund_fetched_at=fetched, now=now, issuer_key=ikey, clearance=clearance)
+                        fund_fetched_at=fetched, now=now, issuer_key=ikey, clearance=clearance, unvested=unvested)
+
+
+def apply_vesting(holdings: list, accounts: dict, *, exclude: bool) -> tuple[list, dict]:
+    """
+    Unvested employer money in a retirement plan is not yours yet. For every position whose statement states a vested amount below its value, the
+    unvested part is (value - vested). With `exclude` (the default setting) the position's value becomes its VESTED value, so every health total,
+    concentration and look-through is computed on what you actually own, and the unvested money is reported apart ({"excluded", "total", "accounts"}).
+    A position with no stated vested amount is counted in full: nothing is assumed or spread over positions. Returns (holdings, unvested info).
+    """
+    import dataclasses
+    per_acct: dict[int, float] = {}
+    out = []
+    for h in holdings:
+        vv = h.get("vested_value")
+        cv = _value(h) if (h.get("current_value") is not None or (h.get("shares") and h.get("current_price"))) else None     # the position's value, however it is stored
+        if cv is not None and vv is not None and 0 <= float(vv) < float(cv) - 0.005:
+            per_acct[h.get("account_id")] = per_acct.get(h.get("account_id"), 0.0) + (float(cv) - float(vv))
+            if exclude:
+                h = dataclasses.replace(h, current_value=float(vv)) if dataclasses.is_dataclass(h) else {**h, "current_value": float(vv)}
+        out.append(h)
+    info = {"excluded": bool(exclude and per_acct), "total": round(sum(per_acct.values()), 2),
+            "accounts": [{"account_id": a, "name": (accounts.get(a) or {}).get("display_name") or (accounts.get(a) or {}).get("account_number") or str(a),
+                          "amount": round(v, 2)} for a, v in sorted(per_acct.items(), key=lambda kv: -kv[1])]}
+    return out, info
 
 
 def _cache_key(inp: HealthInputs, day: date) -> str:
     cash = sorted((c.get("account_id"), round(float(c.get("amount") or 0), 2)) for c in inp.cash)
     restricted = sorted(str(r.get("ticker")) for r in (inp.restricted or []))
     thresholds = {k: inp.settings.get(k) for k in sorted(inp.settings) if k.startswith("health_") or k.startswith("lookthrough")
-                  or k.endswith("_ttl_hours") or k == "high_expense_ratio_pct"}
+                  or k.endswith("_ttl_hours") or k in ("high_expense_ratio_pct", "statement_price_max_age_days")}
     raw = json.dumps([inp.exposures.version, inp.policy.fingerprint, cash, restricted, thresholds, day.isoformat(),
                       [(inp.clearance or {}).get("missing"), (inp.clearance or {}).get("unknown")],
-                      [(h.get("ticker"), h.get("account_id"), h.get("shares"), h.get("current_price"), h.get("price_as_of")) for h in inp.holdings]],
+                      [(h.get("ticker"), h.get("account_id"), h.get("shares"), h.get("current_price"), h.get("price_as_of"), h.get("current_value"),
+                       h.get("vested_value")) for h in inp.holdings]],
                      default=str, sort_keys=True)
     import hashlib
     return hashlib.sha256(raw.encode()).hexdigest()[:20]

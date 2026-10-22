@@ -184,7 +184,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # One-time rename: LOCAL_OWNER was the placeholder "local" before this
     # deployment's single user was named "sumanth_b" ahead of registration/
     # login. Idempotent -- a no-op once no row still says "local".
-    update_if_any(conn, "user_profile", "owner = 'local'", "UPDATE user_profile SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
+    # Skipped when a LOCAL_OWNER row already exists (UNIQUE(owner) would reject
+    # the rename and crash every page load); the stray 'local' row is left alone.
+    if not conn.execute("SELECT 1 FROM user_profile WHERE owner = ?", (LOCAL_OWNER,)).fetchone():
+        update_if_any(conn, "user_profile", "owner = 'local'", "UPDATE user_profile SET owner = ? WHERE owner = 'local'", (LOCAL_OWNER,))
     _migrate_owner_scoping(conn)
 
 

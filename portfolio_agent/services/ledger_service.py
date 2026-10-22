@@ -407,14 +407,16 @@ def get_lots(ctx: RequestContext, account_id: int, *, open_only: bool = True) ->
     require_context(ctx)
     with repo.unit_of_work() as c:
         _owned_account(ctx, account_id, c, allow_archived=True)
-        return ldb.list_lots(c, account_id, open_only=open_only)
+        unknown = ldb.unknown_basis_txn_ids(c, account_id)
+        return [{**l, "basis_unknown": l["open_transaction_id"] in unknown} for l in ldb.list_lots(c, account_id, open_only=open_only)]
 
 
 def get_closures(ctx: RequestContext, account_id: int) -> list[dict]:
     require_context(ctx)
     with repo.unit_of_work() as c:
         _owned_account(ctx, account_id, c, allow_archived=True)
-        return ldb.list_closures(c, account_id)
+        unknown = ldb.unknown_basis_txn_ids(c, account_id)
+        return [{**x, "basis_unknown": x["open_transaction_id"] in unknown} for x in ldb.list_closures(c, account_id)]
 
 
 def get_ledger_summary(ctx: RequestContext, account_id: int) -> dict:
@@ -428,9 +430,18 @@ def get_ledger_summary(ctx: RequestContext, account_id: int) -> dict:
         except LedgerError as exc:
             return {"account_id": account_id, "holdings_source": account.get("holdings_source"), "error": str(exc)}
         tick = {r["instrument_id"]: r["ticker"] for r in c.execute("SELECT instrument_id, ticker FROM instruments").fetchall()}
+        unknown_txns = ldb.unknown_basis_txn_ids(c, account_id)
+        unknown_inst = ldb.unknown_basis_instruments(c, account_id)
+    # A sale of shares whose cost was never known has no gain to report (proceeds minus 0 would be all "gain"): it is left out of the total and
+    # its proceeds are reported on their own.
+    known = [x for x in state.closures if x.open_transaction_id not in unknown_txns]
+    positions = {}
+    for i, p in state.positions().items():
+        positions[tick[i]] = {**p, "cost_basis": None, "avg_cost": None, "basis_unknown": True} if i in unknown_inst else p
     return {"account_id": account_id, "holdings_source": account.get("holdings_source"), "cash": state.cash, "totals": state.totals,
-            "realized_gain": state.realized_gain(),
-            "positions": {tick[i]: p for i, p in state.positions().items()}, "transactions": state.applied}
+            "realized_gain": round(sum(x.realized_gain for x in known), 2),
+            "realized_unknown_basis_proceeds": round(sum(x.proceeds for x in state.closures if x.open_transaction_id in unknown_txns), 2),
+            "positions": positions, "transactions": state.applied}
 
 
 # ── ledger-managed accounts: positions and cash are DERIVED ───────────────────
@@ -446,10 +457,13 @@ def _sync_positions(c: sqlite3.Connection, account: dict, state) -> dict:
     derived = state.positions()
     names = {r["instrument_id"]: (r["ticker"], r["name"]) for r in c.execute("SELECT instrument_id, ticker, name FROM instruments").fetchall()}
     last = max((t.trade_date for t in ldb.txns_for_replay(c, aid)), default=_today().isoformat())
+    unknown = ldb.unknown_basis_instruments(c, aid)          # opened at a unit cost of 0 because the basis was not known: UNKNOWN, never "free"
     added, updated = [], []
     for iid, d in derived.items():
         price = (existing.get(iid) or {}).get("current_price")
-        fields = {"shares": d["quantity"], "avg_cost": d["avg_cost"], "cost_basis_total": d["cost_basis"], "as_of_date": last,
+        no_basis = iid in unknown
+        fields = {"shares": d["quantity"], "avg_cost": None if no_basis else d["avg_cost"],
+                  "cost_basis_total": None if no_basis else d["cost_basis"], "as_of_date": last,
                   "current_value": round(price * d["quantity"], 2) if price else None}
         if iid in existing:
             repo.update_position(existing[iid]["position_id"], conn=c, **fields)
@@ -546,7 +560,7 @@ def switch_to_ledger(ctx: RequestContext, account_id: int, opening_date, *, basi
             opened.append(ldb.insert_transaction(c, {
                 "account_id": account_id, "instrument_id": p["instrument_id"], "txn_type": "OPENING_BALANCE", "trade_date": day,
                 "quantity": round(sh, QTY_PLACES), "price": unit, "amount": 0.0, "source": "opening_balance",
-                "memo": "opening balance" + (" (cost basis unknown)" if p["ticker"] in unknown else ""), "created_by": ctx.actor,
+                "memo": "opening balance" + (f" ({ldb.UNKNOWN_BASIS_MEMO})" if p["ticker"] in unknown else ""), "created_by": ctx.actor,
                 "request_id": ctx.request_id}))
         if cash and cash.get("amount") is not None:
             opened.append(ldb.insert_transaction(c, {
@@ -661,7 +675,8 @@ def _plan_for(ctx: RequestContext, account_id: int, raw: bytes, mapping: dict, c
     except csvi.CsvImportError as exc:
         raise ImportRejected(str(exc)) from None
     ext, keys = ldb.existing_for_dedupe(c, account_id)
-    return account, csvi.plan_rows(rows, mapping, existing_external_ids=ext, existing_keys=keys, today=_today())
+    return account, csvi.plan_rows(rows, mapping, existing_external_ids=ext, existing_keys=keys, today=_today(),
+                                   ledger_start_date=account.get("ledger_start_date"))
 
 
 def suggest_csv_mapping(raw: bytes) -> dict:
@@ -692,7 +707,7 @@ def preview_transactions_csv(ctx: RequestContext, account_id: int, raw: bytes, m
             "dry_run_error": problem,
             "rows": [{"line": p.line, "status": p.status, "type": p.txn_type, "trade_date": p.fields.get("trade_date"),
                       "ticker": p.fields.get("ticker"), "quantity": p.fields.get("quantity"), "cash_amount": p.cash_amount,
-                      "duplicate_of": p.duplicate_of, "errors": p.errors, "warnings": p.warnings} for p in plan]}
+                      "duplicate_of": p.duplicate_of, "skip_reason": p.skip_reason, "errors": p.errors, "warnings": p.warnings} for p in plan]}
 
 
 def _dry_run(c: sqlite3.Connection, account_id: int, ordered) -> str | None:
@@ -747,7 +762,7 @@ def import_transactions_csv(ctx: RequestContext, account_id: int, raw: bytes, ma
         problem = _dry_run(c, account_id, ordered)
         if problem:
             raise ImportRejected(f"the rows do not fit this account's ledger, so nothing was imported: {problem}")
-        skipped = sum(p.status == "duplicate" for p in plan)
+        skipped = sum(p.status in ("duplicate", "skipped") for p in plan)
         run_id = repo.record_import_run(broker="csv_transactions", accounts=[account.get("display_name") or str(account_id)], filename=filename,
                                         statement_date=max((p.fields["trade_date"] for p in ordered), default=None), conn=c)
         for p in ordered:
@@ -874,3 +889,198 @@ def preview_switch_to_ledger(ctx: RequestContext, account_id: int, opening_date,
                       "unknown_basis": p["ticker"] in unknown} for p, sh, unit in plan]
     return {"opening_date": day, "positions": positions, "cash": None if not cash or cash.get("amount") is None else round(float(cash["amount"]), 2),
             "unknown_basis": unknown, "needs_basis": needs_basis, "problems": problems, "can_switch": not problems}
+
+
+# ── saved history and the activity summary ────────────────────────────────────
+# A broker's history file usually reaches back before the account's ledger starts, and the ledger refuses anything dated before its start (the
+# opening balance already holds the effect). That activity is still worth seeing — what came in, what was paid out, what was sold — so it is
+# saved here on the side, as numbers for the summary only: no lots, no gains, no effect on positions or cash.
+
+_SUMMARY_TYPES = ("DIVIDEND", "INTEREST", "DEPOSIT", "WITHDRAWAL", "FEE", "EMPLOYER_MATCH", "BUY", "SELL")
+
+
+def _history_plan(ctx: RequestContext, account_id: int, raw: bytes, mapping: dict, c: sqlite3.Connection):
+    """Classify every row of an upload for saving as history: new | duplicate (already saved) | skipped (not an event) | later (belongs in the
+    ledger) | invalid. Returns (account, rows) where each row is a dict ready to save."""
+    from portfolio_agent.tools import ledger_csv_import as csvi
+    account = _owned_account(ctx, account_id, c)
+    try:
+        headers, rows = csvi.read_csv(raw)
+        csvi.validate_mapping(mapping, headers)
+    except csvi.CsvImportError as exc:
+        raise ImportRejected(str(exc)) from None
+    plan = csvi.plan_rows(rows, mapping, existing_external_ids=set(), existing_keys={}, today=_today())
+    start = account.get("ledger_start_date") if _ledger_account(account) else None
+    saved = ldb.history_keys(c, account_id)
+    seen: dict[tuple, int] = {}
+    out = []
+    for p in plan:
+        d = {"line": p.line, "status": None, "type": p.txn_type, "trade_date": p.fields.get("trade_date"), "ticker": p.fields.get("ticker"),
+             "quantity": p.fields.get("quantity"), "price": p.fields.get("price"), "fees": p.fields.get("fees") or 0.0,
+             "amount": p.cash_amount, "contribution_source": p.fields.get("contribution_source"), "reason": None, "errors": p.errors}
+        if p.status == "invalid":
+            d["status"] = "invalid"
+        elif p.status == "skipped":
+            d["status"], d["reason"] = "skipped", p.skip_reason
+        elif start and p.fields["trade_date"] > start:
+            d["status"], d["reason"] = "later", f"dated after this account's ledger start ({start}) — import it as transactions instead"
+        else:
+            base = ldb.history_key(d, 0)[:5]
+            seen[base] = seen.get(base, 0) + 1
+            d["occurrence"] = seen[base]
+            d["status"] = "duplicate" if (*base, seen[base]) in saved else "new"
+            if d["status"] == "duplicate":
+                d["reason"] = "already saved"
+        out.append(d)
+    return account, out
+
+
+def _history_summary(rows: list[dict]) -> dict:
+    c = {"new": 0, "duplicate": 0, "skipped": 0, "later": 0, "invalid": 0}
+    for r in rows:
+        c[r["status"]] += 1
+    return {**c, "rows": len(rows)}
+
+
+def preview_history_csv(ctx: RequestContext, account_id: int, raw: bytes, mapping: dict) -> dict:
+    """What saving this file as history WOULD do, writing nothing. `totals` are the new rows by kind, as the summary will count them."""
+    require_context(ctx)
+    with repo.unit_of_work() as c:
+        account, rows = _history_plan(ctx, account_id, raw, mapping, c)
+    summ = _history_summary(rows)
+    new = [r for r in rows if r["status"] == "new"]
+    return {"account_id": account_id, "summary": summ, "can_save": summ["invalid"] == 0 and summ["new"] > 0,
+            "ledger_start_date": account.get("ledger_start_date") if _ledger_account(account) else None,
+            "totals": _activity_totals([{"txn_type": r["type"], "trade_date": r["trade_date"], "ticker": r["ticker"], "quantity": r["quantity"],
+                                         "amount": r["amount"], "contribution_source": r["contribution_source"]} for r in new])["totals"],
+            "rows": [{k: r[k] for k in ("line", "status", "type", "trade_date", "ticker", "quantity", "amount", "reason", "errors")} for r in rows]}
+
+
+def import_history_csv(ctx: RequestContext, account_id: int, raw: bytes, mapping: dict, *, filename: str | None = None,
+                       reason: str | None = None) -> dict:
+    """
+    Save the file's eligible rows as history, all or nothing in one transaction. Refused when any row is invalid. Rows already saved are
+    counted, not duplicated; rows that belong in the ledger (dated after its start) and non-events (money-market sweeps ...) are left out.
+    Never changes a position, a lot, the cash balance or a ledger transaction. Audited.
+    """
+    require_context(ctx)
+    with repo.unit_of_work() as c:
+        account, rows = _history_plan(ctx, account_id, raw, mapping, c)
+        bad = [r for r in rows if r["status"] == "invalid"]
+        if bad:
+            raise ImportRejected(f"{len(bad)} row(s) are invalid, so nothing was saved: " +
+                                 "; ".join(f"line {r['line']}: {'; '.join(r['errors'])}" for r in bad[:5]) + (" ..." if len(bad) > 5 else ""))
+        new = [r for r in rows if r["status"] == "new"]
+        if not new:
+            summ = _history_summary(rows)
+            return {"saved": 0, "duplicates": summ["duplicate"], "skipped": summ["skipped"], "later": summ["later"], "run_id": None}
+        run_id = repo.record_import_run(broker="csv_history", accounts=[account.get("display_name") or str(account_id)], filename=filename,
+                                        statement_date=max(r["trade_date"] for r in new), conn=c)
+        saved = sum(ldb.insert_history(c, account_id, {**r, "txn_type": r["type"]}, r["occurrence"], created_by=ctx.actor,
+                                       source_file=filename, import_run_id=run_id) for r in new)
+        summ = _history_summary(rows)
+        repo.update_import_run(run_id, conn=c, added=saved, updated=0, removed=0, skipped=summ["duplicate"] + summ["skipped"] + summ["later"])
+        repo.record_audit_event(actor=ctx.actor, source=ctx.source, request_id=ctx.request_id, operation="import_history_csv",
+                                portfolio_id=account["portfolio_id"], account_id=account_id,
+                                after={"saved": saved, "duplicates": summ["duplicate"], "skipped": summ["skipped"], "later": summ["later"],
+                                       "filename": filename, "from": min(r["trade_date"] for r in new), "to": max(r["trade_date"] for r in new)},
+                                reason=reason, conn=c)
+    return {"saved": saved, "duplicates": summ["duplicate"], "skipped": summ["skipped"], "later": summ["later"], "run_id": run_id}
+
+
+def clear_history(ctx: RequestContext, account_id: int, *, reason: str | None = None) -> int:
+    """Delete this account's saved history (a summary aid, not part of the append-only ledger). Audited. Returns the rows removed."""
+    require_context(ctx)
+    with repo.unit_of_work() as c:
+        account = _owned_account(ctx, account_id, c, allow_archived=True)
+        n = ldb.clear_history(c, account_id)
+        if n:
+            repo.record_audit_event(actor=ctx.actor, source=ctx.source, request_id=ctx.request_id, operation="clear_history",
+                                    portfolio_id=account["portfolio_id"], account_id=account_id, before={"rows": n}, reason=reason, conn=c)
+    return n
+
+
+def _activity_rows(c: sqlite3.Connection, account_id: int) -> list[dict]:
+    """Saved history plus the ledger's own effective transactions (opening balances, splits and voids are not activity)."""
+    rows = [{"txn_type": h["txn_type"], "trade_date": h["trade_date"], "ticker": h["ticker"], "quantity": h["quantity"], "amount": h["amount"],
+             "contribution_source": h["contribution_source"], "from": "history"} for h in ldb.list_history(c, account_id)]
+    for t in ldb.list_transactions(c, account_id, include_voided=False):
+        if t["txn_type"] in _SUMMARY_TYPES:
+            rows.append({"txn_type": t["txn_type"], "trade_date": t["trade_date"], "ticker": t.get("ticker") or "", "quantity": t.get("quantity"),
+                         "amount": t["amount"], "contribution_source": t.get("contribution_source"), "from": "ledger"})
+    return rows
+
+
+def _activity_totals(rows: list[dict]) -> dict:
+    """Pure: totals by kind, the deposit sources, dividends by ticker, and the sales. Amounts are the signed cash effect (what each row did to cash)."""
+    t = {"dividends": 0.0, "interest": 0.0, "deposits": 0.0, "withdrawals": 0.0, "fees": 0.0, "employer_match_cash": 0.0,
+         "purchases": 0.0, "sale_proceeds": 0.0, "purchase_count": 0, "sale_count": 0, "shares_sold": 0.0}
+    by_source: dict[str, float] = {}
+    div_by_ticker: dict[str, float] = {}
+    sales: list[dict] = []
+    for r in rows:
+        k, amt = r["txn_type"], float(r["amount"] or 0.0)
+        if k == "DIVIDEND":
+            t["dividends"] += amt
+            div_by_ticker[r["ticker"] or "—"] = div_by_ticker.get(r["ticker"] or "—", 0.0) + amt
+        elif k == "INTEREST":
+            t["interest"] += amt
+        elif k == "DEPOSIT":
+            t["deposits"] += amt
+            src = (r.get("contribution_source") or "Transfer").title()
+            by_source[src] = by_source.get(src, 0.0) + amt
+        elif k == "WITHDRAWAL":
+            t["withdrawals"] += -amt
+        elif k == "FEE":
+            t["fees"] += -amt
+        elif k == "EMPLOYER_MATCH" and amt:
+            t["employer_match_cash"] += amt
+        elif k == "BUY":
+            t["purchases"] += -amt
+            t["purchase_count"] += 1
+        elif k == "SELL":
+            t["sale_proceeds"] += amt
+            t["sale_count"] += 1
+            t["shares_sold"] += float(r.get("quantity") or 0.0)
+            sales.append({"date": r["trade_date"], "ticker": r["ticker"], "quantity": r.get("quantity"), "proceeds": round(amt, 2)})
+    t = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in t.items()}
+    return {"totals": t, "deposit_sources": {k: round(v, 2) for k, v in sorted(by_source.items(), key=lambda kv: -kv[1])},
+            "dividends_by_ticker": {k: round(v, 2) for k, v in sorted(div_by_ticker.items(), key=lambda kv: -kv[1])},
+            "sales": sorted(sales, key=lambda s: s["date"], reverse=True)}
+
+
+def _summary_for(rows: list[dict], year: int | None) -> dict:
+    years = sorted({int(r["trade_date"][:4]) for r in rows})
+    chosen = [r for r in rows if year is None or r["trade_date"].startswith(str(year))]
+    first = min((r["trade_date"] for r in chosen), default=None)
+    last = max((r["trade_date"] for r in chosen), default=None)
+    return {"years": years, "year": year, "first_date": first, "last_date": last,
+            "from_history": sum(1 for r in chosen if r["from"] == "history"), "from_ledger": sum(1 for r in chosen if r["from"] == "ledger"),
+            **_activity_totals(chosen)}
+
+
+def get_activity_summary(ctx: RequestContext, account_id: int, *, year: int | None = None) -> dict:
+    """What came in, what was paid out and what was bought and sold in one account (optionally one calendar year), from saved history plus the
+    ledger. Dividends, interest, deposits, withdrawals, fees, purchases, sale proceeds. Sale GAINS are not here (they need lots: see the ledger)."""
+    require_context(ctx)
+    with repo.unit_of_work() as c:
+        _owned_account(ctx, account_id, c, allow_archived=True)
+        rows = _activity_rows(c, account_id)
+    return {"account_id": account_id, **_summary_for(rows, year)}
+
+
+def get_activity_summary_all(ctx: RequestContext, *, year: int | None = None) -> dict:
+    """The same across every active, non-paper account the caller owns, plus a per-account line."""
+    require_context(ctx)
+    from portfolio_agent.services.account_service import resolve_portfolio
+    with repo.unit_of_work() as c:
+        portfolio = resolve_portfolio(ctx, conn=c)
+        accounts = repo.list_accounts(portfolio["portfolio_id"], conn=c)
+        per, allrows = [], []
+        for a in accounts:
+            rows = _activity_rows(c, a["account_id"])
+            allrows += rows
+            sm = _summary_for(rows, year)
+            per.append({"account_id": a["account_id"], "name": a.get("display_name") or a.get("account_number") or f"Account {a['account_id']}",
+                        "broker": a.get("broker"), "events": sm["from_history"] + sm["from_ledger"], "totals": sm["totals"]})
+    return {**_summary_for(allrows, year), "accounts": per}

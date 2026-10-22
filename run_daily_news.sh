@@ -11,6 +11,6 @@ echo "  News-only job started : $(date)"
 echo "========================================"
 
 cd /Users/sumanthboyina/portfolio-agent
-/Users/sumanthboyina/portfolio-agent/.venv/bin/python -u main.py --daily-news
+/usr/bin/caffeinate -i /Users/sumanthboyina/portfolio-agent/.venv/bin/python -u main.py --daily-news
 
 echo "  Finished : $(date)"

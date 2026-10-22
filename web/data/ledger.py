@@ -82,8 +82,10 @@ def voidable_choices(ctx: RequestContext, account_id: int) -> list[dict]:
 
 
 def lots_view(ctx: RequestContext, account_id: int) -> list[dict]:
-    return [{"ticker": l["ticker"], "open_date": l["open_date"], "quantity": l["remaining_quantity"], "unit_cost": l["unit_cost"],
-             "cost_basis": l["basis_remaining"], "origin": l["source_type"], "lot_id": l["open_transaction_id"]}
+    """Open lots. A lot opened without a known cost has unit cost and basis None (shown as "unknown"), never 0."""
+    return [{"ticker": l["ticker"], "open_date": l["open_date"], "quantity": l["remaining_quantity"],
+             "unit_cost": None if l["basis_unknown"] else l["unit_cost"], "cost_basis": None if l["basis_unknown"] else l["basis_remaining"],
+             "basis_unknown": l["basis_unknown"], "origin": l["source_type"], "lot_id": l["open_transaction_id"]}
             for l in led.get_lots(ctx, account_id, open_only=True)]
 
 
@@ -94,12 +96,16 @@ def realized_gains_view(ctx: RequestContext, account_id: int, *, year: int | Non
     rows = [c for c in closures if year is None or c["close_date"].startswith(str(year))]
     tot = {"SHORT": 0.0, "LONG": 0.0}
     for c in rows:
-        tot[c["holding_period"]] += c["realized_gain"]
+        if not c["basis_unknown"]:                                  # proceeds minus an unknown cost is not a gain: left out of the totals
+            tot[c["holding_period"]] += c["realized_gain"]
+    unknown = [c for c in rows if c["basis_unknown"]]
     return {"years": years, "year": year,
             "rows": [{"ticker": c["ticker"], "quantity": c["quantity"], "open_date": c["open_date"], "close_date": c["close_date"],
-                      "proceeds": c["proceeds"], "cost_basis": c["cost_basis"], "gain": c["realized_gain"], "period": c["holding_period"],
-                      "method": c["method"]} for c in rows],
-            "totals": {"short_term": round(tot["SHORT"], 2), "long_term": round(tot["LONG"], 2), "total": round(tot["SHORT"] + tot["LONG"], 2)}}
+                      "proceeds": c["proceeds"], "cost_basis": None if c["basis_unknown"] else c["cost_basis"],
+                      "gain": None if c["basis_unknown"] else c["realized_gain"], "basis_unknown": c["basis_unknown"],
+                      "period": c["holding_period"], "method": c["method"]} for c in rows],
+            "totals": {"short_term": round(tot["SHORT"], 2), "long_term": round(tot["LONG"], 2), "total": round(tot["SHORT"] + tot["LONG"], 2),
+                       "unknown_basis_sales": len(unknown), "unknown_basis_proceeds": round(sum(c["proceeds"] for c in unknown), 2)}}
 
 
 def clearance_summary(ctx: RequestContext, account_id: int) -> dict:
@@ -222,6 +228,28 @@ def import_preview(ctx: RequestContext, account_id: int, raw: bytes, mapping: di
 
 def import_commit(ctx: RequestContext, account_id: int, raw: bytes, mapping: dict, filename: str | None) -> dict:
     return led.import_transactions_csv(ctx, account_id, raw, mapping, filename=filename)
+
+
+def history_preview(ctx: RequestContext, account_id: int, raw: bytes, mapping: dict) -> dict:
+    return led.preview_history_csv(ctx, account_id, raw, mapping)
+
+
+def history_commit(ctx: RequestContext, account_id: int, raw: bytes, mapping: dict, filename: str | None) -> dict:
+    return led.import_history_csv(ctx, account_id, raw, mapping, filename=filename)
+
+
+def history_clear(ctx: RequestContext, account_id: int) -> int:
+    return led.clear_history(ctx, account_id, reason="Accounts page")
+
+
+def activity_view(ctx: RequestContext, account_id: int, year: int | None = None) -> dict:
+    """One account's activity (saved history + ledger) for a year, ready to lay out: headline figures, deposit sources, dividends by ticker, sales."""
+    return led.get_activity_summary(ctx, account_id, year=year)
+
+
+def activity_overview(ctx: RequestContext, year: int | None = None) -> dict:
+    """The same across every account the caller owns, with a line per account."""
+    return led.get_activity_summary_all(ctx, year=year)
 
 
 def export_files(ctx: RequestContext, account_id: int, *, year: int | None = None) -> dict:

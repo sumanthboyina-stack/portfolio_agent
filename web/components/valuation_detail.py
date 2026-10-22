@@ -1,39 +1,21 @@
-"""Valuation — DCF intrinsic value (bear/base/bull), margin of safety, and relative comps."""
+"""
+Valuation — DCF intrinsic value (bear/base/bull), margin of safety and relative comps.
+
+Used in two places (it used to be its own page):
+  render_valuation_tab(ticker)    the "Valuation" tab of the ticker drill-down (predictions_cards.render_drill_down),
+                                  reachable from any prediction or opportunity card
+  render_valuation_screen(owner)  the grouped, margin-of-safety-ranked list for portfolio / watchlist / opportunities,
+                                  plus a look-up for any ticker (a section of the Predictions page)
+"""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import streamlit as st
 
-_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_ROOT))
-
 from web.styles import (
-    section_tile,
-    inject_global_css, page_header, section_title, top_nav, card, material, icon_html,
-    badge_html, ticker_label, stat_card_html, status_dot_html, fmt_money, fmt_pct,
+    section_tile, section_title, card, material, badge_html, ticker_label, stat_card_html, status_dot_html,
+    fmt_money, fmt_pct,
     SUCCESS, SUCCESS_LIGHT, WARNING, WARNING_LIGHT, DANGER, DANGER_LIGHT, NEUTRAL, PRIMARY, PRIMARY_LIGHT,
-)
-
-from web.auth import current_context, require_login
-
-st.set_page_config(
-    page_title="APEX — Valuation",
-    page_icon=str(_ROOT / "web" / "static" / "apex_mark.png"),
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-inject_global_css()
-require_login()
-top_nav("valuation")
-
-page_header(
-    "Valuation",
-    subtitle="DCF intrinsic value with explicit bear/base/bull scenarios, a WACC/terminal-growth "
-             "sensitivity grid, and relative valuation vs peers and market — not a single fake-precise target",
-    icon="calculate",
 )
 
 _LABEL_STYLE = {
@@ -141,9 +123,9 @@ def _highlight_line(ticker: str, valuation: dict) -> str:
     return f"{ticker_label(ticker)}  —  {label_words}  ·  MoS {mos_str}  ·  {intrinsic} vs {current}"
 
 
-def _render_detail(valuation: dict, ticker: str) -> None:
-    """Full DCF/scenario/relative-valuation detail for one ticker — used both
-    by the grouped list's expanders and the manual ticker lookup below."""
+def render_valuation_detail(valuation: dict, ticker: str) -> None:
+    """Full DCF/scenario/relative-valuation detail for one ticker — used by the drill-down's
+    Valuation tab, the grouped screen's expanders and the manual ticker lookup."""
     st.caption(f"As of {valuation['as_of_date']} · model: {valuation.get('model_name', 'deterministic')}")
 
     label = valuation.get("valuation_label") or "FAIRLY_VALUED"
@@ -318,75 +300,103 @@ def _render_detail(valuation: dict, ticker: str) -> None:
                 f"P/E series, since historical EPS-by-period data isn't available in this system)."
             )
 
+def render_valuation_tab(ticker: str, *, key: str = "") -> None:
+    """
+    One ticker's stored valuation. st.tabs renders every tab on every rerun, so a ticker the daily batch hasn't
+    covered is computed (EDGAR + market data, no LLM — slow) only when the button is clicked, never just because
+    the drill-down is open.
+    """
+    ticker = ticker.upper()
+    stored = _cached_stored_valuation(ticker)
+    clicked = st.button("Recompute now" if stored else "Compute valuation", icon=material("refresh"),
+                        key=f"val_compute_{key}{ticker}",
+                        help="Runs a fresh DCF from EDGAR filings and market data (no LLM). Takes a few seconds.")
+    if clicked:
+        _cached_compute_valuation.clear()
+        valuation, error = _cached_compute_valuation(ticker)
+        _cached_stored_valuation.clear()
+        _cached_valuations_for_tickers.clear()
+    else:
+        valuation, error = stored, None
+        if valuation is None:
+            st.info(f"No valuation stored for {ticker} yet — the daily batch hasn't covered it. "
+                    "Click Compute valuation to run one now.", icon=material("calculate"))
+            return
+    if error:
+        st.error(error, icon=material("warning"))
+    elif valuation is None:
+        st.info(f"No valuation data for {ticker} yet.", icon=material("calculate"))
+    else:
+        render_valuation_detail(valuation, ticker)
 
-# ── Grouped ticker list — line item, expand for full detail ──────────────────
 
-group_choice = st.radio(
-    "Group", ["All", "Portfolio", "Watchlist", "New Opportunities"], horizontal=True, key="valuation_group",
-)
+def render_valuation_screen(owner: str) -> None:
+    """Grouped valuation list ranked by margin of safety, plus a look-up for any ticker."""
+    # ── Grouped ticker list — line item, expand for full detail ──────────────────
 
-_owner = current_context("web:valuation").actor
-
-if group_choice == "Portfolio":
-    group_tickers = _cached_holdings_tickers(_owner)
-elif group_choice == "Watchlist":
-    group_tickers = _cached_watchlist_tickers(_owner)
-elif group_choice == "New Opportunities":
-    group_tickers = _cached_opportunity_tickers()
-else:
-    group_tickers = sorted(
-        set(_cached_holdings_tickers(_owner))
-        | set(_cached_watchlist_tickers(_owner))
-        | set(_cached_opportunity_tickers())
+    group_choice = st.radio(
+        "Group", ["All", "Portfolio", "Watchlist", "New Opportunities"], horizontal=True, key="valuation_group",
     )
 
-if not group_tickers:
-    st.info(
-        "No portfolio holdings found." if group_choice == "Portfolio"
-        else "No tickers in this group yet.",
-        icon=material("calculate"),
-    )
-else:
-    valuations = _cached_valuations_for_tickers(tuple(group_tickers))
-    valued_tickers = [t for t in group_tickers if t in valuations]
-    unvalued_tickers = [t for t in group_tickers if t not in valuations]
+    if group_choice == "Portfolio":
+        group_tickers = _cached_holdings_tickers(owner)
+    elif group_choice == "Watchlist":
+        group_tickers = _cached_watchlist_tickers(owner)
+    elif group_choice == "New Opportunities":
+        group_tickers = _cached_opportunity_tickers()
+    else:
+        group_tickers = sorted(
+            set(_cached_holdings_tickers(owner))
+            | set(_cached_watchlist_tickers(owner))
+            | set(_cached_opportunity_tickers())
+        )
 
-    valued_tickers.sort(key=lambda t: valuations[t].get("margin_of_safety_pct") if valuations[t].get("margin_of_safety_pct") is not None else -1e9, reverse=True)
+    if not group_tickers:
+        st.info(
+            "No portfolio holdings found." if group_choice == "Portfolio"
+            else "No tickers in this group yet.",
+            icon=material("calculate"),
+        )
+    else:
+        valuations = _cached_valuations_for_tickers(tuple(group_tickers))
+        valued_tickers = [t for t in group_tickers if t in valuations]
+        unvalued_tickers = [t for t in group_tickers if t not in valuations]
 
-    _tile_1 = section_tile(f"{group_choice} — Valuation Summary", badge_text=f"{len(valued_tickers)} valued", badge_color=PRIMARY, expanded=True, key="valuation_1")
-    if _tile_1:
-        with _tile_1:
+        valued_tickers.sort(key=lambda t: valuations[t].get("margin_of_safety_pct") if valuations[t].get("margin_of_safety_pct") is not None else -1e9, reverse=True)
 
-            for ticker in valued_tickers:
-                valuation = valuations[ticker]
-                with st.expander(_highlight_line(ticker, valuation)):
-                    _render_detail(valuation, ticker)
+        _tile_1 = section_tile(f"{group_choice} — Valuation Summary", badge_text=f"{len(valued_tickers)} valued", badge_color=PRIMARY, expanded=True, key="valuation_1")
+        if _tile_1:
+            with _tile_1:
 
-            if unvalued_tickers:
-                st.caption(
-                    f"No valuation yet for: {', '.join(unvalued_tickers)} — use \"Look up any ticker\" below to compute one."
-                )
-st.divider()
+                for ticker in valued_tickers:
+                    valuation = valuations[ticker]
+                    with st.expander(_highlight_line(ticker, valuation)):
+                        render_valuation_detail(valuation, ticker)
 
-# ── Manual lookup — any ticker, on-demand compute if not yet covered ─────────
+                if unvalued_tickers:
+                    st.caption(
+                        f"No valuation yet for: {', '.join(unvalued_tickers)} — use \"Look up any ticker\" below to compute one."
+                    )
 
-with st.expander("Look up any ticker", icon=material("search")):
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        ticker_input = st.text_input("Ticker", value="AAPL", key="valuation_ticker").strip().upper()
-    with col2:
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        force_recompute = st.button("Recompute now", icon=material("refresh"), use_container_width=True)
+    # ── Manual lookup — any ticker, on-demand compute if not yet covered ─────────
 
-    if ticker_input:
-        lookup_valuation = None if force_recompute else _cached_stored_valuation(ticker_input)
-        lookup_error = None
-        if lookup_valuation is None:
-            lookup_valuation, lookup_error = _cached_compute_valuation(ticker_input)
+    with st.expander("Look up any ticker", icon=material("search")):
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            ticker_input = st.text_input("Ticker", value="AAPL", key="valuation_ticker").strip().upper()
+        with col2:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            force_recompute = st.button("Recompute now", icon=material("refresh"), use_container_width=True)
 
-        if lookup_error:
-            st.error(lookup_error, icon=material("warning"))
-        elif lookup_valuation is None:
-            st.info(f"No valuation data for {ticker_input} yet.", icon=material("calculate"))
-        else:
-            _render_detail(lookup_valuation, ticker_input)
+        if ticker_input:
+            lookup_valuation = None if force_recompute else _cached_stored_valuation(ticker_input)
+            lookup_error = None
+            if lookup_valuation is None:
+                lookup_valuation, lookup_error = _cached_compute_valuation(ticker_input)
+
+            if lookup_error:
+                st.error(lookup_error, icon=material("warning"))
+            elif lookup_valuation is None:
+                st.info(f"No valuation data for {ticker_input} yet.", icon=material("calculate"))
+            else:
+                render_valuation_detail(lookup_valuation, ticker_input)

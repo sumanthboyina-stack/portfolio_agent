@@ -258,6 +258,17 @@ def set_manual_breakdown(ctx: RequestContext, ticker: str, asset_class_pct: dict
     return {"ticker": inst["ticker"], "asset_class": asset_class, "sector": sector, "as_of": as_of}
 
 
+def get_manual_breakdown_for(ctx: RequestContext, ticker: str) -> dict | None:
+    """The actor's own typed-in breakdown for a fund they hold ({"asset_class": {...%}, "sector": {...%} | None, "as_of"}), or None. Private: only
+    the actor's own row is ever read, and only for a fund they hold."""
+    require_context(ctx)
+    fdb._ensure_once()
+    mdb._ensure_once()
+    with repo.unit_of_work() as c:
+        inst = _owned_instrument(ctx, ticker, c)
+        return mdb.get_manual_breakdown(ctx.actor, inst["instrument_id"], conn=c)
+
+
 def clear_manual_breakdown(ctx: RequestContext, ticker: str) -> bool:
     require_context(ctx)
     fdb._ensure_once()

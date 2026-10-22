@@ -109,6 +109,11 @@ def render_health_page(ctx) -> None:
     st.caption("There is no single overall score on purpose: a number can hide the one thing that needs your attention. "
                "Unknown means the data to judge is missing — it is never counted as good.")
     st.caption(profile_line(health) + " Change these on the Profile page.")
+    uv = getattr(health, "unvested", None) or {}
+    if uv.get("total"):
+        where = ", ".join(f"{a['name']} (${a['amount']:,.0f})" for a in uv["accounts"][:4])
+        st.caption(f"Unvested employer money of ${uv['total']:,.0f} — {where} — is " +
+                   ("left out of every number on this page (it is not yours yet)." if uv.get("excluded") else "counted here (you chose to include it)."))
     snap = view["snapshot"]
     if snap["status"] == "disabled":
         st.caption("Daily snapshots are turned off, so there is no history below — this is today's live checkup.")

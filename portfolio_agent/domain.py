@@ -403,6 +403,7 @@ class Holding(_DictCompat):
     leverage_factor: float | None = None  # 1.0 normal, 2.0 / 3.0 leveraged, negative = inverse
     proxy_ticker: str | None = None       # analytics-only stand-in for a ticker-less fund; never a holding
     classification_source: str | None = None  # 'auto' or 'manual' (a person's override)
+    vested_value: float | None = None     # retirement plans: the vested part of current_value, when a statement states it (None = not stated)
 
     def __post_init__(self) -> None:
         self.ticker = self.ticker.upper()
@@ -437,6 +438,7 @@ class Holding(_DictCompat):
             leverage_factor=_safe_float(row.get("leverage_factor")),
             proxy_ticker=row.get("proxy_ticker"),
             classification_source=row.get("classification_source"),
+            vested_value=_safe_float(row.get("vested_value")),
         )
 
     @property
@@ -479,6 +481,7 @@ class Holding(_DictCompat):
             "leverage_factor": self.leverage_factor,
             "proxy_ticker": self.proxy_ticker,
             "classification_source": self.classification_source,
+            "vested_value": self.vested_value,
             "version": self.version,
             "unrealized_gain_loss": self.unrealized_gain_loss,
             "unrealized_gain_loss_pct": self.unrealized_gain_loss_pct,
@@ -1316,8 +1319,10 @@ def summarize_holdings(holdings: list, cash_rows: list[dict] | None = None) -> d
     valued = [h for h in holdings if h.get("current_value") is not None]
     unvalued = [h for h in holdings if h.get("current_value") is None]
     securities_value = sum(h["current_value"] for h in valued)
-    cost_known = sum(1 for h in valued if h.get("cost_basis_total") is not None)
-    cost = sum(h["cost_basis_total"] for h in valued if h.get("cost_basis_total") is not None)
+    costed = [h for h in valued if h.get("cost_basis_total") is not None]
+    cost_known = len(costed)
+    cost = sum(h["cost_basis_total"] for h in costed)
+    value_costed = sum(h["current_value"] for h in costed)          # gain is value minus cost over positions that have BOTH, never value of the rest
     cash_total = sum(c["amount"] for c in cash_rows if c.get("amount") is not None)
 
     by_sector: dict[str, float] = {}
@@ -1343,8 +1348,9 @@ def summarize_holdings(holdings: list, cash_rows: list[dict] | None = None) -> d
         "unvalued_tickers": sorted({h["ticker"] for h in unvalued}),
         "cost_basis": round(cost, 2),
         "cost_known_count": cost_known,
-        "unrealized": round(securities_value - cost, 2) if cost_known else None,
-        "unrealized_pct": round((securities_value - cost) / cost * 100, 2) if cost else None,
+        "unrealized": round(value_costed - cost, 2) if cost_known else None,
+        "unrealized_pct": round((value_costed - cost) / cost * 100, 2) if cost else None,
+        "cost_value": round(value_costed, 2),                       # value of the positions whose cost is known (what "unrealized" covers)
         "cash_balance": round(cash_total, 2),
         "cash_accounts": len(cash_rows),
         "cash_included": False,

@@ -208,7 +208,7 @@ def test_the_mapping_step_suggests_columns_and_the_preview_writes_nothing():
     a = ledger_account()
     before = len(led.list_transactions(ME, a))
     pv = led.preview_transactions_csv(ME, a, CSV, sug["mapping"])
-    assert pv["summary"] == {"new": 5, "duplicate": 0, "invalid": 0, "rows": 5, "warnings": 0} and pv["can_import"] is True
+    assert pv["summary"] == {"new": 5, "duplicate": 0, "skipped": 0, "invalid": 0, "rows": 5, "warnings": 0} and pv["can_import"] is True
     assert [r["type"] for r in pv["rows"]] == ["BUY", "DEPOSIT", "DIVIDEND", "SELL", "EMPLOYER_MATCH"]
     assert pv["rows"][0]["cash_amount"] == -2001.0 and pv["rows"][3]["cash_amount"] == 840.0
     assert len(led.list_transactions(ME, a)) == before == 0

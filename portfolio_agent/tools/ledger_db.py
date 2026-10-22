@@ -90,6 +90,28 @@ LEDGER_DDL = [
         method               TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_lot_closures_account ON lot_closures (account_id, close_date)",
+    # Saved HISTORY: activity read from a broker's history file that the ledger does not hold (dated on or before the account's ledger start, or on a
+    # snapshot account). It feeds the activity summary only: nothing here is replayed, builds lots or touches positions and cash.
+    """CREATE TABLE IF NOT EXISTS account_history (
+        history_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id          INTEGER NOT NULL REFERENCES accounts(account_id),
+        trade_date          TEXT NOT NULL,
+        txn_type            TEXT NOT NULL CHECK (txn_type IN ('BUY','SELL','DEPOSIT','WITHDRAWAL','DIVIDEND','INTEREST','EMPLOYER_MATCH','FEE')),
+        ticker              TEXT NOT NULL DEFAULT '',
+        quantity            REAL NOT NULL DEFAULT 0,
+        price               REAL,
+        fees                REAL NOT NULL DEFAULT 0,
+        amount              REAL NOT NULL,
+        contribution_source TEXT,
+        occurrence          INTEGER NOT NULL DEFAULT 1,
+        source_file         TEXT,
+        import_run_id       INTEGER,
+        created_by          TEXT NOT NULL,
+        created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+    # `occurrence` is the nth identical row in a file, so two genuine identical trades on a day are both kept and re-uploading adds nothing.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_account_history_dedupe ON account_history (account_id, trade_date, txn_type, ticker, quantity, amount, occurrence)",
+    "CREATE INDEX IF NOT EXISTS idx_account_history_account ON account_history (account_id, trade_date)",
 ]
 
 
@@ -215,6 +237,57 @@ def replace_derived(conn: sqlite3.Connection, account_id: int, state: LedgerStat
         "realized_gain, open_date, close_date, holding_period, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [(account_id, c.open_transaction_id, c.close_transaction_id, c.instrument_id, c.quantity, c.proceeds, c.cost_basis, c.realized_gain,
           c.open_date, c.close_date, c.holding_period, c.method) for c in state.closures])
+
+
+UNKNOWN_BASIS_MEMO = "cost basis unknown"        # on an OPENING_BALANCE row whose lot was opened at a unit cost of 0 because the basis was not known
+
+
+def unknown_basis_txn_ids(conn: sqlite3.Connection, account_id: int) -> set[int]:
+    """Ids of the account's opening-balance rows opened WITHOUT a known cost basis (their lots carry unit cost 0, which is "unknown", not "free")."""
+    rows = conn.execute("SELECT txn_id FROM transactions WHERE account_id = ? AND txn_type = 'OPENING_BALANCE' AND memo LIKE ?",
+                        [account_id, f"%{UNKNOWN_BASIS_MEMO}%"]).fetchall()
+    return {r[0] for r in rows}
+
+
+def unknown_basis_instruments(conn: sqlite3.Connection, account_id: int) -> set[int]:
+    """Instruments whose open lots include at least one lot of unknown basis: their cost basis, average cost and gain are unknown as a whole."""
+    unknown = unknown_basis_txn_ids(conn, account_id)
+    if not unknown:
+        return set()
+    return {l["instrument_id"] for l in list_lots(conn, account_id) if l["open_transaction_id"] in unknown}
+
+
+# ── saved history ─────────────────────────────────────────────────────────────
+
+def history_key(row: dict, occurrence: int) -> tuple:
+    return (row["trade_date"], row.get("txn_type") or row.get("type"), (row.get("ticker") or "").upper(), round(float(row.get("quantity") or 0.0), 8),
+            round(float(row["amount"]), 2), occurrence)
+
+
+def history_keys(conn: sqlite3.Connection, account_id: int) -> set[tuple]:
+    return {(r[0], r[1], r[2], round(r[3], 8), round(r[4], 2), r[5]) for r in conn.execute(
+        "SELECT trade_date, txn_type, ticker, quantity, amount, occurrence FROM account_history WHERE account_id = ?", [account_id]).fetchall()}
+
+
+def insert_history(conn: sqlite3.Connection, account_id: int, row: dict, occurrence: int, *, created_by: str, source_file: str | None,
+                   import_run_id: int | None) -> bool:
+    """True when the row was new (False: already saved, nothing written)."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO account_history (account_id, trade_date, txn_type, ticker, quantity, price, fees, amount, contribution_source, "
+        "occurrence, source_file, import_run_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [account_id, row["trade_date"], row["txn_type"], (row.get("ticker") or "").upper(), round(float(row.get("quantity") or 0.0), 8),
+         row.get("price"), round(float(row.get("fees") or 0.0), 2), round(float(row["amount"]), 2), row.get("contribution_source"),
+         occurrence, source_file, import_run_id, created_by])
+    return cur.rowcount == 1
+
+
+def list_history(conn: sqlite3.Connection, account_id: int) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM account_history WHERE account_id = ? ORDER BY trade_date, history_id", [account_id]).fetchall()]
+
+
+def clear_history(conn: sqlite3.Connection, account_id: int) -> int:
+    return conn.execute("DELETE FROM account_history WHERE account_id = ?", [account_id]).rowcount
 
 
 def list_lots(conn: sqlite3.Connection, account_id: int, *, open_only: bool = True) -> list[dict]:
