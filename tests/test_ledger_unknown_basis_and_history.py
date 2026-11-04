@@ -19,7 +19,7 @@ from web.data import ledger as ld
 from web.data.portfolio import summarize_holdings
 
 ME = local_context("test")
-day = lambda back=0: (date.today() - timedelta(days=back)).isoformat()
+day = lambda back=0: (TODAY - timedelta(days=back)).isoformat()      # the ledger's own pinned "today", never the real clock
 
 
 @pytest.fixture(autouse=True)

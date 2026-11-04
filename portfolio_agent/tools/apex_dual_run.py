@@ -12,6 +12,14 @@ Architecture:
      the next model in the fallback list, in order. Any other exception
      propagates, exactly as before.
   3. Every model fails → return None; caller skips, never writes a placeholder.
+  3b. Optional RANDOM POOL (engine_settings.apex_selection_mode = "random_pool"):
+     instead of one fixed champion, each ticker's run picks ONE model from a small
+     pool (apex_random_pool, e.g. GPT-5 and DeepSeek-Chat). The pick is a hash of
+     (ticker, date), so it is random across tickers but the same ticker always gets
+     the same model on the same day (a re-run never flips it). The picked model is
+     that run's champion; the other pool members, then the configured fallbacks,
+     follow in order if it fails. A model whose account is out of credit is skipped
+     as a pick for the rest of the process. Every row records the model that made it.
   4. Optional challenger (off by default): for apex_challenger_sample_pct % of
      tickers — chosen deterministically per (ticker, date), see
      challenger_selected — the pipeline ALSO runs apex_challenger_model on the
@@ -33,7 +41,8 @@ import litellm
 
 from portfolio_agent.log import get_logger as _get_logger
 from portfolio_agent._models import (
-    _SONNET, _GPT_4O, _GPT_5, _O3,
+    _SONNET, _GPT_4O, _GPT_5, _O3, _DEEPSEEK_CHAT, _MISTRAL_LARGE, _MAGISTRAL_MEDIUM,
+    _OR_GROK43, _OR_QWEN37_MAX,
     _is_failover_error,
 )
 from portfolio_agent.tools.prediction_db import ROLE_CHALLENGER, ROLE_CHAMPION, ROLE_FALLBACK
@@ -51,12 +60,21 @@ APEX_MODELS: list[tuple[str, str, str]] = [
     (_GPT_4O, "openai",    "GPT-4o"),
     (_GPT_5,  "openai",    "GPT-5"),
     (_O3,     "openai",    "o3"),
+    (_DEEPSEEK_CHAT, "deepseek", "DeepSeek-Chat"),
+    (_MISTRAL_LARGE, "mistral", "Mistral-Large"),
+    (_MAGISTRAL_MEDIUM, "mistral", "Magistral-Medium"),
+    (_OR_GROK43, "openrouter", "OR-Grok-4.3"),            # xAI, via OpenRouter
+    (_OR_QWEN37_MAX, "openrouter", "OR-Qwen3.7-Max"),     # Alibaba, via OpenRouter
 ]
 _MODELS_BY_LABEL: dict[str, tuple[str, str, str]] = {label: (mid, prov, label) for mid, prov, label in APEX_MODELS}
 
 # Code defaults — engine_settings_db seeds its columns from these.
 DEFAULT_CHAMPION: str = "Claude-Sonnet"
 DEFAULT_FALLBACKS: tuple[str, ...] = ("GPT-5", "GPT-4o", "o3")
+
+SELECTION_MODES: tuple[str, ...] = ("champion", "random_pool")
+DEFAULT_SELECTION_MODE: str = "champion"
+DEFAULT_RANDOM_POOL: tuple[str, ...] = ("GPT-5", "DeepSeek-Chat")      # OpenAI or DeepSeek, one per ticker per day
 
 APEX_TIMEOUT: float = 90.0   # seconds before abandoning a model and moving down the fallback list
 
@@ -89,6 +107,12 @@ class ModelResult:
     fallback_model: str = ""
     role:          str = ROLE_CHAMPION      # prediction_role for the rows this result produces
     fallback_reason: str = ""               # why the previous model was abandoned ("timeout", ...)
+    selection:     str = ""                 # how the first model was chosen: "champion" or "random pick from A | B | C"
+
+    @property
+    def winner(self) -> "SinglePrediction | None":
+        """The attempt that produced the result (carries the exact litellm model id and the provider)."""
+        return next((a for a in reversed(self.individuals) if a.succeeded), None)
 
 
 @dataclass(frozen=True)
@@ -98,17 +122,23 @@ class ModelPlan:
     fallbacks:      tuple[tuple[str, str, str], ...]
     challenger:     tuple[str, str, str] | None = None
     challenger_pct: float = 0.0
+    selection_mode: str = "champion"                       # "random_pool": plan_for_ticker picks the champion from `pool` per ticker
+    pool:           tuple[tuple[str, str, str], ...] = ()
+    picked_from:    str = ""                               # set on a resolved plan: "GPT-5 | DeepSeek-Chat", for the log
 
     def describe(self) -> str:
         fb = " → ".join(m[2] for m in self.fallbacks) or "none"
         ch = f"{self.challenger[2]} on {self.challenger_pct:g}% of tickers" if self.challenger else "off"
+        if self.selection_mode == "random_pool" and self.pool:
+            return f"random pool [{' | '.join(m[2] for m in self.pool)}] (one per ticker per day) · fallbacks {fb} · challenger {ch}"
         return f"champion {self.champion[2]} · fallbacks {fb} · challenger {ch}"
 
 
 # ── Model plan ─────────────────────────────────────────────────────────────────
 
 def build_model_plan(champion: str | None = None, fallbacks: list[str] | tuple[str, ...] | None = None,
-                     challenger: str | None = None, challenger_pct: float | None = 0.0) -> ModelPlan:
+                     challenger: str | None = None, challenger_pct: float | None = 0.0,
+                     selection_mode: str | None = None, random_pool: list[str] | tuple[str, ...] | None = None) -> ModelPlan:
     """
     Resolve configured labels against APEX_MODELS. An unknown champion falls
     back to DEFAULT_CHAMPION and unknown fallback entries are dropped — each with
@@ -142,11 +172,30 @@ def build_model_plan(champion: str | None = None, fallbacks: list[str] | tuple[s
         elif pct > 0:
             chall = _MODELS_BY_LABEL[challenger]
 
+    mode = selection_mode or DEFAULT_SELECTION_MODE
+    if mode not in SELECTION_MODES:
+        _log.warning(f"  [apex] unknown selection mode {mode!r} in engine_settings — using {DEFAULT_SELECTION_MODE}",
+                     event_type="warning")
+        mode = DEFAULT_SELECTION_MODE
+    pool_labels: list[str] = []
+    for label in (DEFAULT_RANDOM_POOL if random_pool is None else random_pool):
+        if label not in _MODELS_BY_LABEL:
+            _log.warning(f"  [apex] unknown random-pool model {label!r} in engine_settings — skipped",
+                         event_type="warning", model=label)
+        elif label not in pool_labels:
+            pool_labels.append(label)
+    if mode == "random_pool" and len(pool_labels) < 2:
+        _log.warning(f"  [apex] random pool {pool_labels} has fewer than 2 usable models — using the champion plan",
+                     event_type="warning")
+        mode = "champion"
+
     return ModelPlan(
         champion=_MODELS_BY_LABEL[champ_label],
         fallbacks=tuple(_MODELS_BY_LABEL[m] for m in fb_labels),
         challenger=chall,
         challenger_pct=pct if chall else 0.0,
+        selection_mode=mode,
+        pool=tuple(_MODELS_BY_LABEL[m] for m in pool_labels) if mode == "random_pool" else (),
     )
 
 
@@ -164,7 +213,49 @@ def load_model_plan() -> ModelPlan:
         fallbacks=s.get("apex_fallback_models") or None,
         challenger=s.get("apex_challenger_model"),
         challenger_pct=s.get("apex_challenger_sample_pct"),
+        selection_mode=s.get("apex_selection_mode"),
+        random_pool=s.get("apex_random_pool") or None,
     )
+
+
+# Models whose provider refused for lack of credit in THIS process: not picked again from a random pool (the run would only burn a
+# failed call on every ticker that drew them). Cleared by restarting the process; a normal timeout or rate limit never lands here.
+_OUT_OF_CREDIT: set[str] = set()
+_CREDIT_MARKERS = ("insufficient balance", "insufficient_balance", "credit balance is too low", "payment required", "insufficient_quota",
+                   "insufficient credits", "requires more credits", "billing", "tier_not_allowed", "subscription tier")
+
+
+def _mark_if_out_of_credit(result: "SinglePrediction") -> None:
+    err = (result.error or "").lower()
+    if not result.succeeded and any(m in err for m in _CREDIT_MARKERS) and result.display_name not in _OUT_OF_CREDIT:
+        _OUT_OF_CREDIT.add(result.display_name)
+        _log.warning(f"  [apex] {result.display_name} refused for lack of credit — not picked from the random pool again in this run",
+                     event_type="warning", model=result.display_name)
+
+
+def pool_pick(ticker: str, as_of_date: str, labels: list[str] | tuple[str, ...]) -> str:
+    """
+    Which pool member a (ticker, date) draws: a hash, so it is spread evenly across tickers but never changes for the same ticker and day
+    (a re-run, or a second horizon, uses the same model). Pure.
+    """
+    bucket = int(hashlib.sha1(f"{ticker.upper()}|{as_of_date}|apex-pool".encode()).hexdigest()[:8], 16)
+    return labels[bucket % len(labels)]
+
+
+def plan_for_ticker(plan: ModelPlan, ticker: str, as_of_date: str) -> ModelPlan:
+    """
+    The plan this ticker runs under. A "champion" plan is returned unchanged. A "random_pool" plan becomes a champion plan whose champion is
+    the model the ticker drew; the other pool members come next as fallbacks, then the configured fallbacks. Models out of credit are not
+    drawn (unless every pool member is). The result has selection_mode "champion", so resolving it again changes nothing.
+    """
+    if plan.selection_mode != "random_pool" or not plan.pool:
+        return plan
+    usable = [m for m in plan.pool if m[2] not in _OUT_OF_CREDIT] or list(plan.pool)
+    picked = _MODELS_BY_LABEL[pool_pick(ticker, as_of_date, [m[2] for m in usable])]
+    rest = [m for m in plan.pool if m != picked]
+    fallbacks = rest + [m for m in plan.fallbacks if m != picked and m not in rest]
+    return ModelPlan(champion=picked, fallbacks=tuple(fallbacks), challenger=plan.challenger, challenger_pct=plan.challenger_pct,
+                     selection_mode="champion", pool=(), picked_from=" | ".join(m[2] for m in plan.pool))
 
 
 def challenger_selected(ticker: str, as_of_date: str, pct: float) -> bool:
@@ -191,20 +282,22 @@ def _failure_reason(result: SinglePrediction) -> str:
 
 # ── Public entry points ────────────────────────────────────────────────────────
 
-async def run_apex(ticker: str, prompt: str, *, plan: ModelPlan | None = None) -> ModelResult | None:
+async def run_apex(ticker: str, prompt: str, *, plan: ModelPlan | None = None, as_of_date: str | None = None) -> ModelResult | None:
     """
-    Run the champion model for *ticker*; on timeout / failover error / invalid
+    Run the champion model for *ticker* (under a random pool, the model the ticker draws); on timeout / failover error / invalid
     JSON, try each fallback in order. Returns None if every model fails —
     caller skips, no placeholder written.
     """
-    plan = plan or load_model_plan()
+    from datetime import date as _date
+    plan = plan_for_ticker(plan or load_model_plan(), ticker, as_of_date or _date.today().isoformat())
     chain = [plan.champion, *plan.fallbacks]
     attempts: list[SinglePrediction] = []
     reason = ""
 
     for i, (mid, prov, label) in enumerate(chain):
         role = ROLE_CHAMPION if i == 0 else ROLE_FALLBACK
-        why = "champion" if i == 0 else f"fallback {i}/{len(chain) - 1} after {attempts[-1].display_name} {reason}"
+        why = (("random pick from " + plan.picked_from if plan.picked_from else "champion") if i == 0
+               else f"fallback {i}/{len(chain) - 1} after {attempts[-1].display_name} {reason}")
         _log.info(
             f"  [apex] {ticker} — {label} ({why})",
             event_type="apex_model_select", ticker=ticker, model=label, role=role, reason=why,
@@ -225,9 +318,11 @@ async def run_apex(ticker: str, prompt: str, *, plan: ModelPlan | None = None) -
                 fallback_model=label if i > 0 else "",
                 role=role,
                 fallback_reason=reason if i > 0 else "",
+                selection=("random pick from " + plan.picked_from) if plan.picked_from else "champion",
             )
 
         reason = _failure_reason(result)
+        _mark_if_out_of_credit(result)
         nxt = chain[i + 1][2] if i + 1 < len(chain) else None
         if nxt:
             _log.warning(

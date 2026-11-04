@@ -186,8 +186,8 @@ def _count_for(table: str, date_col: str, date_from: str, date_to: str,
         return 0
 
 
-_HIGHER_MODELS    = ('Claude-Sonnet', 'GPT-4o', 'Claude-Sonnet + GPT-4o')
-_HIGHER_PROVIDERS = ('anthropic', 'openai')
+_HIGHER_MODELS    = ('Claude-Sonnet', 'GPT-4o', 'Claude-Sonnet + GPT-4o', 'DeepSeek-Chat', 'Mistral-Large', 'Magistral-Medium', 'OR-Grok-4.3', 'OR-Qwen3.7-Max')
+_HIGHER_PROVIDERS = ('anthropic', 'openai', 'deepseek')
 
 
 def _model_tier_sql(tier: str,
@@ -196,11 +196,11 @@ def _model_tier_sql(tier: str,
     """Returns (WHERE fragment, params) for model tier filtering on predictions table."""
     if tier == "Higher reasoning":
         ph = ','.join('?' * len(_HIGHER_MODELS))
-        return (f"({name_col} IN ({ph}) OR {prov_col} IN (?,?))",
+        return (f"({name_col} IN ({ph}) OR {prov_col} IN (?,?,?))",
                 list(_HIGHER_MODELS) + list(_HIGHER_PROVIDERS))
     if tier == "Lower reasoning":
         ph = ','.join('?' * len(_HIGHER_MODELS))
-        return (f"NOT ({name_col} IN ({ph}) OR {prov_col} IN (?,?))",
+        return (f"NOT ({name_col} IN ({ph}) OR {prov_col} IN (?,?,?))",
                 list(_HIGHER_MODELS) + list(_HIGHER_PROVIDERS))
     return "1=1", []
 

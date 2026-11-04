@@ -122,7 +122,7 @@ with st.sidebar:
 
     def _is_higher_reasoning(model_name: str) -> bool:
         n = model_name.lower()
-        return "claude" in n or "gpt-4" in n or "gpt-5" in n or "o3" in n
+        return "claude" in n or "gpt-4" in n or "gpt-5" in n or "o3" in n or "deepseek" in n or "mistral-large" in n or "magistral" in n or "or-grok" in n or "or-qwen" in n
 
     _all_model_names = _get_model_names(roles=VALIDATION_ROLES_WITH_LEGACY)
     _higher_names = [m for m in _all_model_names if _is_higher_reasoning(m)]

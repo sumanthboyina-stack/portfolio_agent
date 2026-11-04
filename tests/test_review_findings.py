@@ -199,7 +199,7 @@ def _fake_apex_pipeline(monkeypatch, *, composite_score, conviction_score, has_n
     monkeypatch.setattr(yft, "get_close", lambda t, d: 100.0)
     monkeypatch.setattr(yft, "get_trailing_return", lambda t, d: trailing_10d)
 
-    async def _fake_run_apex(ticker, prompt):
+    async def _fake_run_apex(ticker, prompt, **kw):
         from portfolio_agent.tools.apex_dual_run import ModelResult, SinglePrediction
         data = {"prediction": "BULLISH", "recommendation": "STRONG_BUY", "confidence": 7,
                 "composite_score": composite_score, "horizons": [

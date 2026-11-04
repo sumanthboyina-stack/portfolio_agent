@@ -39,6 +39,7 @@ from web.styles import (
 from web.lib import db_conn as _conn
 from web.data.predictions import _load_edge_data, _load_system_stats, _load_ticker_history, _cname
 from web.components.predictions_charts import _plot_price_chart, _plot_prob_full, _plot_score_radar, _prob_strip_html
+from web.components.trade_plan_view import render_row_plans
 
 
 # ── Pure helper functions ─────────────────────────────────────────────────────
@@ -424,6 +425,7 @@ def render_single_horizon_card(row: dict, card_key: str) -> None:
                 f'<div style="margin-top:3px">Edge: {edge_html}</div>',
                 unsafe_allow_html=True,
             )
+            render_row_plans([row])
         with btn_c:
             if st.button("View Details", key=card_key, use_container_width=True):
                 st.session_state["drill_ticker"] = ticker
@@ -489,6 +491,7 @@ def render_multi_horizon_card(ticker: str, horizon_rows: list[dict], card_key: s
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+            render_row_plans(horizon_rows)
             st.markdown(
                 f'<div style="font-size:0.75rem;color:{PRIMARY};font-style:italic;margin:4px 0 2px">'
                 f'Pattern: {pattern}</div>',
@@ -673,6 +676,7 @@ def render_drill_down(drill_ticker: str, drill_date: str | None, owner: str | No
     with _tab_val:
         render_valuation_tab(drill_ticker, key="drill_")
     with _tab_pred:
+        render_row_plans(drill_rows)
         # ── Reasoning ─────────────────────────────────────────────────────────────
         with st.expander("Reasoning", icon=material("notes"), expanded=True):
             reasoning = row.get("reasoning") or row.get("reasoning_text") or "—"

@@ -252,8 +252,8 @@ def render_investor_admin(ctx) -> None:
     if not _tile:
         return
     with _tile:
-        t_res, t_prof, t_quiz, t_fund, t_health, t_hz, t_edges, t_cad, t_src = st.tabs(
-            ["Default emergency reserve", "Profiles", "Quiz", "Fund data & snapshots", "Health thresholds", "Horizons by type", "Return buckets", "Schedule cadence", "Fund sources"])
+        t_res, t_prof, t_quiz, t_fund, t_health, t_hz, t_edges, t_cad, t_plan, t_src = st.tabs(
+            ["Default emergency reserve", "Profiles", "Quiz", "Fund data & snapshots", "Health thresholds", "Horizons by type", "Return buckets", "Schedule cadence", "Trade Plan", "Fund sources"])
 
         with t_res:
             ps = sdb.get_portfolio_settings()
@@ -502,6 +502,65 @@ def render_investor_admin(ctx) -> None:
                 _admin_call(lambda: svc.reset_horizon_cadence(ctx) if reset else
                             svc.update_horizon_cadence(ctx, picked_c, expected_version=es["version"]),
                             "Schedule cadence " + ("reset." if reset else "saved."))
+
+        with t_plan:
+            from portfolio_agent.tools import engine_settings_db as esdb
+            es = esdb.get_engine_settings()
+            tps = esdb.get_trade_plan_settings(es)
+            hzs = (5, 21, 63)
+            st.caption("The rules behind every trade plan: the stop sits an ATR multiple below the entry, the target is a multiple of "
+                       "that risk above it, and the time stop is the forecast horizon. The model sets none of these numbers. A change "
+                       "applies to NEW plans; plans already written are never rewritten.")
+            with st.form("admin_trade_plan"):
+                cols = st.columns(len(hzs))
+                stop_m, tgt_m, max_stop = {}, {}, {}
+                for c, h in zip(cols, hzs):
+                    stop_m[h] = c.number_input(f"{h}d stop (× ATR14)", 0.1, 20.0, float(tps["plan_stop_atr_mult"][h]), 0.25, key=f"tp_stop_{h}")
+                    tgt_m[h] = c.number_input(f"{h}d target (× risk)", 0.1, 20.0, float(tps["plan_target_r_multiple"][h]), 0.25, key=f"tp_tgt_{h}")
+                    max_stop[h] = c.number_input(f"{h}d widest stop %", 0.5, 100.0, float(tps["plan_max_stop_pct"][h] * 100), 0.5, key=f"tp_max_{h}",
+                                                 help="If the ATR stop is wider than this share of the entry price, the stock is 'too volatile' and gets no plan.")
+                min_rr = st.number_input("Minimum reward : risk", 0.1, 20.0, float(tps["plan_min_reward_risk"]), 0.1, key="tp_min_rr",
+                                         help="A plan whose target is closer than this multiple of its risk is dropped.")
+                st.markdown("**Most you may lose if the stop hits, as % of total portfolio value**")
+                lc = st.columns(3)
+                loss = {p: lc[i].number_input(p.title(), 0.05, 10.0, float(tps["plan_max_loss_pct_by_risk_profile"][p] * 100), 0.05, key=f"tp_loss_{p}")
+                        for i, p in enumerate(("conservative", "moderate", "aggressive"))}
+                st.caption(f"Engine settings version {es['version']}")
+                b1, b2 = st.columns(2)
+                save = b1.form_submit_button("Save", type="primary")
+                reset = b2.form_submit_button("Reset to defaults")
+            if save or reset:
+                _admin_call(lambda: svc.reset_trade_plan_settings(ctx) if reset else svc.update_trade_plan_settings(
+                    ctx, {"plan_stop_atr_mult": stop_m, "plan_target_r_multiple": tgt_m, "plan_min_reward_risk": min_rr,
+                          "plan_max_stop_pct": {h: round(v / 100, 6) for h, v in max_stop.items()},
+                          "plan_max_loss_pct_by_risk_profile": {p: round(v / 100, 6) for p, v in loss.items()}},
+                    expected_version=es["version"]), "Trade plan rules " + ("reset." if reset else "saved."))
+
+            st.markdown("**History replay (simulation)**")
+            sm = esdb.get_sim_settings(es)
+            st.caption("Each plan is replayed against the stock's own past daily bars: thousands of resampled futures, plus the same rule "
+                       "applied on every past day. It is not a forecast. 'Sim disagrees' flags a confident call (conviction at or above "
+                       "the first number) whose target is reached first less often than the second. Shadow only flags; cap also "
+                       "lowers conviction and composite score to 5.")
+            with st.form("admin_sim_settings"):
+                a1, a2, a3 = st.columns(3)
+                paths = a1.number_input("Simulated paths", 100, 100000, int(sm["sim_paths"]), 1000, key="sim_paths")
+                look = a2.number_input("History pool (trading days, min 250)", 250, 2500, int(sm["sim_lookback_days"]), 50, key="sim_look")
+                blk = a3.number_input("Block length (days)", 1, 30, int(sm["sim_block_len"]), 1, key="sim_blk",
+                                      help="Consecutive days drawn together, which keeps volatile and calm spells together.")
+                b1_, b2_, b3_ = st.columns(3)
+                fmc = b1_.number_input("Flag at conviction ≥", 0.0, 10.0, float(sm["sim_flag_min_conviction"]), 0.5, key="sim_fmc")
+                fpt = b2_.number_input("…and P(target first) below %", 1.0, 100.0, float(sm["sim_flag_max_p_target"] * 100), 1.0, key="sim_fpt")
+                mode = b3_.selectbox("Guardrail mode", list(esdb.SIM_GUARDRAIL_MODES),
+                                     index=list(esdb.SIM_GUARDRAIL_MODES).index(sm["sim_guardrail_mode"]), key="sim_mode")
+                c1_, c2_ = st.columns(2)
+                save_s = c1_.form_submit_button("Save", type="primary")
+                reset_s = c2_.form_submit_button("Reset to defaults")
+            if save_s or reset_s:
+                _admin_call(lambda: svc.reset_sim_settings(ctx) if reset_s else svc.update_sim_settings(
+                    ctx, {"sim_paths": int(paths), "sim_lookback_days": int(look), "sim_block_len": int(blk),
+                          "sim_flag_min_conviction": fmc, "sim_flag_max_p_target": round(fpt / 100, 6), "sim_guardrail_mode": mode},
+                    expected_version=es["version"]), "Simulation settings " + ("reset." if reset_s else "saved."))
 
         with t_src:
             from portfolio_agent.tools import fund_data_db as fdb

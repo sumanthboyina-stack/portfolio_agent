@@ -125,6 +125,23 @@ def _parse_args() -> argparse.Namespace:
              "prices, and score screener outcomes.",
     )
     p.add_argument(
+        "--backfill-plans",
+        action="store_true",
+        help="Write trade plans for stored shared forecasts that have none (needs --since). Each plan uses only data "
+             "on or before its own forecast date.",
+    )
+    p.add_argument(
+        "--backfill-sims",
+        action="store_true",
+        help="Simulate (from each stock's own past bars) every stored trade plan that has no simulation yet (needs --since). "
+             "Flags 'sim_disagrees' but never caps conviction.",
+    )
+    p.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        help="With --backfill-plans / --backfill-sims: the earliest forecast date to backfill.",
+    )
+    p.add_argument(
         "--weekly-analysis",
         action="store_true",
         help="Layer 3: weekly LLM pattern analysis of wrong predictions",
@@ -237,6 +254,32 @@ async def _main() -> None:
 
     if args.daily_research:
         await _run_daily_research_only(extra_tickers=tickers or None)
+        return
+
+    if args.backfill_sims:
+        from datetime import date as _date
+        if not args.since:
+            raise SystemExit("--backfill-sims needs --since YYYY-MM-DD")
+        try:
+            _date.fromisoformat(args.since)
+        except ValueError:
+            raise SystemExit(f"--since must be YYYY-MM-DD, got {args.since!r}")
+        from portfolio_agent.tools.plan_sim_db import backfill_sims
+        log.info(f"=== Backfill plan simulations since {args.since} ===", event_type="phase_start")
+        log.info(f"  {backfill_sims(args.since)}", event_type="summary")
+        return
+
+    if args.backfill_plans:
+        from datetime import date as _date
+        if not args.since:
+            raise SystemExit("--backfill-plans needs --since YYYY-MM-DD")
+        try:
+            _date.fromisoformat(args.since)
+        except ValueError:
+            raise SystemExit(f"--since must be YYYY-MM-DD, got {args.since!r}")
+        from portfolio_agent.tools.trade_plan_db import backfill_plans
+        log.info(f"=== Backfill trade plans since {args.since} ===", event_type="phase_start")
+        log.info(f"  {backfill_plans(args.since)}", event_type="summary")
         return
 
     if args.weekly_analysis:

@@ -41,6 +41,7 @@ from web.styles import (
 from web.chat.tools import _CHAT_TOOLS, _execute_chat_tool, _search_ticker_by_name
 from web.chat.rendering import (
     _build_plan, _render_plan_card, _render_prediction_card, render_action_permission_and_fit,
+    render_trade_plan_and_sizing,
 )
 from web.chat.orchestration import (
     _build_chat_history, _classify_intent,
@@ -513,6 +514,7 @@ for msg in st.session_state.messages:
                 _hist_ticker = msg["metadata"].get("ticker")
                 if _hist_ticker:
                     render_action_permission_and_fit(_hist_ticker, action="trade")
+                    render_trade_plan_and_sizing(_hist_ticker)
             else:
                 st.markdown(msg.get("content", ""))
 
@@ -897,6 +899,7 @@ if _has_message and (_has_ticker or _no_ticker):
                 st.divider()
                 _render_prediction_card(pred_data, elapsed, show_history=True)
                 render_action_permission_and_fit(ticker, action="trade")
+                render_trade_plan_and_sizing(ticker)
 
                 # Save prediction to predictions DB -- one row per horizon
                 from portfolio_agent.tools.prediction_db import (

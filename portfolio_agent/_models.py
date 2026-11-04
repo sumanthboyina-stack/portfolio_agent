@@ -10,23 +10,20 @@ Hierarchy principle:
 Task → model mapping (in priority order):
 
   triage    Gemini-2.5-Flash-Lite → Gemini-2.5-Flash → Groq-70B → Cerebras-120B
-            → OR-Nemotron-Nano → OR-Granite-8B
+            → OR-Nemotron-Nano
             → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
             Bulk news batch classification.
             ⚠ Cerebras has 8K context cap — batch size may need reducing when it kicks in.
 
   flash     Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
-            → OR-Granite-8B
             → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
             Fundamentals / research batch LLM.
 
   fast      Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
-            → OR-Ring-1T
             → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
             Clearance, technical. Uses ADK tools.
 
   analyst   GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3
-            → OR-Mistral-Med-3.5
             Macro regime, risk synthesis (morning/daily batch: Claude-Sonnet removed). Uses ADK tools.
 
   reasoning Claude-Sonnet → GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max
@@ -41,9 +38,8 @@ Task → model mapping (in priority order):
 
 OpenRouter (OR): gateway to 300+ models via single key (OPENROUTER_API_KEY).
   High-reasoning (analyst/reasoning): OR-Claude-Opus-4.8, OR-Qwen3.7-Max, OR-Grok-4.3
-  Free/cheap (triage/flash/fast):     OR-Owl-Alpha (free), OR-Laguna-M.1 (free),
-                                       OR-Nemotron-Nano (free), OR-Ring-1T (~$0.1/M),
-                                       OR-Granite-8B (~$0.05/M)
+  Free/cheap (triage):                 OR-Nemotron-Nano (free)
+  Removed (no longer on OpenRouter, 20261029): OR-Granite-8B, OR-Ring-1T, OR-Mistral-Med-3.5
 
 ModelSession: tracks the working model index across a batch of same-agent calls.
 Once a model fails within a batch, all subsequent tickers in that batch start at
@@ -82,6 +78,14 @@ from google.adk.models.lite_llm import LiteLlm
 from portfolio_agent.log import get_logger as _get_logger
 _log = _get_logger("models")
 
+# The keys live in .env. main.py / web/app.py load it, but chains are built at import time, so make sure it is read first
+# (never overrides a variable that is already set).
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv()
+except Exception:
+    pass
+
 # ── Provider model IDs ─────────────────────────────────────────────────────────
 
 _GROQ_70B          = "groq/llama-3.3-70b-versatile"
@@ -93,9 +97,27 @@ _SONNET            = "anthropic/claude-sonnet-4-6"
 _GPT_MINI          = "openai/gpt-4o-mini"   # cheap — same tier as Haiku / Groq-70B
 _GPT_4O            = "openai/gpt-4o"        # capable — same tier as Claude Sonnet
 _GPT_5             = "openai/gpt-5"         # high-reasoning — analyst/reasoning (APEX) tier only
+_DEEPSEEK_CHAT     = "deepseek/deepseek-chat"   # DeepSeek API (DEEPSEEK_API_KEY): APEX prediction model only, JSON mode + temperature supported
+# Mistral (MISTRAL_API_KEY). Lower-reasoning: pipeline triage / flash / fast chains. Higher-reasoning: APEX (analyst / reasoning chains
+# and the APEX model registry). ⚠ The current key is a restricted tier: Large is "not available in your subscription tier" and
+# Medium / Magistral / Small answer "rate limit exceeded" (20261030); only Ministral-8B, Nemo and Codestral worked.
+_MISTRAL_LARGE     = "mistral/mistral-large-latest"          # higher reasoning — APEX tier only
+_MAGISTRAL_MEDIUM  = "mistral/magistral-medium-latest"       # higher reasoning (thinking model) — APEX tier only
+_MISTRAL_SMALL     = "mistral/mistral-small-latest"          # lower reasoning — pipeline tiers
+_MINISTRAL_8B      = "mistral/ministral-8b-latest"           # lower reasoning — pipeline tiers
 _O3                = "openai/o3"            # high-reasoning — analyst/reasoning (APEX) tier only;
                                              # o-series doesn't support temperature != 1 — the
                                              # dual-run/reasoning call sites pass drop_params=True
+
+# Cloudflare Workers AI (CLOUDFLARE_API_KEY + CLOUDFLARE_ACCOUNT_ID). Lower-reasoning models for the pipeline tiers ONLY, never APEX.
+# They join the chains only when BOTH variables are set, so a missing account id cannot make every call fail first.
+_CF_LLAMA_70B      = "cloudflare/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+_CF_MISTRAL_SMALL  = "cloudflare/@cf/mistralai/mistral-small-3.1-24b-instruct"
+_CLOUDFLARE_READY  = bool(os.environ.get("CLOUDFLARE_API_KEY") and os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
+_CF_LOW: list[tuple[str, str, str]] = ([
+    (_CF_LLAMA_70B,     "cloudflare", "CF-Llama-3.3-70B"),
+    (_CF_MISTRAL_SMALL, "cloudflare", "CF-Mistral-Small-3.1"),
+] if _CLOUDFLARE_READY else [])
 
 # ── OpenRouter model IDs (prefix: openrouter/<provider>/<model>) ──────────────
 # High-reasoning — for analyst / reasoning (APEX) chains
@@ -165,8 +187,11 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
         (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
         (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
+        (_MISTRAL_SMALL,     "mistral",     "Mistral-Small"),
+        (_MINISTRAL_8B,      "mistral",     "Ministral-8B"),
+        *_CF_LOW,
         (_OR_NEMOTRON_FREE,  "openrouter",  "OR-Nemotron-Nano"),
-        (_OR_GRANITE_8B,     "openrouter",  "OR-Granite-4.1-8B"),
+        # OR-Granite-4.1-8B removed: 404, no provider serves it any more on OpenRouter (20261029)
         # OR-Laguna-M.1 removed: 5–10 min stalls (20260622)
         # OR-Ring-2.6-1T removed: 402 out-of-credits (20260624) — also stuck ModelSession
         # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
@@ -179,7 +204,10 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_GEMINI_FLASH_LITE, "google",      "Gemini-2.5-Flash-Lite"),
         (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
         (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
-        (_OR_GRANITE_8B,     "openrouter",  "OR-Granite-4.1-8B"),
+        (_MISTRAL_SMALL,     "mistral",     "Mistral-Small"),
+        (_MINISTRAL_8B,      "mistral",     "Ministral-8B"),
+        *_CF_LOW,
+        # OR-Granite-4.1-8B removed: 404, no longer on OpenRouter (20261029)
         # OR-Laguna-M.1 removed: 5–10 min stalls.
         # OR-Qwen3.6-Flash removed: 402 out-of-credits (20260622).
         # OR-Ring-2.6-1T removed: same 402 error (20260623).
@@ -193,7 +221,10 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_GEMINI_FLASH_LITE, "google",      "Gemini-2.5-Flash-Lite"),
         (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
         (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
-        (_OR_RING_1T,        "openrouter",  "OR-Ring-2.6-1T"),
+        (_MISTRAL_SMALL,     "mistral",     "Mistral-Small"),
+        (_MINISTRAL_8B,      "mistral",     "Ministral-8B"),
+        *_CF_LOW,
+        # OR-Ring-2.6-1T removed: no longer listed on OpenRouter (20261029)
         # OR-Laguna-M.1 removed: caused multi-minute stalls in batch runs
         # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
         (_GPT_MINI,          "openai",      "GPT-4o-mini"),
@@ -209,7 +240,9 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_OR_CLAUDE_OPUS48,  "openrouter",  "OR-Claude-Opus-4.8"),
         (_OR_QWEN37_MAX,     "openrouter",  "OR-Qwen3.7-Max"),
         (_OR_GROK43,         "openrouter",  "OR-Grok-4.3"),
-        (_OR_MISTRAL_MED35,  "openrouter",  "OR-Mistral-Med-3.5"),
+        # OR-Mistral-Med-3.5 removed: no longer listed on OpenRouter (20261029)
+        (_MISTRAL_LARGE,     "mistral",     "Mistral-Large"),         # last: the current key's tier does not include it (20261030)
+        (_MAGISTRAL_MEDIUM,  "mistral",     "Magistral-Medium"),
     ],
     "reasoning": [
         # Used by the interactive APEX chat path (single-ticker linear failover).
@@ -224,7 +257,9 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         (_OR_CLAUDE_OPUS48, "openrouter",  "OR-Claude-Opus-4.8"),
         (_OR_QWEN37_MAX,    "openrouter",  "OR-Qwen3.7-Max"),
         (_OR_GROK43,        "openrouter",  "OR-Grok-4.3"),
-        (_OR_MISTRAL_MED35, "openrouter",  "OR-Mistral-Med-3.5"),
+        # OR-Mistral-Med-3.5 removed: no longer listed on OpenRouter (20261029)
+        (_MISTRAL_LARGE,    "mistral",     "Mistral-Large"),
+        (_MAGISTRAL_MEDIUM, "mistral",     "Magistral-Medium"),
     ],
 }
 
@@ -251,6 +286,9 @@ _PROVIDER_DOMAINS = (
     "openai.azure.com",
     "api.cerebras.ai",
     "openrouter.ai",
+    "api.deepseek.com",
+    "api.mistral.ai",
+    "api.cloudflare.com",
 )
 
 
@@ -299,9 +337,13 @@ def _is_failover_error(exc: BaseException) -> bool:
         "token limit",
         "quota exceeded",
         "payment required",             # 402 — standard HTTP phrasing
+        "insufficient balance",         # 402 — DeepSeek: account has no credit
+        "insufficient_balance",         # DeepSeek error type
         "requires more credits",        # 402 — OpenRouter phrasing
         "can only afford",              # 402 — OpenRouter token budget message
         "insufficient credits",
+        "tier_not_allowed",             # Mistral: model not in this key's subscription tier
+        "subscription tier",
         "billing",
         "not_found",                    # 404 — model deprecated / not available
         "notfounderror",

@@ -62,6 +62,15 @@ from web.components.validation_charts import (
 st.title(f"{material('track_changes')} APEX Prediction Validation")
 st.caption(f"System version: `{CURRENT_SYSTEM_VERSION}` · Scores predictions after they mature · Detailed diagnostics: Validation QA (admin)")
 
+from web.components.plan_validation_view import render_cap_recommendation_banner, render_plans_simulation
+
+render_cap_recommendation_banner(current_context("web:validation"))
+_view = st.segmented_control("Section", ["Predictions", "Plans & Simulation"], default="Predictions", key="val_section",
+                             label_visibility="collapsed")
+if _view == "Plans & Simulation":
+    render_plans_simulation()
+    st.stop()
+
 # ── Controls: Scope and Horizon are the only two on the page; the rest sit behind Advanced ──
 _SCOPE_LABELS = {"My Tickers": "My tickers", "All": "Everything APEX predicted"}
 _c_scope, _c_horizon, _c_adv = st.columns([2.4, 3.4, 1], vertical_alignment="bottom")

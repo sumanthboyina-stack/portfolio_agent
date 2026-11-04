@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from portfolio_agent.tools import bucket_edges as be
+from portfolio_agent.tools import trade_plan as _tp
 from portfolio_agent.tools.db import db_conn, migrate_columns
 
 _SOURCES = ("news", "research", "macro", "fundamentals", "valuation")
@@ -58,6 +59,13 @@ CADENCE_LABELS = {
 }
 SEED_HORIZON_CADENCE: dict[int, str] = {5: "weekly_monday", 21: "weekly_monday", 63: "monthly_first_trading_day",
                                         250: "quarterly_first_trading_day"}
+SIM_GUARDRAIL_MODES = ("shadow", "cap")
+SEED_SIM_SETTINGS: dict = {
+    "sim_paths": 10000, "sim_lookback_days": 500, "sim_block_len": 5,
+    "sim_flag_min_conviction": 7.0, "sim_flag_max_p_target": 0.35,
+    "sim_guardrail_mode": "shadow",       # shadow = flag only | cap = also cap conviction and composite to 5
+    "blend_min_n": 150,                   # matured rows a horizon needs before a blended probability is fitted
+}
 _UNSET = object()   # distinguishes "leave apex_challenger_model alone" from "clear it (None)"
 
 
@@ -108,7 +116,9 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Idempotent column additions. Fresh installs get them the same way (the
     CREATE above is the original shape), so there is exactly one definition."""
-    from portfolio_agent.tools.apex_dual_run import DEFAULT_CHAMPION, DEFAULT_FALLBACKS
+    from portfolio_agent.tools.apex_dual_run import (
+        DEFAULT_CHAMPION, DEFAULT_FALLBACKS, DEFAULT_RANDOM_POOL, DEFAULT_SELECTION_MODE,
+    )
 
     def _lit(s: str) -> str:
         return "'" + s.replace("'", "''") + "'"
@@ -118,12 +128,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("apex_fallback_models",       f"TEXT NOT NULL DEFAULT {_lit(json.dumps(list(DEFAULT_FALLBACKS)))}"),
         ("apex_challenger_model",      "TEXT"),                         # NULL = challenger off
         ("apex_challenger_sample_pct", "REAL NOT NULL DEFAULT 0"),      # 0–100, % of tickers
+        # "champion" (one fixed model) or "random_pool" (each ticker draws one model from apex_random_pool, per ticker per day)
+        ("apex_selection_mode",        f"TEXT NOT NULL DEFAULT {_lit(DEFAULT_SELECTION_MODE)}"),
+        ("apex_random_pool",           f"TEXT NOT NULL DEFAULT {_lit(json.dumps(list(DEFAULT_RANDOM_POOL)))}"),
         ("instrument_type_horizons_json", f"TEXT NOT NULL DEFAULT {_lit(json.dumps(SEED_INSTRUMENT_TYPE_HORIZONS))}"),
         # Horizon-scaled return buckets (see tools.bucket_edges): the current edges and their version. An existing row takes
         # the seed (version 2); version 1 is the old fixed ±1% / ±5% / 2% for every horizon and lives only in the history.
         ("horizon_bucket_edges_json",     f"TEXT NOT NULL DEFAULT {_lit(be.table_to_json(be.SEED_EDGES))}"),
         ("bucket_edges_version",          f"INTEGER NOT NULL DEFAULT {be.SEED_VERSION}"),
         ("horizon_cadence_json",          f"TEXT NOT NULL DEFAULT {_lit(json.dumps({str(h): r for h, r in SEED_HORIZON_CADENCE.items()}))}"),
+        # Deterministic trade plan rules (tools.trade_plan): stop / target multiples, minimum reward:risk, widest stop, loss budget.
+        ("trade_plan_json",               f"TEXT NOT NULL DEFAULT {_lit(json.dumps(_plan_to_json(_tp.seed_settings())))}"),
+        # Plan simulation (tools.plan_simulator): paths, history pool, block length, the disagreement flag and its guardrail mode.
+        ("sim_json",                      f"TEXT NOT NULL DEFAULT {_lit(json.dumps(SEED_SIM_SETTINGS))}"),
     ])
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bucket_edges_history (
@@ -173,6 +190,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     except (TypeError, ValueError):
         d["apex_fallback_models"] = []      # apex_dual_run.build_model_plan falls back to the code defaults
     try:
+        d["apex_random_pool"] = list(json.loads(d.get("apex_random_pool") or "[]"))
+    except (TypeError, ValueError):
+        d["apex_random_pool"] = []          # build_model_plan falls back to the default pool
+    try:
         stored = json.loads(d.get("instrument_type_horizons_json") or "{}")
     except (TypeError, ValueError):
         stored = {}
@@ -182,6 +203,8 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         stored_c = json.loads(d.get("horizon_cadence_json") or "{}")
     except (TypeError, ValueError):
         stored_c = {}
+    d.update(_plan_from_json(d.get("trade_plan_json")))
+    d.update(_sim_from_json(d.get("sim_json")))
     # a horizon (or an unknown rule) missing from the stored map takes the seed, never a guess
     d["horizon_cadence"] = {h: (stored_c.get(str(h)) if stored_c.get(str(h)) in CADENCE_RULES else r)
                             for h, r in SEED_HORIZON_CADENCE.items()}
@@ -190,6 +213,126 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     except (TypeError, ValueError, KeyError):
         d["horizon_bucket_edges"] = dict(be.SEED_EDGES)
     return d
+
+
+_PLAN_HORIZON_KEYS = ("plan_stop_atr_mult", "plan_target_r_multiple", "plan_max_stop_pct")
+_PLAN_PROFILES = ("conservative", "moderate", "aggressive")
+
+
+def _plan_to_json(settings: dict) -> dict:
+    return {k: ({str(h): v for h, v in val.items()} if k in _PLAN_HORIZON_KEYS else val) for k, val in settings.items()}
+
+
+def _plan_from_json(raw) -> dict:
+    """The five plan_* settings from their stored JSON; anything missing or unreadable takes the seed, never a guess."""
+    seed = _tp.seed_settings()
+    try:
+        stored = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        stored = {}
+    out: dict = {}
+    for k in _PLAN_HORIZON_KEYS:
+        got = stored.get(k) or {}
+        out[k] = {h: float(got.get(str(h), v)) for h, v in seed[k].items()}
+    got = stored.get("plan_max_loss_pct_by_risk_profile") or {}
+    out["plan_max_loss_pct_by_risk_profile"] = {p: float(got.get(p, v)) for p, v in seed["plan_max_loss_pct_by_risk_profile"].items()}
+    try:
+        out["plan_min_reward_risk"] = float(stored.get("plan_min_reward_risk", seed["plan_min_reward_risk"]))
+    except (TypeError, ValueError):
+        out["plan_min_reward_risk"] = seed["plan_min_reward_risk"]
+    return out
+
+
+def _validate_trade_plan(patch: dict, current: dict) -> dict:
+    """Merge a (partial) plan_* patch onto the current settings and validate the result. Returns the full merged dict."""
+    unknown = set(patch) - set(current)
+    if unknown:
+        raise ValueError(f"trade_plan: unknown setting(s) {sorted(unknown)}")
+    merged = {k: (dict(v) if isinstance(v, dict) else v) for k, v in current.items()}
+    for k, v in patch.items():
+        if isinstance(merged[k], dict):
+            if not isinstance(v, dict):
+                raise ValueError(f"{k}: expected a mapping")
+            keys = _PLAN_PROFILES if k == "plan_max_loss_pct_by_risk_profile" else _tp.SUPPORTED_HORIZONS
+            for kk, vv in v.items():
+                kk = str(kk).lower() if k == "plan_max_loss_pct_by_risk_profile" else int(kk)
+                if kk not in keys:
+                    raise ValueError(f"{k}: unsupported key {kk!r}; supported: {list(keys)}")
+                merged[k][kk] = float(vv)
+        else:
+            merged[k] = float(v)
+    for k in ("plan_stop_atr_mult", "plan_target_r_multiple"):
+        if any(not (0 < x <= 20) for x in merged[k].values()):
+            raise ValueError(f"{k}: every multiple must be > 0 and at most 20")
+    if any(not (0 < x <= 1) for x in merged["plan_max_stop_pct"].values()):
+        raise ValueError("plan_max_stop_pct: every value must be a fraction above 0 and at most 1 (0.08 = 8%)")
+    if any(not (0 < x <= 0.1) for x in merged["plan_max_loss_pct_by_risk_profile"].values()):
+        raise ValueError("plan_max_loss_pct_by_risk_profile: every value must be a fraction above 0 and at most 0.1 (10% of the portfolio)")
+    if not (0 < merged["plan_min_reward_risk"] <= 20):
+        raise ValueError("plan_min_reward_risk: must be > 0 and at most 20")
+    return merged
+
+
+def _sim_from_json(raw) -> dict:
+    """The sim_* settings from their stored JSON; anything missing or unreadable takes the seed, never a guess."""
+    try:
+        stored = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        stored = {}
+    out: dict = {}
+    for k, seed in SEED_SIM_SETTINGS.items():
+        v = stored.get(k, seed)
+        try:
+            out[k] = (v if v in SIM_GUARDRAIL_MODES else seed) if k == "sim_guardrail_mode" else \
+                     (int(v) if isinstance(seed, int) else float(v))
+        except (TypeError, ValueError):
+            out[k] = seed
+    return out
+
+
+def _validate_sim(patch: dict, current: dict) -> dict:
+    """Merge a (partial) sim_* patch onto the current settings and validate the result. Returns the full merged dict."""
+    unknown = set(patch) - set(SEED_SIM_SETTINGS)
+    if unknown:
+        raise ValueError(f"sim: unknown setting(s) {sorted(unknown)}")
+    merged = dict(current)
+    for k, v in patch.items():
+        if k == "sim_guardrail_mode":
+            if v not in SIM_GUARDRAIL_MODES:
+                raise ValueError(f"sim_guardrail_mode: must be one of {list(SIM_GUARDRAIL_MODES)}, got {v!r}")
+            merged[k] = v
+        elif isinstance(SEED_SIM_SETTINGS[k], int):
+            if isinstance(v, bool) or int(v) != float(v):
+                raise ValueError(f"{k}: must be a whole number, got {v!r}")
+            merged[k] = int(v)
+        else:
+            merged[k] = float(v)
+    from portfolio_agent.tools import plan_simulator as _ps
+    if not (100 <= merged["sim_paths"] <= 100_000):
+        raise ValueError("sim_paths: must be between 100 and 100000")
+    if not (_ps.MIN_HISTORY_BARS <= merged["sim_lookback_days"] <= 2500):
+        raise ValueError(f"sim_lookback_days: must be between {_ps.MIN_HISTORY_BARS} and 2500")
+    if not (1 <= merged["sim_block_len"] <= 30):
+        raise ValueError("sim_block_len: must be between 1 and 30")
+    if not (0 <= merged["sim_flag_min_conviction"] <= 10):
+        raise ValueError("sim_flag_min_conviction: must be between 0 and 10")
+    if not (0 < merged["sim_flag_max_p_target"] <= 1):
+        raise ValueError("sim_flag_max_p_target: must be above 0 and at most 1")
+    if not (30 <= merged["blend_min_n"] <= 100_000):
+        raise ValueError("blend_min_n: must be between 30 and 100000")
+    return merged
+
+
+def get_sim_settings(settings: dict | None = None) -> dict:
+    """Just the sim_* settings."""
+    s = settings or get_engine_settings()
+    return {k: s[k] for k in SEED_SIM_SETTINGS}
+
+
+def get_trade_plan_settings(settings: dict | None = None) -> dict:
+    """Just the plan_* settings, in the shape tools.trade_plan reads."""
+    s = settings or get_engine_settings()
+    return {k: s[k] for k in _tp.seed_settings()}
 
 
 def get_edges_history(version: int) -> dict[int, "be.Edges"] | None:
@@ -303,15 +446,21 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
                            apex_fallback_models: list[str] | None = None,
                            apex_challenger_model=_UNSET,
                            apex_challenger_sample_pct: float | None = None,
+                           apex_selection_mode: str | None = None,
+                           apex_random_pool: list[str] | None = None,
                            instrument_type_horizons: dict | None = None,
                            horizon_bucket_edges: dict | None = None,
                            horizon_cadence: dict | None = None,
+                           trade_plan: dict | None = None,
+                           sim: dict | None = None,
                            conn: sqlite3.Connection | None = None) -> dict:
     """
     Update one or more settings groups. Every weight dict is validated (exactly
     the five sources, non-negative) and normalized to sum to 1.0 so an admin's
     edit is never silently mis-weighted. APEX model labels must be known to
-    apex_dual_run.APEX_MODELS; apex_challenger_model=None turns the challenger
+    apex_dual_run.APEX_MODELS; apex_selection_mode is "champion" (one fixed model) or
+    "random_pool" (each ticker draws one model from apex_random_pool, at least 2, per
+    ticker per day — see apex_dual_run.plan_for_ticker); apex_challenger_model=None turns the challenger
     off; apex_challenger_sample_pct is a percentage 0–100. Raises ValueError on
     bad input, VersionConflict-style RuntimeError if expected_version is stale.
 
@@ -321,6 +470,13 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
 
     horizon_cadence: {horizon_days: rule} with rule in CADENCE_RULES (a partial dict changes only the horizons given); read by the
     scheduled batch on its next run.
+
+    trade_plan: a (partial) {plan_stop_atr_mult, plan_target_r_multiple, plan_min_reward_risk, plan_max_stop_pct,
+    plan_max_loss_pct_by_risk_profile} patch merged onto the current values and validated (see tools.trade_plan). Plans already
+    written are immutable and keep the rules_version they were made under; a change applies to NEW plans.
+
+    sim: a (partial) {sim_paths, sim_lookback_days, sim_block_len, sim_flag_min_conviction, sim_flag_max_p_target,
+    sim_guardrail_mode} patch, merged and validated (see tools.plan_simulator). Takes effect on the next simulation.
 
     conn: join the caller's transaction (nothing is committed here, so a settings change and its audit event can land
     together). The caller must have touched the engine-settings table once beforehand (get_engine_settings()) so its
@@ -355,6 +511,16 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
     if apex_challenger_model is not _UNSET:
         fields["apex_challenger_model"] = (None if apex_challenger_model in (None, "")
                                            else _check_model_label(apex_challenger_model, "apex_challenger_model"))
+    if apex_random_pool is not None:
+        pool = list(dict.fromkeys(_check_model_label(m, "apex_random_pool") for m in apex_random_pool))
+        if len(pool) < 2:
+            raise ValueError(f"apex_random_pool needs at least 2 different models, got {pool}")
+        fields["apex_random_pool"] = json.dumps(pool)
+    if apex_selection_mode is not None:
+        from portfolio_agent.tools.apex_dual_run import SELECTION_MODES
+        if apex_selection_mode not in SELECTION_MODES:
+            raise ValueError(f"apex_selection_mode must be one of {list(SELECTION_MODES)}, got {apex_selection_mode!r}")
+        fields["apex_selection_mode"] = apex_selection_mode
     if apex_challenger_sample_pct is not None:
         if not (0.0 <= float(apex_challenger_sample_pct) <= 100.0):
             raise ValueError(f"apex_challenger_sample_pct must be between 0 and 100, got {apex_challenger_sample_pct}")
@@ -365,6 +531,11 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
     if horizon_cadence is not None:
         merged_c = {**get_engine_settings(conn=conn)["horizon_cadence"], **_validate_cadence(horizon_cadence)}
         fields["horizon_cadence_json"] = json.dumps({str(h): r for h, r in sorted(merged_c.items())})
+    if trade_plan is not None:
+        merged_p = _validate_trade_plan(trade_plan, get_trade_plan_settings(get_engine_settings(conn=conn)))
+        fields["trade_plan_json"] = json.dumps(_plan_to_json(merged_p))
+    if sim is not None:
+        fields["sim_json"] = json.dumps(_validate_sim(sim, get_sim_settings(get_engine_settings(conn=conn))))
     bump_edges = False
     if horizon_bucket_edges is not None:
         current = get_engine_settings(conn=conn)["horizon_bucket_edges"]
@@ -418,6 +589,6 @@ def reset_engine_settings_to_defaults(*, updated_by: str) -> dict:
         horizon_base_weights={k: dict(v) for k, v in HORIZON_BASE_WEIGHTS.items()}, weight_floor=WEIGHT_FLOOR,
         no_news_conviction_threshold=7.0, no_news_cap=5.0, bounce_return_threshold=-0.05, bounce_cap=5.0,
         instrument_type_horizons={t: list(h) for t, h in SEED_INSTRUMENT_TYPE_HORIZONS.items()},
-        horizon_cadence=dict(SEED_HORIZON_CADENCE),
+        horizon_cadence=dict(SEED_HORIZON_CADENCE), trade_plan=_tp.seed_settings(), sim=dict(SEED_SIM_SETTINGS),
         horizon_bucket_edges={h: e for h, e in be.SEED_EDGES.items()},      # a CHANGE bumps the version; resetting to what is in force does not
     )

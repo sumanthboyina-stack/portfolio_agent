@@ -106,3 +106,15 @@ def _no_live_llm_extraction(monkeypatch):
     def _blocked(*args, **kwargs):
         raise RuntimeError("live LLM calls are blocked in tests")
     monkeypatch.setattr(litellm, "completion", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_atr_history(monkeypatch):
+    """
+    A trade plan's ATR falls back to an OHLC fetch when no stored technical snapshot is recent enough. No test may reach the
+    network: unless a test passes its own `fetch_history`, that fetch finds nothing (the plan is 'no_plan: missing_atr').
+    """
+    from portfolio_agent.tools import plan_sim_db, trade_plan_db
+    monkeypatch.setattr(trade_plan_db, "_default_fetch_history", lambda ticker, as_of: None)
+    monkeypatch.setattr(plan_sim_db, "_default_fetch_bars", lambda ticker: None)       # no bars -> 'insufficient_history'
+    plan_sim_db._bars_cache.clear()

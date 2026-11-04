@@ -48,12 +48,15 @@ class MarketOutlook:
     context_digest: str | None
     source: str                       # "reused" | "stale" | "unavailable"
     reason: str
+    # The shared, deterministic trade plan stored for that forecast (tools.trade_plan_db row), or None if none was written.
+    # Market data only: no portfolio or identity, so it belongs here and not in PortfolioFit.
+    plan: dict | None = None
 
     def to_dict(self) -> dict:
         return {"ticker": self.ticker, "horizon_days": self.horizon_days, "prediction": self.prediction,
                 "recommendation": self.recommendation, "composite_score": self.composite_score,
                 "as_of": self.as_of, "context_digest": self.context_digest, "source": self.source,
-                "reason": self.reason}
+                "reason": self.reason, "plan": self.plan}
 
 
 @dataclass(frozen=True)
@@ -66,9 +69,12 @@ class PortfolioFit:
     limits: list
     sizing: dict
     as_of: str
+    # Private: the owner's max-loss share count for the plan's stop (tools.trade_plan.size_position), computed at read time
+    # from their own portfolio. None when the forecast has no plan or the portfolio value is unknown.
+    plan_sizing: dict | None = None
 
     def to_dict(self) -> dict:
-        return {"status": self.status, "current_weight_pct": self.current_weight_pct,
+        return {"plan_sizing": self.plan_sizing, "status": self.status, "current_weight_pct": self.current_weight_pct,
                 "sector_concentration_pct": self.sector_concentration_pct,
                 "issuer_concentration_pct": self.issuer_concentration_pct, "fit_score": self.fit_score,
                 "limits": [c.to_dict() if hasattr(c, "to_dict") else c for c in self.limits],
@@ -142,6 +148,7 @@ def _market_outlook(ticker: str, horizon_days: int) -> MarketOutlook:
     from portfolio_agent.tools.prediction_db import SHARED_SCOPES, get_latest_prediction
     from portfolio_agent.tools.forecast_writer import prompt_policy_version, GUARDRAIL_VERSION
     from portfolio_agent.tools import run_planner
+    from portfolio_agent.tools.trade_plan_db import get_plan
 
     latest = get_latest_prediction(ticker, horizon_days=horizon_days, scopes=SHARED_SCOPES)
     if latest is None:
@@ -153,18 +160,53 @@ def _market_outlook(ticker: str, horizon_days: int) -> MarketOutlook:
         latest_shared_row=latest.to_dict(), current_evidence_refs=_current_evidence_refs(ticker),
         current_policy_version=prompt_policy_version(), current_guardrail_version=GUARDRAIL_VERSION,
     )
+    try:
+        plan = get_plan(latest.id) if latest.id is not None else None
+    except Exception:                      # a plan is additive: never let it hide the forecast itself
+        plan = None
     return MarketOutlook(
         ticker=ticker, horizon_days=horizon_days, prediction=latest.prediction, recommendation=latest.recommendation,
         composite_score=latest.composite_score, as_of=latest.created_at, context_digest=latest.context_digest,
-        source="reused" if reuse_ok else "stale", reason=reason,
+        source="reused" if reuse_ok else "stale", reason=reason, plan=plan,
     )
 
 
-def _portfolio_fit(ctx, ticker: str) -> PortfolioFit:
+def plan_sizing(ctx, plan: dict | None, *, total_value=None, ticker: str | None = None) -> dict | None:
+    """
+    Private: how many shares the owner's loss budget buys at this plan's stop, capped by their position limit. Computed
+    from the owner's own portfolio and policy at read time and NEVER stored, so it always reflects today's book. None if
+    there is no planned trade or the portfolio value is unknown.
+    """
+    if not plan or plan.get("plan_status") != "planned":
+        return None
+    from types import SimpleNamespace
+    from portfolio_agent.tools.engine_settings_db import get_trade_plan_settings
+    from portfolio_agent.tools.portfolio_policy import get_effective_policy
+    from portfolio_agent.tools.trade_plan import size_position
+
+    if total_value is None:
+        from portfolio_agent.tools.portfolio_assessment import build_portfolio_assessment
+        total_value = build_portfolio_assessment(ctx, ticker or plan.get("ticker") or "").exposures.get("total_value")
+    if not isinstance(total_value, (int, float)) or total_value <= 0:
+        return None
+    policy = get_effective_policy(ctx)
+    out = size_position(SimpleNamespace(**plan), total_value, policy.profile, policy.max_position_pct,
+                        get_trade_plan_settings()).to_dict()
+    out["portfolio_value"] = round(float(total_value), 2)
+    out["risk_profile"] = str(policy.profile).lower()
+    return out
+
+
+def _portfolio_fit(ctx, ticker: str, plan: dict | None = None) -> PortfolioFit:
     from portfolio_agent.tools.portfolio_assessment import build_portfolio_assessment
 
     pa = build_portfolio_assessment(ctx, ticker)
+    try:
+        sizing_for_plan = plan_sizing(ctx, plan, total_value=pa.exposures.get("total_value"))
+    except Exception:
+        sizing_for_plan = None
     return PortfolioFit(
+        plan_sizing=sizing_for_plan,
         status=pa.fit.get("status", "OK"), current_weight_pct=pa.exposures.get("current_weight_pct"),
         sector_concentration_pct=pa.exposures.get("sector_concentration_pct"),
         issuer_concentration_pct=pa.exposures.get("issuer_concentration_pct"), fit_score=pa.fit.get("fit_score"),
@@ -199,7 +241,7 @@ def compose_decision(ctx, ticker: str, *, action: str = "trade", horizon_days: i
     """
     ticker = ticker.upper().strip()
     market_outlook = _market_outlook(ticker, horizon_days)
-    portfolio_fit = _portfolio_fit(ctx, ticker)
+    portfolio_fit = _portfolio_fit(ctx, ticker, market_outlook.plan)
     action_permission = _action_permission(ctx, ticker, action)
 
     # The ONLY field a caller should render as "what to do" — already

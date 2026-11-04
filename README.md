@@ -51,6 +51,8 @@ Copy `.env.example` to `.env` and fill in the values you want to use. Keys marke
 | `FINNHUB_API_KEY` | Recommended | Sell-side consensus, price targets, news, SEC filings. Free tier available at [finnhub.io](https://finnhub.io) |
 | `FINRA_API_KEY` | Recommended | Short interest data (FINRA Datasets API). Bearer token; twice-monthly pulls |
 | `EDGAR_USER_AGENT` | Optional | SEC EDGAR filing pull (`Firstname Lastname email@domain.com` format) |
+| `MISTRAL_API_KEY` | Optional | Mistral. Lower-reasoning models (`Mistral-Small`, `Ministral-8B`) sit in the news / fundamentals / research / clearance / technical chains; higher-reasoning models (`Mistral-Large`, `Magistral-Medium`) are APEX prediction models and last in the analyst / reasoning chains. A free-tier key may not include Large / Medium / Magistral ("not available in your subscription tier") or rate-limits them; those then fail over to the next model |
+| `DEEPSEEK_API_KEY` | Optional | DeepSeek (`DeepSeek-Chat`) — an APEX prediction model, usable in the random pool or as a fallback/challenger. Get a key and add credit at [platform.deepseek.com](https://platform.deepseek.com/). Without credit the API answers "Insufficient Balance" and APEX falls back to the next model |
 | `GROQ_API_KEY` | Optional | Additional model provider in the multi-model failover chain |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Optional | Gemini models; first in the failover chain |
 | `CEREBRAS_API_KEY` | Optional | Additional model provider in the failover chain |
@@ -206,8 +208,14 @@ APEX uses one **champion** model for every prediction, so the validation record 
 | `apex_fallback_models` | `["GPT-5", "GPT-4o", "o3"]` | Tried in this order, only when the model before it failed |
 | `apex_challenger_model` | none (off) | Optional second model run on the same prompt for comparison |
 | `apex_challenger_sample_pct` | `0` | % of tickers (0–100) that also get a challenger run |
+| `apex_selection_mode` | `champion` | `champion` = one fixed model for everything; `random_pool` = each ticker draws one model from `apex_random_pool` |
+| `apex_random_pool` | `["GPT-5", "DeepSeek-Chat"]` | The models a ticker can draw in `random_pool` mode (at least 2 different ones) |
 
-No environment variable is needed; the defaults live in `portfolio_agent/tools/apex_dual_run.py`. To change them, call `update_engine_settings(updated_by=..., apex_champion_model=..., apex_fallback_models=[...], apex_challenger_model=..., apex_challenger_sample_pct=...)` from `portfolio_agent.tools.engine_settings_db` (labels must be one of `Claude-Sonnet`, `GPT-4o`, `GPT-5`, `o3`; `apex_challenger_model=None` turns the challenger off).
+Model labels: `Claude-Sonnet`, `GPT-4o`, `GPT-5`, `o3`, `DeepSeek-Chat` (DeepSeek's API, `DEEPSEEK_API_KEY`), `Mistral-Large` and `Magistral-Medium` (`MISTRAL_API_KEY`). The defaults live in `portfolio_agent/tools/apex_dual_run.py`.
+
+**Random pool (OpenAI or DeepSeek).** With `apex_selection_mode = random_pool`, each ticker's prediction is made by **one** model drawn from the pool, not by all of them. The draw is a hash of (ticker, date): random across tickers (about half each for two models), but the same ticker gets the same model all day, so a re-run or a second horizon never flips it. The drawn model is that run's champion (`prediction_role = champion`, `model_name` records which); the other pool members and then `apex_fallback_models` follow in order if it fails. A model whose account is out of credit is skipped as a draw for the rest of that run instead of failing on every ticker that would have drawn it. The configured `apex_champion_model` is ignored while the pool is on. Predictions from different models share one validation record, so compare them on Validation QA → Models rather than reading the combined number as one model's skill.
+
+**Changing the plan.** `python -m scripts.apex_models` shows the plan and whether each provider key is set; `python -m scripts.apex_models --pool GPT-5 DeepSeek-Chat` turns the pool on, `--champion GPT-5` goes back to one fixed model, `--fallbacks o3 GPT-4o` sets the fallbacks, `--challenger DeepSeek-Chat --challenger-pct 20` shadow-runs a model. From code: `update_engine_settings(updated_by=..., apex_selection_mode=..., apex_random_pool=[...], apex_champion_model=..., apex_fallback_models=[...], apex_challenger_model=..., apex_challenger_sample_pct=...)` in `portfolio_agent.tools.engine_settings_db` (`apex_challenger_model=None` turns the challenger off).
 
 Every stored prediction records its `prediction_role`:
 

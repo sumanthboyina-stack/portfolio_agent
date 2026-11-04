@@ -355,11 +355,80 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # backfill_instrument_types() below stamps them from the instruments table.
         ("instrument_type",             "TEXT"),
         ("leverage_factor",             "REAL"),
+        # The exact model that produced the row (litellm id, e.g. "openrouter/x-ai/grok-4.3"); model_name stays the display label.
+        ("model_id",                    "TEXT"),
     ])
     # Rows that predate prediction_role came from random per-run model selection.
     # Idempotent: once backfilled, no row is NULL again.
     _backfill(conn, "prediction_role IS NULL", "UPDATE predictions SET prediction_role = ? WHERE prediction_role IS NULL",
               [ROLE_LEGACY_RANDOM])
+    # Deterministic trade plan, one immutable row per shared forecast (tools.trade_plan / trade_plan_db).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trade_plans (
+            prediction_id   INTEGER PRIMARY KEY REFERENCES predictions(id),
+            plan_status     TEXT NOT NULL,
+            no_plan_reason  TEXT,
+            entry           REAL,
+            stop            REAL,
+            target          REAL,
+            risk_per_share  REAL,
+            reward_risk     REAL,
+            time_stop_date  TEXT,
+            atr_14          REAL,
+            llm_target      REAL,
+            rules_version   TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        )""")
+    # What the stock's own past bars say about that plan (tools.plan_simulator / plan_sim_db). Not a forecast.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS plan_simulations (
+            prediction_id             INTEGER PRIMARY KEY REFERENCES trade_plans(prediction_id),
+            sim_status                TEXT NOT NULL,
+            p_target_first            REAL,
+            p_stop_first              REAL,
+            p_timeout                 REAL,
+            p_target_first_zero_drift REAL,
+            expected_r                REAL,
+            p_close_above_entry       REAL,
+            end_ret_p05               REAL,
+            end_ret_p50               REAL,
+            end_ret_p95               REAL,
+            hist_n                    INTEGER,
+            hist_target               INTEGER,
+            hist_stop                 INTEGER,
+            hist_timeout              INTEGER,
+            hist_avg_r                REAL,
+            paths                     INTEGER,
+            block_len                 INTEGER,
+            lookback_days             INTEGER,
+            seed                      INTEGER,
+            sim_version               TEXT NOT NULL,
+            created_at                TEXT NOT NULL
+        )""")
+    # What actually happened to a plan (parallel to, never replacing, the direction / bucket scoring), and the blended-probability fits.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS plan_outcomes (
+            prediction_id INTEGER PRIMARY KEY REFERENCES trade_plans(prediction_id),
+            plan_outcome  TEXT NOT NULL,
+            realized_r    REAL,
+            exit_date     TEXT,
+            evaluated_at  TEXT NOT NULL
+        )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS blend_models (
+            horizon        INTEGER PRIMARY KEY,
+            a              REAL NOT NULL,
+            b              REAL NOT NULL,
+            c              REAL NOT NULL,
+            n              INTEGER NOT NULL,
+            brier_blend    REAL,
+            brier_sim_only REAL,
+            fitted_at      TEXT NOT NULL
+        )""")
+    for _verb in ("UPDATE", "DELETE"):         # a plan is the record of what was proposed on the day: never rewritten
+        conn.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS trade_plans_no_{_verb.lower()} BEFORE {_verb} ON trade_plans
+            BEGIN SELECT RAISE(ABORT, 'trade_plans rows are immutable'); END""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_role ON predictions(prediction_role, horizon_days)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_itype ON predictions(instrument_type, horizon_days)")
     # Rows that predate horizon-scaled bucket edges were made (and prompted) under the old fixed edges: version 1. Conditional
@@ -698,6 +767,7 @@ def insert_prediction(
     # What kind of security the ticker was at forecast time (None = unknown / pre-taxonomy) and its leverage.
     instrument_type: Optional[str] = None,
     leverage_factor: Optional[float] = None,
+    model_id: Optional[str] = None,
 ) -> dict:
     """
     Insert a new prediction row (append-only). One row per horizon per ticker per date.
@@ -743,7 +813,7 @@ def insert_prediction(
 
     try:
         with _db() as c:
-            c.execute(
+            cur = c.execute(
                 """INSERT INTO predictions
                        (ticker, created_at, as_of_date, horizon_days, prediction_type, evaluation_date,
                         predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -764,12 +834,12 @@ def insert_prediction(
                         weight_regime, weights_used, valuation_score, guardrail_flags, raw_conviction_score,
                         scope, origin, origin_run_id, origin_time_utc, owner_scope, evidence_refs,
                         policy_version, model_used, guardrail_version, history_lineage, context_digest,
-                        prediction_role, instrument_type, leverage_factor, bucket_edges_version)
+                        prediction_role, instrument_type, leverage_factor, bucket_edges_version, model_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     ticker, now_cst, today_str, horizon_days, prediction_type, evaluation_date,
                     predicted_direction, predicted_return_low, predicted_return_high, conviction_score,
@@ -799,11 +869,11 @@ def insert_prediction(
                     policy_version, model_used, guardrail_version,
                     json.dumps(history_lineage, default=str) if history_lineage else None,
                     context_digest,
-                    prediction_role, instrument_type, leverage_factor, int(bucket_edges_version),
+                    prediction_role, instrument_type, leverage_factor, int(bucket_edges_version), model_id,
                 ],
             )
             c.commit()
-        return {"saved": True, "ticker": ticker, "changed": bool(changed), "previous": prev_pred}
+        return {"saved": True, "ticker": ticker, "changed": bool(changed), "previous": prev_pred, "id": cur.lastrowid}
     except Exception as exc:
         return {"saved": False, "ticker": ticker, "error": str(exc)}
 

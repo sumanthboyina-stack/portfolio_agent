@@ -198,7 +198,7 @@ def _run_apex(monkeypatch, tickers, *, no_price=(), horizons=(5,)):
     monkeypatch.setattr(yft, "get_trailing_return", lambda t, d: 0.01)
     called: list[str] = []
 
-    async def _fake_run_apex(ticker, prompt):
+    async def _fake_run_apex(ticker, prompt, **kw):
         called.append(ticker)
         return _model_result(ticker)
     monkeypatch.setattr(adr, "run_apex", _fake_run_apex)

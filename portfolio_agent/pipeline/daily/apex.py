@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from datetime import date
 
@@ -100,7 +101,7 @@ async def _run_daily_apex(
         get_trailing_return as _get_trailing_return,
     )
     from portfolio_agent.tools.apex_dual_run import run_apex as _run_apex
-    from portfolio_agent.tools.apex_dual_run import challenger_selected, load_model_plan, run_challenger
+    from portfolio_agent.tools.apex_dual_run import challenger_selected, load_model_plan, plan_for_ticker, run_challenger
     from portfolio_agent.domain import FUND_INSTRUMENT_TYPES, NO_PREDICTION_TYPES, InstrumentType
     from portfolio_agent.services.context import system_context
     from portfolio_agent.services.instrument_classifier import ensure_classified
@@ -141,6 +142,7 @@ async def _run_daily_apex(
     model_plan = load_model_plan()
     log.info(f"  APEX model plan: {model_plan.describe()}", event_type="apex_model_plan",
              champion=model_plan.champion[2], fallbacks=[m[2] for m in model_plan.fallbacks],
+             selection_mode=model_plan.selection_mode, pool=[m[2] for m in model_plan.pool],
              challenger=model_plan.challenger[2] if model_plan.challenger else None,
              challenger_pct=model_plan.challenger_pct)
 
@@ -312,7 +314,10 @@ async def _run_daily_apex(
         (horizons saved, error strings)."""
         data             = result.merged
         model_label_used = "+".join(result.model_sources)
-        model_prov_used  = result.model_sources[0].split("-")[0].lower()
+        _winner          = getattr(result, "winner", None)
+        # the real provider and exact litellm id of the model that answered (from the registry), not a guess from its label
+        model_prov_used  = (_winner.provider if _winner else None) or result.model_sources[0].split("-")[0].lower()
+        model_id_used    = _winner.model_id if _winner else None
         _mctx            = mctx_map[ticker]
         _itype           = getattr(_mctx, "instrument_type", None)
         _is_fund         = _itype in FUND_INSTRUMENT_TYPES
@@ -339,6 +344,7 @@ async def _run_daily_apex(
             panel_summary=data.get("panel_summary", {}),
             model_name=model_label_used,
             model_provider=model_prov_used,
+            model_id=model_id_used,
             pt_mean=_ctx_res.get("price_target_avg"),
             pt_median=_ctx_res.get("price_target_median"),
             pt_high=_ctx_res.get("price_target_high"),
@@ -391,6 +397,7 @@ async def _run_daily_apex(
             _prov = ForecastProvenance(
                 origin="pipeline.apex", model_used=f"{model_prov_used}:{model_label_used}",
                 policy_version=policy_version, guardrail_version=GUARDRAIL_VERSION,
+                extra_evidence={"model_selection": getattr(result, "selection", "") or "champion"},
             )
             save   = write_shared_forecast(
                 mctx_map[ticker], _prov,
@@ -422,11 +429,28 @@ async def _run_daily_apex(
             )
             if save.get("saved"):
                 saved.append(h_days)
+                try:        # deterministic entry/stop/target; a failure here never touches the forecast or the run
+                    from portfolio_agent.tools.trade_plan_db import create_plan_for_prediction
+                    create_plan_for_prediction(save["id"])
+                except Exception as exc:
+                    log.warning(f"  [plan] {ticker} {h_days}d trade plan not created: {exc}",
+                                event_type="warning", ticker=ticker)
+                else:
+                    try:    # the stock's own history replayed against that plan; in its own guard, after the plan exists
+                        from portfolio_agent.tools.plan_sim_db import create_simulation_for_prediction
+                        _t_sim = time.perf_counter()
+                        _sim = create_simulation_for_prediction(save["id"])
+                        if _sim is not None:
+                            sim_timings.append(time.perf_counter() - _t_sim)
+                    except Exception as exc:
+                        log.warning(f"  [sim] {ticker} {h_days}d plan simulation not created: {exc}",
+                                    event_type="warning", ticker=ticker)
             else:
                 errors.append(f"{h_days}d: {save.get('error', 'unknown error')}")
         return saved, errors
 
     completed: list[str] = []
+    sim_timings: list[float] = []      # seconds per plan simulation this run (see the timing line after the phase)
     failed:    list[str] = list(ctx_failed)
     challenger_rows = 0
 
@@ -455,7 +479,10 @@ async def _run_daily_apex(
             horizons_instruction=_build_horizons_instruction(ticker_horizons.get(ticker, scheduled_horizons), edges_table),
         )
 
-        result = await _run_apex(ticker, prompt)
+        # Under a random pool the ticker draws its model here (a hash of ticker + date: random across tickers, stable for the same one),
+        # so the challenger below is compared against the model that really made the call.
+        ticker_plan = plan_for_ticker(model_plan, ticker, today)
+        result = await _run_apex(ticker, prompt, plan=ticker_plan)
 
         if result is None:
             log.error(
@@ -532,9 +559,10 @@ async def _run_daily_apex(
         # ── Optional challenger: same prompt, same horizons the production row(s)
         # just covered. Kept outside the try above so a challenger problem never
         # changes the ticker's own completed/failed status.
-        if saved_horizons and model_plan.challenger and challenger_selected(ticker, today, model_plan.challenger_pct):
+        if (saved_horizons and model_plan.challenger and model_plan.challenger[2] != result.model_sources[0]
+                and challenger_selected(ticker, today, model_plan.challenger_pct)):
             try:
-                ch = await run_challenger(ticker, prompt, model_plan)
+                ch = await run_challenger(ticker, prompt, ticker_plan)
                 if ch is not None:
                     ch_saved, ch_errors = _save_horizon_rows(
                         ticker, ch, saved_horizons,
@@ -563,6 +591,9 @@ async def _run_daily_apex(
 
     if tracker:
         tracker.finish_phase("apex", len(completed), len(failed))
+    if sim_timings:
+        log.info(f"  [sim] {len(sim_timings)} plan simulation(s) in {sum(sim_timings):.1f}s "
+                 f"(avg {sum(sim_timings) / len(sim_timings):.2f}s, max {max(sim_timings):.2f}s)", event_type="summary")
     log.info(
         f"\n  APEX phase done — {len(completed)} tickers · {len(failed)} failed"
         f"{f' · {len(skipped_by_type)} skipped by type' if skipped_by_type else ''}"

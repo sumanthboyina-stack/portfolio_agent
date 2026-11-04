@@ -411,6 +411,48 @@ def reset_horizon_cadence(ctx: RequestContext, *, reason: str | None = None) -> 
     return update_horizon_cadence(ctx, dict(esdb.SEED_HORIZON_CADENCE), reason=reason or "reset to defaults")
 
 
+def update_trade_plan_settings(ctx: RequestContext, patch: dict, *, expected_version: int | None = None,
+                               reason: str | None = None) -> dict:
+    """Admin: the deterministic trade plan rules (engine_settings; see tools.trade_plan). A partial {plan_*: value-or-mapping}
+    patch is merged and validated. Applies to NEW plans only: stored plans are immutable. One transaction with its audit
+    event. Returns the plan_* settings in force afterwards."""
+    require_admin(ctx)
+    from portfolio_agent.tools import engine_settings_db as esdb
+    esdb.get_engine_settings()                       # make sure the table exists BEFORE the write transaction opens
+    with _uow() as c:
+        before = esdb.get_trade_plan_settings(esdb.get_engine_settings(conn=c))
+        after = esdb.get_trade_plan_settings(esdb.update_engine_settings(
+            updated_by=ctx.actor, expected_version=expected_version, trade_plan=patch, conn=c))
+        _audit(ctx, c, "update_trade_plan_settings", before=before, after=after, reason=reason)
+    return after
+
+
+def reset_trade_plan_settings(ctx: RequestContext, *, reason: str | None = None) -> dict:
+    from portfolio_agent.tools import trade_plan as tp
+    return update_trade_plan_settings(ctx, tp.seed_settings(), reason=reason or "reset to defaults")
+
+
+def update_sim_settings(ctx: RequestContext, patch: dict, *, expected_version: int | None = None,
+                        reason: str | None = None) -> dict:
+    """Admin: the plan simulation settings (engine_settings; see tools.plan_simulator): paths, history pool, block length, the
+    sim-disagrees thresholds and the guardrail mode ('shadow' flags only, 'cap' also caps conviction). A partial patch is merged
+    and validated. One transaction with its audit event. Returns the sim_* settings in force afterwards."""
+    require_admin(ctx)
+    from portfolio_agent.tools import engine_settings_db as esdb
+    esdb.get_engine_settings()                       # make sure the table exists BEFORE the write transaction opens
+    with _uow() as c:
+        before = esdb.get_sim_settings(esdb.get_engine_settings(conn=c))
+        after = esdb.get_sim_settings(esdb.update_engine_settings(
+            updated_by=ctx.actor, expected_version=expected_version, sim=patch, conn=c))
+        _audit(ctx, c, "update_sim_settings", before=before, after=after, reason=reason)
+    return after
+
+
+def reset_sim_settings(ctx: RequestContext, *, reason: str | None = None) -> dict:
+    from portfolio_agent.tools import engine_settings_db as esdb
+    return update_sim_settings(ctx, dict(esdb.SEED_SIM_SETTINGS), reason=reason or "reset to defaults")
+
+
 def upsert_fund_issuer_source(ctx: RequestContext, ticker: str, issuer: str, url: str, enabled: bool, *, notes: str | None = None,
                               expected_version: int | None = None, reason: str | None = None) -> dict:
     """Admin: add or change the issuer holdings file (iShares / SPDR) used for one fund. The URL must be https on the issuer's own domain.

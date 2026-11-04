@@ -204,7 +204,7 @@ def _patch_pipeline(monkeypatch, *, champion: ModelResult, challenger=None):
     monkeypatch.setattr(yft, "get_close", lambda t, d: 100.0)
     monkeypatch.setattr(yft, "get_trailing_return", lambda t, d: 0.01)
 
-    async def _fake_run_apex(ticker, prompt):
+    async def _fake_run_apex(ticker, prompt, **kw):
         return champion
 
     challenger_calls: list[str] = []

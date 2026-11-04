@@ -287,6 +287,18 @@ def update_provisional_marks(today: Optional[date] = None, horizons: tuple[int, 
     return {"marked": marked, "skipped": skipped}
 
 
+def _record_plan_outcomes(today: date) -> dict:
+    """What actually happened to each matured trade plan (plan_sim_db.evaluate_matured_plans): a scorecard parallel to the
+    direction / bucket scoring below, which it never touches. Never raises into the evaluation run."""
+    try:
+        from portfolio_agent.tools.plan_sim_db import evaluate_matured_plans
+        return evaluate_matured_plans(today.isoformat())
+    except Exception as exc:
+        _log.warning(f"  [validation/L1] plan outcomes failed (non-fatal): {exc}", event_type="warning",
+                     error_type=type(exc).__name__)
+        return {"errors": 1}
+
+
 def evaluate_matured_predictions(today: Optional[date] = None, force: bool = False) -> dict:
     """
     Layer 1 — For each prediction whose evaluation_date is today or earlier and
@@ -308,7 +320,7 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
     if not pending:
         _log.info(f"  [validation/L1] No pending predictions due today — nothing to evaluate",
                   event_type="summary", count=0)
-        return {"evaluated": 0, "data_missing": 0, "errors": 0}
+        return {"evaluated": 0, "data_missing": 0, "errors": 0, "plan_outcomes": _record_plan_outcomes(today)}
 
     _log.info(f"  [validation/L1] Found {len(pending)} pending prediction(s) to evaluate",
               event_type="summary", count=len(pending))
@@ -439,7 +451,8 @@ def evaluate_matured_predictions(today: Optional[date] = None, force: bool = Fal
         _log.warning(f"  [validation/L1] filter_log backfill failed (non-fatal): {_fl_exc}",
                      event_type="warning", error_type=type(_fl_exc).__name__)
 
-    return {"evaluated": evaluated, "data_missing": data_missing, "errors": errors}
+    return {"evaluated": evaluated, "data_missing": data_missing, "errors": errors,
+            "plan_outcomes": _record_plan_outcomes(today)}
 
 
 # ── Layer 2: Rolling metrics ───────────────────────────────────────────────────
@@ -732,6 +745,29 @@ def _conv_bucket(r: dict):
     return ("conviction", h, "high" if c >= 7 else "low")
 
 
+SIM_P_BANDS = (("low", 0.0, 0.15), ("mid", 0.15, 0.35), ("high", 0.35, 1.01))   # simulated P(target first)
+
+
+def _sim_disagrees_key(r: dict):
+    """Rows that have a plan simulation, split by whether the sim_disagrees flag was raised."""
+    h, p = r.get("horizon_days"), r.get("sim_p_target")
+    if h is None or p is None:
+        return None
+    flagged = "sim_disagrees" in (r.get("guardrail_flags") or "")
+    return ("sim_disagrees", h, "flagged" if flagged else "not_flagged")
+
+
+def _sim_band_key(r: dict):
+    """Rows that have a plan simulation, split by how likely the stock's own history says the target is to come first."""
+    h, p = r.get("horizon_days"), r.get("sim_p_target")
+    if h is None or p is None:
+        return None
+    for name, lo, hi in SIM_P_BANDS:
+        if lo <= float(p) < hi:
+            return ("sim_p_target", h, name)
+    return None
+
+
 def _mine_segment_patterns(rows: list[dict]) -> list[dict]:
     """Run _segment_stats across the dimensions with reliable columns on every row."""
     def _regime(r):
@@ -748,7 +784,7 @@ def _mine_segment_patterns(rows: list[dict]) -> list[dict]:
         return ("trigger_type", r.get("trigger_type") or "scheduled")
 
     found: list[dict] = []
-    for key_fn in (_conv_bucket, _regime, _model, _trigger):
+    for key_fn in (_conv_bucket, _regime, _model, _trigger, _sim_disagrees_key, _sim_band_key):
         found.extend(_segment_stats(rows, key_fn))
     return found
 
@@ -767,6 +803,12 @@ def _describe_segment(key: tuple) -> str:
     if dim == "trigger_type":
         _, trig = key
         return f"trigger_type={trig}"
+    if dim == "sim_disagrees":
+        _, h, state = key
+        return f"{'sim-disagrees flagged' if state == 'flagged' else 'unflagged'} calls at {h}d horizon (plan simulation)"
+    if dim == "sim_p_target":
+        _, h, band = key
+        return f"{band} simulated target-first probability at {h}d horizon"
     return str(key)
 
 
@@ -820,6 +862,22 @@ def _promote_recurring_segments(current_flags: list[dict]) -> list[dict]:
     return candidates
 
 
+def _refit_blends_and_check_sim() -> dict | None:
+    """Weekly, before the report is written: refit the blended probabilities (plan_validation.fit_and_store_blends) and take the
+    'sim_disagrees vs both confident' snapshot the report carries for the cap recommendation. Never raises into the analysis."""
+    try:
+        from portfolio_agent.tools import plan_validation as pv
+        df = pv.load_plan_rows()
+        fits = pv.fit_and_store_blends(df)
+        _log.info("  [validation/L3] blend fits: " + (", ".join(f"{h}d {f['status']}" for h, f in sorted(fits.items())) or "no matured plans yet"),
+                  event_type="summary")
+        return pv.sim_check_snapshot(df)
+    except Exception as exc:
+        _log.warning(f"  [validation/L3] plan blend / sim check failed (non-fatal): {exc}", event_type="warning",
+                     error_type=type(exc).__name__)
+        return None
+
+
 def weekly_pattern_analysis() -> dict:
     """
     Layer 3 — statistically mine failure segments from the past week's
@@ -839,14 +897,18 @@ def weekly_pattern_analysis() -> dict:
     if existing:
         return {"skipped": True, "reason": "already ran this week"}
 
+    sim_check = _refit_blends_and_check_sim()
+
     _shared_sc, _shared_sp = scope_clause(SHARED_SCOPES)   # failure patterns are mined from market-only rows only
     with _db() as c:
         rows = c.execute(
             f"""SELECT ticker, horizon_days, predicted_direction, actual_direction,
                       predicted_return_low, predicted_return_high,
                       actual_return, outcome, conviction_score, raw_conviction_score,
-                      weight_regime, model_name, trigger_type, evaluated_at, error_magnitude
+                      weight_regime, model_name, trigger_type, evaluated_at, error_magnitude,
+                      guardrail_flags, ps.p_target_first AS sim_p_target
                FROM predictions
+               LEFT JOIN plan_simulations ps ON ps.prediction_id = predictions.id AND ps.sim_status = 'ok'
                WHERE evaluation_status = 'evaluated'
                  AND evaluated_at >= ?
                  AND horizon_days IS NOT NULL
@@ -879,7 +941,7 @@ def weekly_pattern_analysis() -> dict:
     if not segment_flags and len(wrong) < 5:
         insert_validation_report(
             "weekly",
-            {"segment_flags": [], "candidate_guardrails": candidate_guardrails},
+            {"segment_flags": [], "candidate_guardrails": candidate_guardrails, "sim_check": sim_check},
             "No statistically significant failure segments this week.",
             {"n_evaluated": len(rows), "n_wrong": len(wrong)},
         )
@@ -922,6 +984,7 @@ def weekly_pattern_analysis() -> dict:
 
         patterns_dict["segment_flags"] = segment_flags
         patterns_dict["candidate_guardrails"] = candidate_guardrails
+        patterns_dict["sim_check"] = sim_check
 
         insert_validation_report(
             "weekly",

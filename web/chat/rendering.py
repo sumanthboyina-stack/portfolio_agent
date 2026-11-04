@@ -319,6 +319,46 @@ def render_action_permission_and_fit(ticker: str, action: str = "trade") -> None
         st.caption(f"Portfolio fit could not be evaluated ({type(exc).__name__})")
 
 
+def render_trade_plan_and_sizing(ticker: str) -> None:
+    """
+    The deterministic trade plan for this ticker's latest SHARED forecasts (5d / 21d / 63d), plus the logged-in owner's private
+    sizing ("Max loss $X -> N shares"). The plan comes from the shared market forecast, never from this chat's own private
+    forecast (which gets no plan); the sizing is computed here from the owner's own portfolio and shown only to them.
+    Best-effort: a failure shows nothing rather than breaking the card.
+    """
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, get_latest_prediction
+    from portfolio_agent.tools.plan_sim_db import get_flagged_ids, get_raw_convictions, get_sim
+    from portfolio_agent.tools.trade_plan_db import get_plan
+    from web.auth import current_context
+    from web.components.trade_plan_view import blended_odds, plan_block_html
+
+    ticker = ticker.upper()
+    try:
+        ctx = current_context("web:chat")
+        from portfolio_agent.tools.decision_composer import plan_sizing
+        from portfolio_agent.tools.portfolio_assessment import build_portfolio_assessment
+        try:
+            total_value = build_portfolio_assessment(ctx, ticker).exposures.get("total_value")
+        except Exception:
+            total_value = None                      # no portfolio / not authorized: the plan still shows, sizing does not
+        blocks = []
+        for h in (5, 21, 63):
+            latest = get_latest_prediction(ticker, h, scopes=SHARED_SCOPES)
+            plan = get_plan(latest.id) if latest is not None and latest.id is not None else None
+            if not plan:
+                continue
+            sizing = plan_sizing(ctx, plan, total_value=total_value, ticker=ticker) if total_value else None
+            blocks.append(plan_block_html(plan, horizon_days=h, sizing=sizing, sim=get_sim(latest.id),
+                                          flagged=latest.id in get_flagged_ids([latest.id]),
+                                          blend_p=blended_odds(h, get_sim(latest.id), get_raw_convictions([latest.id]).get(latest.id))))
+        if blocks:
+            st.markdown("".join(blocks), unsafe_allow_html=True)
+            st.caption("Trade plan rules: stop = ATR multiple below entry, target = multiple of that risk, set by rules and not by the model. "
+                       "Sizing is private to you.")
+    except Exception:
+        return
+
+
 def _render_prediction_card(data: dict, elapsed: float = 0.0,
                              show_history: bool = True) -> None:
     rec   = data.get("recommendation", "HOLD")

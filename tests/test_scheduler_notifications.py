@@ -108,7 +108,7 @@ def _patch_apex_pipeline(monkeypatch, *, recommendation="BUY"):
     monkeypatch.setattr(yft, "get_close", lambda t, d: 100.0)
     monkeypatch.setattr(yft, "get_trailing_return", lambda t, d: 0.01)
 
-    async def _fake_run_apex(ticker, prompt):
+    async def _fake_run_apex(ticker, prompt, **kw):
         data = {"prediction": "BULLISH", "recommendation": recommendation, "confidence": 7,
                 "composite_score": 7.5, "horizons": [
                     {"horizon_days": 5, "predicted_direction": "UP", "predicted_return_low": 1.0,
