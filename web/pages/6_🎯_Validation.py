@@ -1,25 +1,20 @@
 """
 APEX Prediction Validation — the user-facing trust page: "is this reliable?"
 
-One screen, two visible controls: Scope (my tickers / everything APEX predicted) and Horizon (only
-horizons with enough evidence to say anything). Lookback, legacy predictions and price-based baselines
-live behind "Advanced" with sensible defaults. Then four score cards (each a plain question, one number,
-a verdict, the thing it is compared against, and a one-line reason) and two charts. Every number comes from
+One screen, no filters: a grid of the four checks (rows) across every horizon (columns) for the viewer's own
+holdings + watchlist, last 90 days, champion-model predictions only. Hover any number for a plain-English
+meaning and its likely range. Then two charts for the horizon with the most evidence. Every number comes from
 portfolio_agent.tools.validation_scorecard.compute_scorecard; this file only lays it out.
 
 Everything that used to be here beyond that — the nine-tile metric grid, outcome breakdown, the follow-every-BUY index,
 baselines, confusion matrix, ranking detail, model split, FLAT diagnostic, the scoring-snapshot tables — lives on the
 admin-only Validation QA page.
 
-Scope defaults to the viewer's own holdings + watchlist, with an explicit switch to the full shared prediction
-universe. Rows default to the champion model plan (champion + fallback); predictions from the earlier random-model era
-are hidden behind an "Include legacy predictions" switch and labelled as such, and challenger shadow rows never appear
-here (they are compared on Validation QA). Every filter narrows by *criteria*, never by an enumerable list of other
-people's specific tickers, so nothing here lets one viewer infer what somebody else holds or watches.
+Scope is fixed to the viewer's own holdings + watchlist, so nothing here lets one viewer infer what somebody else holds
+or watches. Legacy random-model predictions and challenger shadow rows never appear (see Validation QA).
 """
 from __future__ import annotations
 
-import html
 import sys
 from pathlib import Path
 
@@ -43,7 +38,7 @@ require_login()
 top_nav("validation")
 
 from portfolio_agent.tools.prediction_db import (
-    CURRENT_SYSTEM_VERSION, ROLE_LABELS, ROLE_LEGACY_RANDOM, VALIDATION_ROLES, VALIDATION_ROLES_WITH_LEGACY,
+    CURRENT_SYSTEM_VERSION, ROLE_LABELS, VALIDATION_ROLES,
 )
 from portfolio_agent.tools import validation_scorecard as scorecard_mod
 from web.data.validation import (
@@ -52,6 +47,7 @@ from web.data.validation import (
     _load_evaluated_predictions_df,
     build_scorecards,
 )
+from web.components.validation_grid import grid_html
 from web.components.validation_charts import (
     build_excess_by_recommendation_chart,
     build_rank_trend_chart,
@@ -71,82 +67,31 @@ if _view == "Plans & Simulation":
     render_plans_simulation()
     st.stop()
 
-# ── Controls: Scope and Horizon are the only two on the page; the rest sit behind Advanced ──
-_SCOPE_LABELS = {"My Tickers": "My tickers", "All": "Everything APEX predicted"}
-_c_scope, _c_horizon, _c_adv = st.columns([2.4, 3.4, 1], vertical_alignment="bottom")
-with _c_scope:
-    _seg_sel = st.radio(
-        "Scope", list(_SCOPE_LABELS), index=0, horizontal=True, key="val_segment",
-        format_func=_SCOPE_LABELS.get,
-        help="My tickers (default): your holdings + watchlist combined  ·  "
-             "Everything APEX predicted: the whole shared prediction universe, for context.",
-    )
-_advanced = _c_adv.popover("Advanced", icon=material("tune"), width="stretch")
-with _advanced:
-    lookback = st.selectbox(
-        "Lookback period", [30, 90, 365], index=1, key="val_lookback",
-        format_func=lambda x: f"{x} days",
-    )
-    _include_legacy = st.toggle(
-        "Include legacy predictions",
-        value=False,
-        key="val_include_legacy",
-        help="Predictions made before APEX switched to one champion model, when each run picked a random model "
-             "(Claude-Sonnet / GPT-4o / GPT-5 / o3). Mixed models, so not comparable over time — off by default.",
-    )
-_roles = VALIDATION_ROLES_WITH_LEGACY if _include_legacy else VALIDATION_ROLES
+# ── Fixed view (no filters): the viewer's own tickers, last 90 days, champion-model predictions ──
+_seg_sel = "My Tickers"
+lookback = 90
+_roles = VALIDATION_ROLES
 
 # Scoped to the viewer's OWN holdings/watchlist, not the shared union across every user.
 _ctx = current_context("web:validation")
 _portfolio_tickers = _load_portfolio_tickers(_ctx)
 _watchlist_tickers = _load_watchlist_tickers(_ctx)
 
-if _seg_sel != "My Tickers":
-    st.caption(f"{material('public')} Scope: **{_SCOPE_LABELS[_seg_sel]}** · all numbers recalculated for this scope.")
-
 # ── Data + scorecards ─────────────────────────────────────────────────────────
 
 eval_df = _load_evaluated_predictions_df(lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers, roles=_roles)
 horizons = sorted(int(h) for h in eval_df["horizon_days"].dropna().unique()) if not eval_df.empty else []
 
-_n_legacy_hidden = 0 if _include_legacy else len(_load_evaluated_predictions_df(
-    lookback, None, _seg_sel, _portfolio_tickers, _watchlist_tickers, roles=(ROLE_LEGACY_RANDOM,)))
-if _include_legacy:
-    st.caption(f"{material('history')} Includes legacy predictions from the random-model era — "
-               "mixed models, so read trends with care.")
-elif _n_legacy_hidden:
-    st.caption(f"{material('visibility_off')} {_n_legacy_hidden} legacy predictions (random model per run, before "
-               "champion selection) are hidden. Turn on **Include legacy predictions** under **Advanced** to see them.")
-
 if not horizons:
-    if _n_legacy_hidden:
-        st.info(
-            "No champion-model predictions have been scored yet in this scope — they mature 5–63 trading days "
-            "after they are made. Turn on **Include legacy predictions** under **Advanced** to see the earlier random-model record.",
-            icon=material("hourglass_top"),
-        )
-    else:
-        st.info(
-            "No evaluated predictions yet. "
-            f"Click {material('nights_stay')} **Evening** on the {material('calendar_month')} "
-            "Schedule page to score matured predictions.",
-            icon=material("info"),
-        )
+    st.info(
+        "No scored predictions yet. They are scored once they mature (5 to 63 trading days after they are made).",
+        icon=material("hourglass_top"),
+    )
     st.stop()
 
-# Momentum / SPY-prior-window baselines need one price fetch per ticker, so a big scope asks first.
+# Price-based baselines need one price fetch per ticker: automatic for a normal-size list, skipped for a very large one.
 _PRICE_AUTO_MAX_TICKERS = 60
-_n_tickers = int(eval_df["ticker"].nunique())
-_use_prices = _n_tickers <= _PRICE_AUTO_MAX_TICKERS
-if not _use_prices:
-    with _advanced:
-        _use_prices = st.toggle(
-            "Price-based baselines",
-            value=False,
-            key="val_price_baselines",
-            help=f"Needs price history for each of the {_n_tickers} tickers in this scope (cached 30 min). "
-                 "Off = the 'repeat the last move' comparisons are left out of the direction check.",
-        )
+_use_prices = int(eval_df["ticker"].nunique()) <= _PRICE_AUTO_MAX_TICKERS
 
 
 @st.cache_data(ttl=600, show_spinner="Scoring…")
@@ -160,101 +105,48 @@ except Exception as _exc:   # never let the yardstick take the page down
     st.error(f"Could not compute the scorecard: {_exc}", icon=material("error"))
     st.stop()
 
-# ── Horizon selector — only horizons with enough evidence to say something ───────────────────
-
 _H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day", 250: "250-Day"}
-_ready = [h for h in horizons if _cards[h].evidence.level != scorecard_mod.LEVEL_TOO_EARLY]
-_selectable = _ready or horizons          # nothing is ready yet: show everything as a preview rather than an empty page
-_not_ready = [h for h in horizons if h not in _selectable]
-if st.session_state.get("val_horizon") not in _selectable:
-    st.session_state.pop("val_horizon", None)
-_default_h = max(_selectable, key=lambda h: (_cards[h].evidence.n_dates, -h))   # the horizon with the most evidence
-with _c_horizon:
-    _h_sel = st.radio(
-        "Horizon", _selectable, index=_selectable.index(_default_h), horizontal=True, key="val_horizon",
-        format_func=lambda h: _H_LABELS.get(h, f"{h}d"),
-        help="How far ahead the prediction looked. Horizons are never mixed in one number.",
-    )
-if _not_ready:
-    st.caption(
-        f"{material('hourglass_top')} Not shown yet — too few prediction dates: "
-        + ", ".join(f"{_H_LABELS.get(h, f'{h}d')} ({_cards[h].evidence.n_dates} date{'s' if _cards[h].evidence.n_dates != 1 else ''})"
-                    for h in _not_ready)
-        + f". Verdicts switch on at {scorecard_mod.MIN_DATES_FOR_VERDICT} dates."
-    )
+# The horizon with the most evidence drives the headline and the charts; every horizon appears in the grid below.
+_h_sel = max(horizons, key=lambda h: (_cards[h].evidence.n_dates, -h))
 card = _cards[_h_sel]
 ev = card.evidence
 
-# ── Evidence banner = the headline ────────────────────────────────────────────
+# ── Headline: one plain sentence ───────────────────────────────────────────────
 
-_span = f"{ev.first_date} → {ev.last_date}" if ev.first_date else "—"
-_streaks = f", {ev.n_streaks} rating streaks" if ev.n_streaks is not None else ""
-_tally: dict[str, int] = {}
-for _it in card.items:
-    _tally[_it.verdict] = _tally.get(_it.verdict, 0) + 1
-_tally_text = " · ".join(f"{n} {v}" for v, n in sorted(_tally.items(), key=lambda kv: -kv[1]))
-_evidence_text = (
-    f"**{_H_LABELS.get(_h_sel, f'{_h_sel}d')} calls — evidence: {ev.level}** · {ev.n_dates} distinct prediction dates ({_span}) · "
-    f"{ev.n_nonoverlap} non-overlapping predictions ({ev.n_raw} total{_streaks}) · checks: {_tally_text}"
-)
+_hl = f"{ev.n_dates} days of results so far ({_H_LABELS.get(_h_sel, f'{_h_sel}d')} calls)"
 if ev.level == scorecard_mod.LEVEL_TOO_EARLY:
-    st.warning(
-        f"{_evidence_text}. Verdicts switch on at {scorecard_mod.MIN_DATES_FOR_VERDICT} dates; until then the numbers "
-        "below are shown but should be read as a preview, not a result.",
-        icon=material("hourglass_top"),
-    )
+    st.warning(f"{_hl}. Too early to judge; treat the numbers as a preview.", icon=material("hourglass_top"))
 elif ev.level == scorecard_mod.LEVEL_EARLY:
-    st.info(f"{_evidence_text}. Verdicts are allowed, but firm conclusions need {scorecard_mod.ESTABLISHED_DATES}+ dates.", icon=material("info"))
+    st.info(f"{_hl}. Still early; firm conclusions need {scorecard_mod.ESTABLISHED_DATES}+ days.", icon=material("info"))
 else:
-    st.success(_evidence_text, icon=material("check_circle"))
+    st.success(f"{_hl}.", icon=material("check_circle"))
 
-# ── Four score cards ──────────────────────────────────────────────────────────
+# ── Scorecard grid: four checks (rows) x every horizon (columns) ──────────────
 
-_VERDICT_COLORS = {
-    scorecard_mod.WORKING: "#059669",
-    scorecard_mod.UNPROVEN: "#D97706",
-    scorecard_mod.NOT_WORKING: "#DC2626",
-    scorecard_mod.TOO_EARLY: "#64748B",
-    scorecard_mod.INFO_ONLY: "#2563EB",
+_ROW_TITLES = {
+    "ranking": "Do BUY picks win?",
+    "direction": "Is the direction right?",
+    "probabilities": "Are the chances good?",
+    "ranges": "Does it land in range?",
 }
 
 
-def _esc(text: str) -> str:
-    return html.escape(text or "", quote=True)
+def _grid_html() -> str:
+    cols = [(_H_LABELS.get(h, f"{h}-Day"),
+             f"Predictions that looked {h} trading days ahead. {_cards[h].evidence.n_dates} days of results so far.") for h in horizons]
+    rows = [(_ROW_TITLES[key], scorecard_mod.plain_tooltip(_cards[horizons[0]].items[i]).split("\n")[0], [_cards[h].items[i] for h in horizons])
+            for i, key in enumerate(_ROW_TITLES)]
+    return grid_html(cols, rows)
 
 
-def _card_html(item: scorecard_mod.ScoreItem) -> str:
-    color = _VERDICT_COLORS.get(item.verdict, "#64748B")
-    baseline = f'<div style="font-size:.78rem;opacity:.75;margin:6px 0 2px">Compared with: {_esc(item.baseline_label)}</div>' if item.baseline_label else ""
-    sub = f'<div style="font-size:.76rem;opacity:.7;margin-bottom:6px">{_esc(item.subtitle)}</div>' if item.subtitle else ""
-    return (
-        f'<div title="{_esc(item.help_text)}" style="cursor:help">'
-        f'<div style="font-size:.84rem;font-weight:600;margin-bottom:2px">{_esc(item.title)} '
-        f'<span style="opacity:.55;font-weight:400">ⓘ</span></div>'
-        f'<div style="font-size:.76rem;opacity:.7;min-height:2.4em">{_esc(item.plain_question)}</div>'
-        f'<div style="font-size:2.1rem;font-weight:800;line-height:1.15;margin:6px 0">{_esc(item.display)}</div>'
-        f'<span style="background:{color}22;color:{color};border:1px solid {color}66;border-radius:20px;'
-        f'padding:2px 11px;font-size:.74rem;font-weight:700">{_esc(item.verdict)}</span>'
-        f'{baseline}{sub}'
-        f'<div style="font-size:.8rem;margin-top:8px;line-height:1.4">{_esc(item.one_line_reason)}</div>'
-        f'</div>'
-    )
-
-
-_cols = st.columns(len(card.items))
-for _col, _item in zip(_cols, card.items):
-    with _col:
-        with st.container(border=True):
-            st.markdown(_card_html(_item), unsafe_allow_html=True)
-
-st.caption("Hover a card for the technical definition. Ranges are 95% intervals that resample whole prediction dates, "
-           "because stocks predicted on the same day share one market move.")
+st.markdown(_grid_html(), unsafe_allow_html=True)
+st.caption("Hover any number for what it means and its likely range.")
 
 # ── Two charts ────────────────────────────────────────────────────────────────
 
 ch1, ch2 = st.columns(2)
 with ch1:
-    st.markdown(f"**Average return vs SPY, by rating** · {_H_LABELS.get(_h_sel, f'{_h_sel}d')} predictions only")
+    st.markdown(f"**Average return vs SPY, by rating** · {_H_LABELS.get(_h_sel, f'{_h_sel}d')}")
     if any(r["n"] for r in card.by_recommendation):
         st.plotly_chart(build_excess_by_recommendation_chart(card.by_recommendation), use_container_width=True)
     else:
@@ -271,8 +163,7 @@ with ch2:
 with st.expander("Prediction history", expanded=False):
     from portfolio_agent.tools.validation_engine import get_recent_evaluated_predictions
 
-    preds = [p for p in get_recent_evaluated_predictions(limit=500, lookback_days=lookback, roles=_roles)
-             if p.get("horizon_days") == _h_sel]
+    preds = get_recent_evaluated_predictions(limit=500, lookback_days=lookback, roles=_roles)
     _my_set = set(_portfolio_tickers) | set(_watchlist_tickers)
     if _seg_sel == "My Tickers" and _my_set and preds:
         preds = [p for p in preds if p.get("ticker", "").upper() in _my_set]
@@ -326,6 +217,7 @@ with st.expander("Prediction history", expanded=False):
             rows.append({
                 "Date":            p.get("as_of_date") or p.get("prediction_date") or "",
                 "Ticker":          p.get("ticker") or "",
+                "Horizon":         _H_LABELS.get(p.get("horizon_days"), f"{p.get('horizon_days')}-Day"),
                 "Predicted":       p.get("predicted_direction") or "—",
                 "Entry Price":     entry_price,
                 "Pred Range %":    rng_pct,
@@ -346,6 +238,7 @@ with st.expander("Prediction history", expanded=False):
             hide_index=True,
             column_config={
                 "Date":             st.column_config.Column(help="Date the prediction was made."),
+                "Horizon":          st.column_config.Column(help="How many trading days ahead the prediction looked."),
                 "Predicted":        st.column_config.Column(help="Predicted direction: UP, DOWN, or FLAT."),
                 "Entry Price":      st.column_config.Column(help="Price at the time the prediction was made."),
                 "Pred Range %":     st.column_config.Column(help="Predicted return range (low – high) over the horizon."),
@@ -360,4 +253,4 @@ with st.expander("Prediction history", expanded=False):
                 "Source":           st.column_config.Column(help="Champion: the configured APEX model · Fallback: a backup model used because the champion failed that run · Legacy (random model): made before champion selection."),
             },
         )
-        st.caption(f"{len(filtered)} of {len(preds)} evaluated {_H_LABELS.get(_h_sel, f'{_h_sel}d')} predictions shown.")
+        st.caption(f"{len(filtered)} of {len(preds)} evaluated predictions shown.")

@@ -55,7 +55,6 @@ Copy `.env.example` to `.env` and fill in the values you want to use. Keys marke
 | `DEEPSEEK_API_KEY` | Optional | DeepSeek (`DeepSeek-Chat`) — an APEX prediction model, usable in the random pool or as a fallback/challenger. Get a key and add credit at [platform.deepseek.com](https://platform.deepseek.com/). Without credit the API answers "Insufficient Balance" and APEX falls back to the next model |
 | `GROQ_API_KEY` | Optional | Additional model provider in the multi-model failover chain |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Optional | Gemini models; first in the failover chain |
-| `CEREBRAS_API_KEY` | Optional | Additional model provider in the failover chain |
 | `OPENROUTER_API_KEY` | Optional | Multi-provider routing via LiteLLM |
 
 ### Configure your portfolio and watchlist
@@ -232,7 +231,7 @@ Which model ran and why is logged with `event_type` `apex_model_plan` (once per 
 
 These phases use a multi-model failover chain. Models are tried in order until one succeeds:
 
-**Gemini → Groq → Cerebras → OpenRouter → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet**
+**Gemini → Groq → OpenRouter → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet**
 
 Keys for unused providers can be omitted; those models are skipped. The macro snapshot, dynamic weight computation, short interest trend computation, and validation are fully deterministic — no LLM is involved.
 

@@ -289,7 +289,7 @@ async def _fetch_market_context(log) -> str:
                 max_tokens=120,
             )
             market_context = (_sum_resp.choices[0].message.content or "").strip()
-            if "gemini" in _sum_model:
+            if "gemini" in _sum_model:  # defensive: Gemini no longer in triage chain
                 GEMINI_COUNTER.record(_sum_model)
         except Exception:
             market_context = "\n".join(
@@ -478,13 +478,13 @@ async def _run_news_llm_batches(
                         model=model_id,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.0,
-                        max_tokens=2000,
+                        max_tokens=8000,
                     )
                     raw_text = resp.choices[0].message.content or ""
                     analyses = _extract_json_array(raw_text)
                     if not analyses:
                         log.warning(
-                            f"  [warn] News batch {batch_num}: no JSON array, trying next model…",
+                            f"  [warn] News batch {batch_num}: no JSON array (finish={resp.choices[0].finish_reason}), trying next model…",
                             event_type="warning",
                         )
                         model_idx += 1

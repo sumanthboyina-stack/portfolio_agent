@@ -11,6 +11,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from portfolio_agent.tools import plan_validation as pv
+from portfolio_agent.tools import validation_scorecard as sc
+from web.components.validation_grid import grid_html
 
 _MIN_N = pv.MIN_CELL_N
 _H_LABELS = {5: "5-Day", 21: "21-Day", 63: "63-Day"}
@@ -89,109 +91,99 @@ def _table(rows: list[dict], cols: list[tuple[str, str]]) -> None:
                  use_container_width=True, hide_index=True)
 
 
+def _item(key: str, title: str, value, display: str, lo, hi, verdict_: str, n: int, n_dates: int, reason: str = "") -> sc.ScoreItem:
+    return sc.ScoreItem(key=key, title=title, plain_question="", value=value, display=display, ci_low=lo, ci_high=hi, baseline=0.0,
+                        baseline_label="", n=n, n_dates=n_dates, verdict=verdict_, one_line_reason=reason, help_text="")
+
+
+def plan_items(r: dict) -> list[sc.ScoreItem]:
+    """The three plan checks for one horizon, judged by the SAME rule as the Predictions grid: no verdict before
+    MIN_DATES_FOR_VERDICT prediction dates, and 'Working' / 'Not working' only when the whole 95% range is on one side of zero."""
+    nd = r["n_dates"]
+    e = r["edge"]
+    if not e.get("n") or e.get("edge") is None:
+        edge_item = _item("plan_edge", "", None, "—", None, None, sc.TOO_EARLY, 0, nd)
+    else:
+        edge_item = _item("plan_edge", "", e["edge"], _pts(e["edge"]), e.get("lo"), e.get("hi"),
+                          sc.verdict(nd, e.get("lo"), e.get("hi"), 0.0), e["n"], nd)
+    b = r["brier"]
+    if b.get("skill") is None:
+        cal_item = _item("plan_calibration", "", None, "—", None, None, sc.TOO_EARLY, b.get("n", 0), nd)
+    else:
+        cal_item = _item("plan_calibration", "", b["skill"], f"{b['skill'] * 100:+.0f}%", None, None,
+                         sc.verdict(nd, b.get("gain_lo"), b.get("gain_hi"), 0.0), b["n"], nd)
+    dg = r["disagreement"]
+    if dg["n_disagree"] < _MIN_N or dg["n_confident"] < _MIN_N or dg.get("rate_disagree") is None or dg.get("rate_confident") is None:
+        dis_item = _item("plan_disagree", "", None, "—", None, None, sc.TOO_EARLY, dg["n_disagree"], nd)
+    else:
+        diff = dg["rate_disagree"] - dg["rate_confident"]
+        v = sc.TOO_EARLY if nd < sc.MIN_DATES_FOR_VERDICT else (sc.NOT_WORKING if dg["significantly_worse"] else sc.UNPROVEN)
+        dis_item = _item("plan_disagree", "", diff, _pts(diff), None, None, v, dg["n_disagree"], nd)
+    return [edge_item, cal_item, dis_item]
+
+
+_PLAN_ROWS = [("plan_edge", "Does the model add edge?"), ("plan_calibration", "Is the simulator's chance right?"),
+              ("plan_disagree", "Do doubted calls do worse?")]
+
+
 def render_plans_simulation() -> None:
-    st.markdown("**How the plans actually turned out, and whether the history replay or the model's conviction predicted it better.** "
-                "A plan ends at its TARGET, its STOP (a day touching both counts as the stop) or its time stop (TIMEOUT).")
+    st.markdown("**Plans** are the target / stop levels APEX proposes for a stock, and the **simulator** replays history to estimate the chance "
+                "each plan reaches its target. This page checks, once plans have played out, whether those chances and the model's conviction held up.")
     try:
         report = _cached_report()
     except Exception as exc:
         st.error(f"Could not score the plans: {exc}")
         return
     if not report:
-        st.info("No plans have matured yet. A plan matures when its time stop passes (5, 21 or 63 trading days after the forecast); the "
-                "evening batch then records what happened.", icon=":material/hourglass_top:")
+        st.info("No plans have played out yet. They are scored after their time stop (5, 21 or 63 trading days).", icon=":material/hourglass_top:")
         return
     horizons = sorted(report)
-    default_h = max(horizons, key=lambda h: report[h]["n"])
-    h = st.radio("Horizon", horizons, index=horizons.index(default_h), horizontal=True, key="plan_val_horizon",
-                 format_func=lambda x: _H_LABELS.get(x, f"{x}d"))
-    r = report[h]
-    st.caption(f"{r['n']} matured plans across {r['n_dates']} prediction dates. Horizons are never mixed.")
+    best = max(horizons, key=lambda h: (report[h]["n_dates"], report[h]["n"]))
+    rb = report[best]
 
-    # c) the key number
+    hl = f"{rb['n_dates']} days of results so far ({_H_LABELS.get(best, f'{best}d')} plans)"
+    if rb["n_dates"] < sc.MIN_DATES_FOR_VERDICT:
+        st.warning(f"{hl}. Too early to judge; treat the numbers as a preview.", icon=":material/hourglass_top:")
+    elif rb["n_dates"] < sc.ESTABLISHED_DATES:
+        st.info(f"{hl}. Still early; firm conclusions need {sc.ESTABLISHED_DATES}+ days.", icon=":material/info:")
+    else:
+        st.success(f"{hl}.", icon=":material/check_circle:")
+
+    items = {h: plan_items(report[h]) for h in horizons}
+    cols = [(_H_LABELS.get(h, f"{h}-Day"), f"Plans with a {h}-day time stop. {report[h]['n']} played out so far, over {report[h]['n_dates']} days.")
+            for h in horizons]
+    rows = [(title, sc.plain_tooltip(items[horizons[0]][i]).split("\n")[0], [items[h][i] for h in horizons]) for i, (_, title) in enumerate(_PLAN_ROWS)]
+    st.markdown(grid_html(cols, rows), unsafe_allow_html=True)
+    st.caption("Hover any number for what it means and its likely range.")
+
+    with st.expander(f"Details ({_H_LABELS.get(best, f'{best}d')} plans)", expanded=False):
+        _details(rb)
+
+
+def _details(r: dict) -> None:
     edge = r["edge"]
     headline, reading = edge_headline(edge)
-    st.markdown("##### Does the model add edge beyond the simulator?")
-    c1, c2, c3 = st.columns([1.4, 1, 1])
-    c1.metric("Edge over the simulator", headline, help="Mean of (realized TARGET hit minus the simulator's P(target first)) over every matured plan.")
-    c1.caption(f"95% interval {_ci(edge.get('lo'), edge.get('hi'), _pts)} · n={edge['n']}")
-    c2.metric("Realized TARGET rate", _pct(edge.get("realized"), 1), help="How often the target really came first.")
-    c3.metric("Simulator said", _pct(edge.get("mean_sim"), 1), help="The average P(target first) the simulator gave.")
-    st.info(reading, icon=":material/insights:")
-    zd = edge.get("vs_zero_drift") or {}
-    st.caption(f"Against the no-edge baseline (the stock just wiggles, no drift): {_pts(zd.get('edge'))}, interval "
-               f"{_ci(zd.get('lo'), zd.get('hi'), _pts)}.")
-    st.markdown("**Edge by conviction band**")
-    _table([{**b, "edge_pts": None if b["edge"] is None else round(b["edge"] * 100, 1),
-             "ci": _ci(b["lo"], b["hi"], _pts) if b["n"] >= _MIN_N else None} for b in edge["by_band"]],
-           [("band", "Conviction"), ("n", "n"), ("edge_pts", "Edge (pts)"), ("ci", "95% interval")])
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Edge over the simulator", headline, help="Realized target hits minus the simulator's chance, averaged over plans.")
+    c2.metric("Target actually hit", _pct(edge.get("realized"), 1))
+    c3.metric("Simulator said", _pct(edge.get("mean_sim"), 1))
+    st.caption(f"{reading} 95% range {_ci(edge.get('lo'), edge.get('hi'), _pts)} · {edge['n']} plans.")
 
-    # a) simulator calibration
-    st.markdown("##### Is the simulator calibrated?")
-    left, right = st.columns([1.6, 1])
-    with left:
-        st.plotly_chart(_reliability_chart(r["reliability"]), use_container_width=True)
-        st.caption("Dots on the dashed line mean 'when it said 30%, the target came first about 30% of the time'. Bars are 95% intervals; "
-                   f"bins with fewer than {_MIN_N} plans are hidden.")
-    with right:
-        b = r["brier"]
-        st.metric("Brier score (3 outcomes)", f"{b['brier_sim']:.3f}" if b.get("brier_sim") is not None else "—",
-                  help="Lower is better. 0 is perfect; the base-rate forecast below is the yardstick.")
-        st.caption(f"Base-rate Brier {b['brier_base']:.3f} · skill {_pct(b.get('skill'))} · n={b['n']}" if b.get("brier_base") is not None else "")
-        if b.get("gain_lo") is not None:
-            st.caption(f"Gain over base rate, 95% interval: {b['gain_lo']:+.3f} to {b['gain_hi']:+.3f}")
+    st.markdown("**Is the simulator's chance right?** Dots on the dashed line mean it was.")
+    st.plotly_chart(_reliability_chart(r["reliability"]), use_container_width=True)
 
-    # b) conviction calibration
-    st.markdown("##### Is the model's conviction calibrated?")
+    st.markdown("**Does higher conviction hit targets more often?**")
     _table([{**c, "target_pct": None if c["target_rate"] is None else round(c["target_rate"] * 100, 1),
-             "mean_r": None if c["mean_r"] is None else round(c["mean_r"], 2),
              "ci": _ci(c["lo"], c["hi"]) if c["n"] >= _MIN_N else None} for c in r["conviction"]],
-           [("band", "Conviction"), ("n", "n"), ("target_pct", "TARGET rate (%)"), ("ci", "95% interval"), ("mean_r", "Mean realized R")])
+           [("band", "Conviction"), ("n", "Plans"), ("target_pct", "Target hit (%)"), ("ci", "95% range")])
 
-    # d) agreement
-    st.markdown("##### When they disagree, who was right?")
-    dg = r["disagreement"]
-    d1, d2, d3 = st.columns(3)
-    d1.metric("Sim disagrees", _pct(dg["rate_disagree"]) if dg["n_disagree"] >= _MIN_N else "n < 10",
-              help="Confident calls where the simulator said the target is rare: how often the target actually came first.")
-    d1.caption(f"n={dg['n_disagree']}")
-    d2.metric("Both confident", _pct(dg["rate_confident"]) if dg["n_confident"] >= _MIN_N else "n < 10",
-              help="Confident calls where the simulator also gave the target a decent chance.")
-    d2.caption(f"n={dg['n_confident']}")
-    d3.metric("Difference p-value", f"{dg['p_value']:.3f}" if dg["p_value"] is not None else "—",
-              help="Two-proportion test. Rows from the same day are correlated, so treat this as generous.")
-    d3.caption("significantly worse" if dg["significantly_worse"] else "not significant")
-    g1, g2 = st.columns([1.2, 1])
-    with g1:
-        st.plotly_chart(_grid_heatmap(r["grid4"]), use_container_width=True)
-        st.caption(f"Realized TARGET rate by conviction band and simulated probability band. Cells with n < {_MIN_N} are blank.")
-    with g2:
-        cells = r["grid2"]
-        rows2 = []
-        for key, label in (("confident|sim_agrees", "Confident · sim agrees"), ("confident|sim_disagrees", "Confident · sim disagrees"),
-                           ("not_confident|sim_agrees", "Not confident · sim agrees"), ("not_confident|sim_disagrees", "Not confident · sim disagrees")):
-            c = cells[key]
-            ok = c["n"] >= _MIN_N
-            rows2.append({"Cell": label, "n": c["n"], "TARGET rate": _pct(c["target_rate"]) if ok else "—",
-                          "Mean R": round(c["mean_r"], 2) if ok and c["mean_r"] is not None else None})
-        st.dataframe(pd.DataFrame(rows2), use_container_width=True, hide_index=True)
-
-    # e) blend
-    st.markdown("##### Blended probability")
     bl = r["blend"]
     if bl["status"] != "ok":
-        st.info(f"Not enough matured plans yet ({bl['n']} of {bl['min_n']}) to learn a blend for this horizon.", icon=":material/hourglass_top:")
+        st.caption(f"Blended chance: not enough played-out plans yet ({bl['n']} of {bl['min_n']}).")
+    elif bl["valid"]:
+        st.caption("Blended chance: it beats the simulator alone, so it is shown next to the replay on prediction cards.")
     else:
-        st.caption(f"Fitted on {bl['n']} matured plans. Brier (out of sample) blend {bl['brier_blend']:.4f} vs simulator alone {bl['brier_sim_only']:.4f}.")
-        if not bl["valid"]:
-            st.warning("The blend has not beaten the simulator alone, so it is not shown on prediction cards.", icon=":material/block:")
-        else:
-            st.success("The blend beats the simulator alone, so it is shown next to the replay on prediction cards.", icon=":material/check_circle:")
-        conv, sim = bl["pts_per_conviction"], bl["pts_per_10pts_sim"]
-        st.markdown(f"- Conviction adds **{conv:+.1f} points** of target probability per point of conviction, beyond what the simulator already knew."
-                    f"{' (about nothing)' if abs(conv) < 0.5 else ''}\n"
-                    f"- Every +10 points of simulated probability adds **{sim:+.1f} points** beyond what conviction already said."
-                    f"{' (about nothing)' if abs(sim) < 1.0 else ''}")
+        st.caption("Blended chance: it has not beaten the simulator alone, so it is not shown on prediction cards.")
 
 
 def render_cap_recommendation_banner(ctx) -> None:

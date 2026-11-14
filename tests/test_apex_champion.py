@@ -449,21 +449,15 @@ def _page_db(monkeypatch):
         pass
 
 
-def test_user_validation_page_hides_legacy_rows_by_default_and_says_so(_page_db):
+def test_user_validation_page_never_shows_legacy_rows(_page_db):
     from streamlit.testing.v1 import AppTest
     _seed_page_rows(pdb.ROLE_LEGACY_RANDOM, "GPT-4o")
 
     at = AppTest.from_function(_user_page, default_timeout=120)
-    at.session_state["val_segment"] = "All"
     at.run()
     assert not at.exception, [e.value for e in at.exception]
-    assert any("No champion-model predictions have been scored yet" in i.value for i in at.info)
-    assert any("36 legacy predictions" in c.value and "hidden" in c.value for c in at.caption)
-
-    at.session_state["val_include_legacy"] = True
-    at.run()
-    assert not at.exception, [e.value for e in at.exception]
-    assert "Does the rating pick winners?" in " ".join(m.value for m in at.markdown)
+    assert any("No scored predictions yet" in i.value for i in at.info)       # legacy rows are never shown on this page
+    assert not at.toggle
 
 
 def test_validation_qa_roles_tab_compares_champion_and_challenger(_page_db):

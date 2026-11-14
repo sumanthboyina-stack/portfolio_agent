@@ -12,6 +12,7 @@ sources can be merged and de-duplicated transparently.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,23 @@ _log = logging.getLogger(__name__)
 # It is NOT sent in outbound requests — the API key token param is sufficient for those.
 _BASE    = "https://finnhub.io/api/v1"
 _TIMEOUT = 10
+
+
+# Finnhub free tier: 60 calls/min. Pace all callers (parallel threads included) to ~50/min instead of
+# bursting and then sleeping 30s on 429s.
+_MIN_INTERVAL = 1.2
+_throttle_lock = threading.Lock()
+_next_slot = 0.0
+
+
+def _throttle() -> None:
+    global _next_slot
+    with _throttle_lock:
+        now = time.monotonic()
+        wait = max(0.0, _next_slot - now)
+        _next_slot = max(now, _next_slot) + _MIN_INTERVAL
+    if wait:
+        time.sleep(wait)
 
 
 def _params(extra: dict | None = None) -> dict:
@@ -56,6 +74,7 @@ def fetch_company_news(ticker: str, max_age_hours: int = 24) -> list[dict]:
     items: list = []
     for attempt in range(2):
         try:
+            _throttle()
             resp = requests.get(
                 f"{_BASE}/company-news",
                 params=_params({"symbol": ticker.upper(), "from": date_from, "to": date_to}),
@@ -116,6 +135,7 @@ def fetch_news_sentiment(ticker: str) -> dict | None:
         return None
 
     try:
+        _throttle()
         resp = requests.get(
             f"{_BASE}/news-sentiment",
             params=_params({"symbol": ticker.upper()}),

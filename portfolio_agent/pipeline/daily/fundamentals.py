@@ -231,13 +231,13 @@ async def _run_fundamentals_llm_batches(
                         model=model_id,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.0,
-                        max_tokens=3000,
+                        max_tokens=8000,
                     )
                     raw_text = resp.choices[0].message.content or ""
                     analyses = _extract_json_array(raw_text)
                     if not analyses:
                         log.warning(
-                            f"  [warn] Batch {batch_num}: no JSON array in response, "
+                            f"  [warn] Batch {batch_num}: no JSON array (finish={resp.choices[0].finish_reason}), "
                             f"retrying with next model…",
                             event_type="warning",
                         )

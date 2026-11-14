@@ -199,7 +199,7 @@ def _ranking_item(d: pd.DataFrame, n_dates: int, rng) -> tuple[ScoreItem, pd.Ser
         TOO_EARLY: _too_early_reason(nd),
         WORKING: f"BUY-rated stocks beat the others by {x} on average, and even the pessimistic end of the range is above zero.",
         NOT_WORKING: f"BUY-rated stocks trailed the others by {_pts(abs(c['diff']))} on average, and even the optimistic end is below zero.",
-        UNPROVEN: f"BUY-rated stocks beat the others by {x} on average, but the plausible range ({_pts(c['ci_low'])} to {_pts(c['ci_high'])}) includes zero.",
+        UNPROVEN: f"BUY-rated stocks {'beat' if c['diff'] >= 0 else 'trailed'} the others by {_pts(abs(c['diff']))} on average, but the plausible range ({_pts(c['ci_low'])} to {_pts(c['ci_high'])}) includes zero.",
     }[v]
     return ScoreItem("ranking", title, q, c["diff"], x, c["ci_low"], c["ci_high"], 0.0, "0% = BUY-rated no better than the rest",
                      len(rated), nd, v, reason, _RANK_HELP, subtitle=sub, extras=extras), ic_by_date
@@ -292,6 +292,71 @@ def _ranges_item(d: pd.DataFrame, n_dates: int) -> ScoreItem:
     pct = float(flags.mean())
     return ScoreItem("ranges", title, q, pct, _pct(pct), None, None, None, "no coverage target", int(len(flags)), n_dates, INFO_ONLY,
                      "Ranges have no stated coverage target, so this is for information only.", _RANGE_HELP)
+
+
+# ── plain-English tooltips (shown on hover in the Validation page) ────────────
+
+_VERDICT_MEANING = {
+    WORKING: "Looks real: the whole range is on the good side.",
+    NOT_WORKING: "Looks like a real weakness: the whole range is on the bad side.",
+    UNPROVEN: "Could still be luck. More days of results will settle it.",
+    TOO_EARLY: f"Needs at least {MIN_DATES_FOR_VERDICT} prediction dates before we judge.",
+    INFO_ONLY: "For information only. No target to judge it against.",
+}
+
+
+def verdict_tooltip(item: "ScoreItem") -> str:
+    return _VERDICT_MEANING.get(item.verdict, "")
+
+
+def range_text(item: "ScoreItem") -> str:
+    """'-1.7% to +0.9%' in the card's own units, or '' when there is no range."""
+    if item.ci_low is None or item.ci_high is None:
+        return ""
+    if item.key == "direction":
+        return f"{_pct(item.ci_low)} to {_pct(item.ci_high)}"
+    if item.key == "probabilities":
+        return f"{item.ci_low * 100:+.0f}% to {item.ci_high * 100:+.0f}%"
+    return f"{_pts(item.ci_low)} to {_pts(item.ci_high)}"
+
+
+_PLAIN_MEANING = {
+    "ranking": ("Do BUY picks beat the market more than the other stocks?", "Above 0% is good. 0% means no edge."),
+    "direction": ("How often the up / flat / down call was right.", "Higher is better. It should beat the simple guess."),
+    "probabilities": ("Are APEX's stated chances more accurate than average chances?", "Above 0% is good. 0% means no edge."),
+    "ranges": ("How often the real return landed inside APEX's range.", "No target is set, so it is for information only."),
+    "plan_edge": ("Does the model hit its targets more often than the simulator alone would predict?", "Above 0 pts is good. 0 means no extra edge."),
+    "plan_calibration": ("Are the simulator's target chances more accurate than just using the average hit rate?", "Above 0% is good. 0% means no edge."),
+    "plan_disagree": ("When the simulator doubts a confident call, does that call hit its target less often?", "Negative means doubted calls do worse (a warning sign)."),
+}
+
+_TAKEAWAY = {
+    "ranking": {WORKING: "BUY picks beat the rest.", NOT_WORKING: "BUY picks trail the rest.", UNPROVEN: "Can't yet tell if BUY picks beat the rest."},
+    "direction": {WORKING: "Better than a simple guess.", NOT_WORKING: "Worse than a simple guess.", UNPROVEN: "Can't yet tell if it beats a simple guess."},
+    "probabilities": {WORKING: "More accurate than average chances.", NOT_WORKING: "Less accurate than average chances.", UNPROVEN: "No clear edge over average chances."},
+    "ranges": {INFO_ONLY: "Share of results inside the range."},
+}
+
+
+def takeaway(item: "ScoreItem") -> str:
+    """One short plain-English line for the card."""
+    if item.verdict == TOO_EARLY:
+        return "Too few days of results to judge."
+    return _TAKEAWAY.get(item.key, {}).get(item.verdict, "")
+
+
+def plain_tooltip(item: "ScoreItem") -> str:
+    """Short hover text: what it means, the likely range, how to read it."""
+    meaning, scale = _PLAIN_MEANING.get(item.key, (item.plain_question, ""))
+    lines = [meaning]
+    rt = range_text(item)
+    if rt:
+        lines.append(f"Likely range: {rt}")
+    if item.key == "direction" and item.baseline is not None:
+        lines.append(f"Simple guess to beat: {_pct(item.baseline)}")
+    if scale:
+        lines.append(scale)
+    return "\n".join(lines)
 
 
 # ── by-recommendation + evidence ──────────────────────────────────────────────

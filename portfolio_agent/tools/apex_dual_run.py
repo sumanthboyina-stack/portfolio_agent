@@ -222,7 +222,8 @@ def load_model_plan() -> ModelPlan:
 # failed call on every ticker that drew them). Cleared by restarting the process; a normal timeout or rate limit never lands here.
 _OUT_OF_CREDIT: set[str] = set()
 _CREDIT_MARKERS = ("insufficient balance", "insufficient_balance", "credit balance is too low", "payment required", "insufficient_quota",
-                   "insufficient credits", "requires more credits", "billing", "tier_not_allowed", "subscription tier")
+                   "insufficient credits", "requires more credits", "billing", "tier_not_allowed", "subscription tier",
+                   "authentication_error", "authenticationerror", "invalid x-api-key", "invalid api key", "incorrect api key")
 
 
 def _mark_if_out_of_credit(result: "SinglePrediction") -> None:

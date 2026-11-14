@@ -45,7 +45,7 @@ def pool_plan(pool=("GPT-5", "DeepSeek-Chat"), fallbacks=("o3",), champion="GPT-
 
 def test_deepseek_is_a_registered_apex_model_with_its_own_provider():
     assert "DeepSeek-Chat" in adr.known_model_labels()
-    assert {label: (mid, prov) for mid, prov, label in adr.APEX_MODELS}["DeepSeek-Chat"] == ("deepseek/deepseek-chat", "deepseek")
+    assert {label: (mid, prov) for mid, prov, label in adr.APEX_MODELS}["DeepSeek-Chat"] == ("deepseek/deepseek-flash", "deepseek")
 
 
 def test_deepseek_running_out_of_credit_counts_as_a_failover_error_so_the_next_model_is_tried():
@@ -128,7 +128,7 @@ def test_each_ticker_is_predicted_by_exactly_one_pool_model_and_both_models_get_
         assert r.role == pdb.ROLE_CHAMPION and r.used_fallback is False and r.model_sources[0] in ("GPT-5", "DeepSeek-Chat")
         used[t] = r.model_sources[0]
     assert set(used.values()) == {"GPT-5", "DeepSeek-Chat"}
-    assert set(calls) == {"openai/gpt-5", "deepseek/deepseek-chat"}
+    assert set(calls) == {"openai/gpt-5", "deepseek/deepseek-flash"}
     again = asyncio.run(adr.run_apex(TICKERS[0], "prompt", plan=plan, as_of_date=DAY))
     assert again.model_sources[0] == used[TICKERS[0]]                              # same ticker, same day: same model
 
@@ -147,12 +147,12 @@ def test_when_deepseek_is_out_of_credit_the_ticker_falls_back_to_openai_and_deep
     ds_ticker = next(t for t in TICKERS if adr.pool_pick(t, DAY, ["GPT-5", "DeepSeek-Chat"]) == "DeepSeek-Chat")
     r = asyncio.run(adr.run_apex(ds_ticker, "prompt", plan=plan, as_of_date=DAY))
     assert r.model_sources == ["GPT-5"] and r.role == pdb.ROLE_FALLBACK and r.used_fallback is True and "failover_error" in r.fallback_reason
-    assert calls == ["deepseek/deepseek-chat", "openai/gpt-5"] and "DeepSeek-Chat" in adr._OUT_OF_CREDIT
+    assert calls == ["deepseek/deepseek-flash", "openai/gpt-5"] and "DeepSeek-Chat" in adr._OUT_OF_CREDIT
     calls.clear()
     for t in TICKERS[:60]:                                                          # now nobody draws DeepSeek, so nobody pays for a failed call
         r = asyncio.run(adr.run_apex(t, "prompt", plan=plan, as_of_date=DAY))
         assert r.model_sources == ["GPT-5"] and r.role == pdb.ROLE_CHAMPION
-    assert "deepseek/deepseek-chat" not in calls
+    assert "deepseek/deepseek-flash" not in calls
 
 
 def test_if_every_pool_model_is_out_of_credit_the_pool_is_still_tried_rather_than_giving_up_silently():
@@ -280,7 +280,9 @@ def test_the_winning_model_name_id_provider_and_selection_are_stored(monkeypatch
 
 def test_cloudflare_models_join_only_the_low_tiers_and_only_when_fully_configured(monkeypatch):
     import importlib
+    import dotenv
     import portfolio_agent._models as m
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)   # the real .env must not re-add the account id
     try:
         monkeypatch.setenv("CLOUDFLARE_API_KEY", "k")
         monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)

@@ -380,3 +380,26 @@ def test_blended_odds_on_cards_only_with_a_valid_blend():
     html = sim_block_html({**sim, "p_stop_first": 0.4, "p_timeout": 0.3, "expected_r": 0.1, "paths": 10000}, blend_p=b)
     assert "blended target odds" in html and "blended target odds" not in sim_block_html({**sim, "p_stop_first": 0.4, "p_timeout": 0.3,
                                                                                        "expected_r": 0.1, "paths": 10000})
+
+
+def test_plans_page_is_a_filterless_grid_judged_like_the_predictions_page(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from web.components import plan_validation_view as v
+    from portfolio_agent.tools import validation_scorecard as sc
+    settings = {"sim_flag_min_conviction": 7.0, "sim_flag_max_p_target": 0.35, "blend_min_n": 150}
+    report = pv.plan_report(_synthetic(n_dates=80, seed=10), settings)
+    items = v.plan_items(report[5])
+    assert len(items) == 3 and all(i.verdict in (sc.WORKING, sc.UNPROVEN, sc.NOT_WORKING, sc.TOO_EARLY) for i in items)
+    short = dict(report[5], n_dates=3)                                           # fewer than 10 dates -> never a verdict
+    assert {i.verdict for i in v.plan_items(short)} == {sc.TOO_EARLY}
+
+    def _app():
+        from web.components import plan_validation_view as pvv
+        pvv.render_plans_simulation()
+    monkeypatch.setattr(v, "_cached_report", lambda: report)
+    at = AppTest.from_function(_app, default_timeout=120)
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    md = " ".join(m.value for m in at.markdown)
+    assert "Does the model add edge?" in md and "5-Day" in md
+    assert not at.radio and not at.selectbox                                    # no Horizon selector

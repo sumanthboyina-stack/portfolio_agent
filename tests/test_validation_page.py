@@ -58,7 +58,6 @@ def _insert_rows(n_dates=3, per_date=12):
 
 
 def _run(at: AppTest) -> AppTest:
-    at.session_state["val_segment"] = "All"
     at.run()
     return at
 
@@ -66,7 +65,7 @@ def _run(at: AppTest) -> AppTest:
 def test_page_renders_with_empty_data():
     at = _run(AppTest.from_function(_app, default_timeout=60))
     assert not at.exception, [e.value for e in at.exception]
-    assert any("No evaluated predictions yet" in i.value for i in at.info)
+    assert any("No scored predictions yet" in i.value for i in at.info)
 
 
 def test_page_renders_four_cards_banner_and_charts_from_the_scorecard():
@@ -74,11 +73,10 @@ def test_page_renders_four_cards_banner_and_charts_from_the_scorecard():
     at = _run(AppTest.from_function(_app, default_timeout=120))
     assert not at.exception, [e.value for e in at.exception]
     md = " ".join(m.value for m in at.markdown)
-    for title in ("Does the rating pick winners?", "Is the call direction right?", "Are the stated chances any good?",
-                  "Does the return land in the stated range?"):
+    for title in ("Do BUY picks win?", "Is the direction right?", "Are the chances good?", "Does it land in range?"):
         assert title in md
     assert md.count("Too early") >= 3 and "Info only" in md                      # 3 dates: below MIN_DATES_FOR_VERDICT
-    assert any("evidence: Too early" in w.value for w in at.warning)
+    assert any("Too early to judge" in w.value for w in at.warning)
     # old-page furniture is gone from the user page
     for gone in ("Baselines & sample size", "Headline: ranking skill", "FLAT diagnostic", "Follow every", "Outcome breakdown"):
         assert gone not in md and not any(gone in e.label for e in at.expander)
@@ -88,11 +86,12 @@ def test_page_renders_four_cards_banner_and_charts_from_the_scorecard():
 def test_every_card_number_is_the_scorecards_number():
     _insert_rows()
     from web.data.validation import _load_evaluated_predictions_df, build_scorecards
+    from portfolio_agent.tools import validation_scorecard as scorecard_mod
     card = build_scorecards(_load_evaluated_predictions_df(segment="All"), use_prices=False)[5]
     at = _run(AppTest.from_function(_app, default_timeout=120))
     md = " ".join(m.value for m in at.markdown)
     for item in card.items:
-        assert item.display in md and item.one_line_reason in md
+        assert item.display in md and item.verdict in md
 
 
 def _insert_other_horizon(horizon: int, n_dates: int, per_date: int = 4):
@@ -111,44 +110,36 @@ def _insert_other_horizon(horizon: int, n_dates: int, per_date: int = 4):
         conn.commit()
 
 
-def test_only_two_controls_are_visible_and_nothing_lives_in_the_sidebar():
-    _insert_rows(n_dates=12, per_date=4)       # <= 60 tickers, so the price-baselines toggle isn't needed
+def test_page_has_no_filters_and_nothing_lives_in_the_sidebar():
+    _insert_rows(n_dates=12, per_date=4)
     at = _run(AppTest.from_function(_app, default_timeout=120))
     assert not at.exception, [e.value for e in at.exception]
-    assert [r.label for r in at.radio] == ["Scope", "Horizon"]
-    assert at.radio(key="val_segment").options == ["My tickers", "Everything APEX predicted"]
     assert not at.sidebar.children or len(at.sidebar.children) == 0
-    assert [s.label for s in at.selectbox] == ["Lookback period"]                       # inside the Advanced popover
-    assert {t.label for t in at.toggle} == {"Include legacy predictions", "Wrong calls only"}
-    assert not at.multiselect
+    assert not at.selectbox and not at.multiselect
+    assert [r.label for r in at.radio] == []                                           # no Scope / Horizon selector
+    assert {t.label for t in at.toggle} == {"Wrong calls only"}                        # only the history table's own toggle
 
 
-def test_horizons_without_enough_dates_are_left_out_of_the_selector_and_named_in_a_note():
-    _insert_rows(n_dates=12)                  # 5d: 12 dates -> ready
-    _insert_other_horizon(21, n_dates=1)      # 21d: 1 date -> too early
-    at = _run(AppTest.from_function(_app, default_timeout=120))
-    assert not at.exception, [e.value for e in at.exception]
-    assert at.radio(key="val_horizon").options == ["5-Day"]
-    assert any("21-Day (1 date)" in c.value and "Not shown yet" in c.value for c in at.caption)
-
-
-def test_when_no_horizon_is_ready_every_horizon_is_still_offered_as_a_preview():
-    _insert_rows(n_dates=3)
-    _insert_other_horizon(21, n_dates=1)
-    at = _run(AppTest.from_function(_app, default_timeout=120))
-    assert not at.exception, [e.value for e in at.exception]
-    assert at.radio(key="val_horizon").options == ["5-Day", "21-Day"]
-    assert at.radio(key="val_horizon").value == 5                                  # the one with more evidence
-
-
-def test_the_horizon_with_the_most_dates_is_the_default_and_the_banner_is_the_headline():
+def test_every_horizon_is_a_column_of_the_grid_and_the_headline_names_the_best_one():
     _insert_rows(n_dates=12)
     _insert_other_horizon(21, n_dates=11)
     at = _run(AppTest.from_function(_app, default_timeout=120))
     assert not at.exception, [e.value for e in at.exception]
-    assert at.radio(key="val_horizon").options == ["5-Day", "21-Day"]
+    md = " ".join(m.value for m in at.markdown)
+    assert "5-Day" in md and "21-Day" in md
+    for row in ("Do BUY picks win?", "Is the direction right?", "Are the chances good?", "Does it land in range?"):
+        assert row in md
     banner = " ".join(e.value for e in list(at.info) + list(at.success) + list(at.warning))
-    assert "5-Day calls" in banner and "checks:" in banner
+    assert "5-Day calls" in banner and "days of results" in banner
+
+
+def test_a_horizon_with_few_dates_is_still_shown_in_the_grid_as_too_early():
+    _insert_rows(n_dates=12)
+    _insert_other_horizon(21, n_dates=1)
+    at = _run(AppTest.from_function(_app, default_timeout=120))
+    assert not at.exception, [e.value for e in at.exception]
+    md = " ".join(m.value for m in at.markdown)
+    assert "21-Day" in md and "Too early" in md
 
 
 def test_wrong_calls_only_toggle_filters_the_history_table():

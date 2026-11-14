@@ -2,25 +2,25 @@
 LLM model registry — task-aware routing with multi-provider failover.
 
 Hierarchy principle:
-  Low-reasoning tasks  (triage, flash, fast):   free Gemini/Groq/Cerebras/OpenRouter first;
-                                                 GPT-4o-mini → Claude-Haiku → GPT-4o
-                                                 as paid last-resort when all free models are exhausted.
+  Claude and Google (Gemini) are PAID subscriptions: used ONLY for top-reasoning tasks
+  ("reasoning" chain / APEX champion), never for bulk triage/flash/fast work.
+  Low-reasoning tasks  (triage, flash, fast):   free Groq/Mistral/Cloudflare/OpenRouter first;
+                                                 GPT-4o-mini → GPT-4o as paid last-resort.
   High-reasoning tasks (analyst, reasoning):     paid quality-first → OR high-reasoning → Groq
 
 Task → model mapping (in priority order):
 
-  triage    Gemini-2.5-Flash-Lite → Gemini-2.5-Flash → Groq-70B → Cerebras-120B
+  triage    Groq-70B → Groq-20B → Mistral
             → OR-Nemotron-Nano
-            → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
+            → GPT-4o-mini → GPT-4o  (paid last resort)
             Bulk news batch classification.
-            ⚠ Cerebras has 8K context cap — batch size may need reducing when it kicks in.
 
-  flash     Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
-            → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
+  flash     Groq-70B → Groq-20B → Mistral
+            → GPT-4o-mini → GPT-4o  (paid last resort)
             Fundamentals / research batch LLM.
 
-  fast      Gemini-2.5-Flash → Gemini-2.5-Flash-Lite → Groq-70B → Cerebras-120B
-            → GPT-4o-mini → Claude-Haiku → GPT-4o  (paid last resort)
+  fast      Groq-70B → Groq-20B → Mistral
+            → GPT-4o-mini → GPT-4o  (paid last resort)
             Clearance, technical. Uses ADK tools.
 
   analyst   GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3
@@ -45,7 +45,7 @@ ModelSession: tracks the working model index across a batch of same-agent calls.
 Once a model fails within a batch, all subsequent tickers in that batch start at
 the next model — no re-discovering the same rate limit on every ticker.
 
-Groq (llama-3.3-70b-versatile) supports structured tool
+Groq (openai/gpt-oss-120b) supports structured tool
 calling via LiteLLM 1.83+ and works correctly with ADK's tool-call JSON format.
 
 Failover triggers: credit exhaustion, 429 rate limit, quota exceeded,
@@ -88,16 +88,16 @@ except Exception:
 
 # ── Provider model IDs ─────────────────────────────────────────────────────────
 
-_GROQ_70B          = "groq/llama-3.3-70b-versatile"
+_GROQ_20B          = "groq/openai/gpt-oss-20b"    # free-plan key (8K TPM per model); separate quota from 120B
+_GROQ_70B          = "groq/openai/gpt-oss-120b"   # llama-3.3-70b-versatile is not available to this key (model_not_found, 20261112)
 _GEMINI_FLASH      = "gemini/gemini-2.5-flash"
 _GEMINI_FLASH_LITE = "gemini/gemini-2.5-flash-lite"   # primary triage — higher daily quota
-_CEREBRAS_120B     = "cerebras/gpt-oss-120b"           # available on free tier; 1M TPD, ⚠ 8K ctx cap
 _HAIKU             = "anthropic/claude-haiku-4-5-20251001"
 _SONNET            = "anthropic/claude-sonnet-4-6"
 _GPT_MINI          = "openai/gpt-4o-mini"   # cheap — same tier as Haiku / Groq-70B
 _GPT_4O            = "openai/gpt-4o"        # capable — same tier as Claude Sonnet
 _GPT_5             = "openai/gpt-5"         # high-reasoning — analyst/reasoning (APEX) tier only
-_DEEPSEEK_CHAT     = "deepseek/deepseek-chat"   # DeepSeek API (DEEPSEEK_API_KEY): APEX prediction model only, JSON mode + temperature supported
+_DEEPSEEK_CHAT     = "deepseek/deepseek-flash"   # DeepSeek API (DEEPSEEK_API_KEY): APEX prediction model only, JSON mode + temperature supported
 # Mistral (MISTRAL_API_KEY). Lower-reasoning: pipeline triage / flash / fast chains. Higher-reasoning: APEX (analyst / reasoning chains
 # and the APEX model registry). ⚠ The current key is a restricted tier: Large is "not available in your subscription tier" and
 # Medium / Magistral / Small answer "rate limit exceeded" (20261030); only Ministral-8B, Nemo and Codestral worked.
@@ -174,19 +174,16 @@ GEMINI_COUNTER = _GeminiCallCounter()
 # Each entry: (litellm_model_id, provider_label, display_name)
 
 FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
-    # Low-reasoning: free Gemini/Groq/Cerebras first, then OpenRouter free/cheap fallbacks.
+    # Low-reasoning: free Gemini/Groq first, then OpenRouter free/cheap fallbacks.
     # Lite model is primary for triage: higher daily quota for bulk batches.
-    # Cerebras last among direct providers: 1M TPD free but 8K context cap.
     # OpenRouter free tier (Owl-Alpha, Laguna, Nemotron) added as final safety net.
     # OR-Owl-Alpha and Groq-8B removed from all chains:
     # OR-Owl-Alpha produced 20% directional accuracy (n=9) in validation — below random.
     # Groq-8B produced 0% directional accuracy (n=1) — removed on principle.
     # Neither should appear in model_name of any pipeline output.
     "triage": [
-        (_GEMINI_FLASH_LITE, "google",      "Gemini-2.5-Flash-Lite"),
-        (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
-        (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
-        (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
+        (_GROQ_70B,          "groq",        "Groq GPT-OSS-120B"),
+        (_GROQ_20B,          "groq",        "Groq GPT-OSS-20B"),
         (_MISTRAL_SMALL,     "mistral",     "Mistral-Small"),
         (_MINISTRAL_8B,      "mistral",     "Ministral-8B"),
         *_CF_LOW,
@@ -196,31 +193,26 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         # OR-Ring-2.6-1T removed: 402 out-of-credits (20260624) — also stuck ModelSession
         # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
         (_GPT_MINI,          "openai",      "GPT-4o-mini"),
-        (_HAIKU,             "anthropic",   "Claude-Haiku"),
         (_GPT_4O,            "openai",      "GPT-4o"),
     ],
     "flash": [
-        (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
-        (_GEMINI_FLASH_LITE, "google",      "Gemini-2.5-Flash-Lite"),
-        (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
-        (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
+        (_GROQ_70B,          "groq",        "Groq GPT-OSS-120B"),
+        (_GROQ_20B,          "groq",        "Groq GPT-OSS-20B"),
         (_MISTRAL_SMALL,     "mistral",     "Mistral-Small"),
         (_MINISTRAL_8B,      "mistral",     "Ministral-8B"),
         *_CF_LOW,
+        (_OR_NEMOTRON_FREE,  "openrouter",  "OR-Nemotron-Nano"),
         # OR-Granite-4.1-8B removed: 404, no longer on OpenRouter (20261029)
         # OR-Laguna-M.1 removed: 5–10 min stalls.
         # OR-Qwen3.6-Flash removed: 402 out-of-credits (20260622).
         # OR-Ring-2.6-1T removed: same 402 error (20260623).
         # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
         (_GPT_MINI,          "openai",      "GPT-4o-mini"),
-        (_HAIKU,             "anthropic",   "Claude-Haiku"),
         (_GPT_4O,            "openai",      "GPT-4o"),
     ],
     "fast": [
-        (_GEMINI_FLASH,      "google",      "Gemini-2.5-Flash"),
-        (_GEMINI_FLASH_LITE, "google",      "Gemini-2.5-Flash-Lite"),
-        (_GROQ_70B,          "groq",        "Groq Llama-3.3-70B"),
-        (_CEREBRAS_120B,     "cerebras",    "Cerebras GPT-OSS-120B"),
+        (_GROQ_70B,          "groq",        "Groq GPT-OSS-120B"),
+        (_GROQ_20B,          "groq",        "Groq GPT-OSS-20B"),
         (_MISTRAL_SMALL,     "mistral",     "Mistral-Small"),
         (_MINISTRAL_8B,      "mistral",     "Ministral-8B"),
         *_CF_LOW,
@@ -228,7 +220,6 @@ FAILOVER_CHAINS: dict[str, list[tuple[str, str, str]]] = {
         # OR-Laguna-M.1 removed: caused multi-minute stalls in batch runs
         # ── Paid last resort (only reached when all free/cheap models are exhausted) ──
         (_GPT_MINI,          "openai",      "GPT-4o-mini"),
-        (_HAIKU,             "anthropic",   "Claude-Haiku"),
         (_GPT_4O,            "openai",      "GPT-4o"),
     ],
     # High-reasoning: paid direct providers first, then OR high-reasoning fallbacks only.
@@ -284,7 +275,6 @@ _PROVIDER_DOMAINS = (
     "api.groq.com",
     "api.openai.com",
     "openai.azure.com",
-    "api.cerebras.ai",
     "openrouter.ai",
     "api.deepseek.com",
     "api.mistral.ai",
@@ -349,6 +339,17 @@ def _is_failover_error(exc: BaseException) -> bool:
         "notfounderror",
         "is not found for api",         # Gemini model not found message
         "model not found",
+        "model_not_found",              # Groq/OpenAI: model not available to this key
+        "does not exist or you do not have access",
+        # Auth failures (bad/revoked key) are provider-level blocks: fail over, never crash the batch
+        "authentication_error",         # Anthropic
+        "authenticationerror",          # litellm exception class name
+        "invalid x-api-key",
+        "invalid api key",
+        "incorrect api key",
+        "401 unauthorized",
+        "daily free allocation",        # Cloudflare: free neurons used up
+        "expected string or buffer",    # litellm Cloudflare transform on an empty/errored body
     ])
 
 
@@ -418,10 +419,10 @@ def _lite(model_id: str) -> LiteLlm:
     return LiteLlm(model=model_id)
 
 
-TRIAGE_MODEL    = _lite(_GEMINI_FLASH_LITE)   # news bulk triage — Lite has higher daily quota
-FLASH_MODEL     = _lite(_GEMINI_FLASH)        # fundamentals, research
-ANALYST_MODEL   = _lite(_SONNET)              # macro, risk, APEX reasoning
-FAST_MODEL      = _lite(_GEMINI_FLASH)        # clearance, technical (free first)
+TRIAGE_MODEL    = _lite(_GROQ_70B)            # news bulk triage (free tier; no paid Gemini/Claude)
+FLASH_MODEL     = _lite(_GROQ_70B)            # fundamentals, research
+ANALYST_MODEL   = _lite(_GPT_5)               # macro, risk, APEX reasoning (Claude only in "reasoning" chain)
+FAST_MODEL      = _lite(_GROQ_70B)            # clearance, technical (free first)
 SYNTHESIS_MODEL = ANALYST_MODEL               # backward-compat alias
 
 

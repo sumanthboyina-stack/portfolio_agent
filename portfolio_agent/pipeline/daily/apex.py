@@ -482,7 +482,14 @@ async def _run_daily_apex(
         # Under a random pool the ticker draws its model here (a hash of ticker + date: random across tickers, stable for the same one),
         # so the challenger below is compared against the model that really made the call.
         ticker_plan = plan_for_ticker(model_plan, ticker, today)
-        result = await _run_apex(ticker, prompt, plan=ticker_plan)
+        try:
+            result = await _run_apex(ticker, prompt, plan=ticker_plan)
+        except Exception as exc:  # one ticker's unexpected provider error must not abort the whole batch
+            log.error(
+                f"  [apex] {ticker} — unexpected error, skipping: {type(exc).__name__}: {str(exc)[:200]}",
+                event_type="error", ticker=ticker, phase_name="apex",
+            )
+            result = None
 
         if result is None:
             log.error(
