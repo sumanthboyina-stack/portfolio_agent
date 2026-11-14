@@ -67,6 +67,29 @@ Rules:
 {data_blocks}
 """
 
+_BATCH_RISK_PROMPT = """\
+You are a portfolio risk management specialist. Assess the {n} positions below using ONLY the provided numbers.
+All portfolio-wide figures (weights, sector/issuer concentration, correlation, beta, volatility) were already
+computed without AI — use them as-is, do not re-derive them. null means unavailable: leave it null, never guess.
+
+For each position return ALL of these fields:
+  ticker                    — exact ticker symbol as given
+  portfolio_risk_score      — 1–10 integer (10 = highest risk). 8+ should flag concentration OR high volatility; 10 means both
+  concentration_flag        — true if position weight > 10% of the portfolio
+  key_risk_factors          — list of up to 3 specific risks drawn from the numbers (and "Why re-checked" if relevant)
+  position_size_recommendation — "small" | "moderate" | "full"
+  summary                   — 2-3 sentence narrative
+
+Rules:
+  - Flag sector over-exposure (> 25% in one sector) and high daily volatility in key_risk_factors
+  - "Why re-checked" says what changed since the last check (price move, news, filing, holdings change); address it
+  - Preserve ticker symbols exactly as shown
+  - Output ONLY a valid JSON array with {n} objects, in the same order as the input
+  - Start with [ and end with ] — no other text
+
+{data_blocks}
+"""
+
 _BATCH_NEWS_PROMPT = """\
 You are a financial news analyst. Analyze the news articles for each company below and produce a structured summary.
 

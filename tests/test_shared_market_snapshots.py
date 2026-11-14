@@ -187,29 +187,20 @@ def test_two_overlapping_requests_for_the_same_ticker_reuse_the_stored_result(mo
     assert first["features"]["sma_200"] != tf.UNKNOWN     # 250 bars is enough
 
 
-def test_risk_technical_pipeline_stores_deterministic_features_without_breaking_on_failure(monkeypatch):
-    """The additive wiring in pipeline.daily.risk_technical: a per-ticker call
-    into technical_features that never affects the specialist flow's own
-    completed/failed accounting, even when it fails."""
+def test_risk_technical_pipeline_technical_is_rule_based_and_survives_feature_failure(monkeypatch):
+    """Technical flags now come from technical_features by plain rules (no LLM). A failed
+    feature fetch means no technical row for that ticker (counted failed), never a crash,
+    and the risk half is unaffected."""
     import asyncio
-    import json as _json
 
     from portfolio_agent.pipeline.daily import risk_technical as rt_mod
-    import portfolio_agent.pipeline.runner as runner_mod
     import portfolio_agent.tools.technical_features as tf_mod
 
-    async def _fake_run_analysis_with_failover(ticker, agent_name, query="", model_session=None, **kw):
-        if agent_name == "risk":
-            return {"risk": _json.dumps({"portfolio_risk_score": 3, "summary": "fine"}), "_model_used": "m"}
-        return {"technical": _json.dumps({"technical_score": 7, "summary": "fine"}), "_model_used": "m"}
+    async def _fake_risk_batch(prompt, chain, model_idx):
+        return [{"ticker": "AAPL", "portfolio_risk_score": 3, "summary": "fine"}], model_idx
+    monkeypatch.setattr(rt_mod, "_call_risk_batch", _fake_risk_batch)
+    monkeypatch.setattr(rt_mod, "_price_stats", lambda tickers: {})
 
-    monkeypatch.setattr(runner_mod, "run_analysis_with_failover", _fake_run_analysis_with_failover)
-
-    # The risk half is per-owner now (finding #7) — it only runs for tickers
-    # held by an ENABLED auth_users owner (never every row in `portfolios`;
-    # see risk_technical._owners_and_their_tickers), so seed both a holding
-    # via the account service and a matching auth_users row, rather than the
-    # old get_portfolio_holdings() monkeypatch this test no longer exercises.
     from tests.helpers_holdings import seed_holding
     from portfolio_agent.domain import LOCAL_OWNER
     from portfolio_agent.tools.auth_users_db import invite_user
@@ -218,20 +209,33 @@ def test_risk_technical_pipeline_stores_deterministic_features_without_breaking_
                 "fidelity", "2026-09-01")
     invite_user("owner@test", LOCAL_OWNER)
 
-    calls = []
     def _failing_fetch(ticker, **kw):
-        calls.append(ticker)
         raise RuntimeError("yfinance is down")
     monkeypatch.setattr(tf_mod, "fetch_and_store_technical_features", _failing_fetch)
-
-    # Must not raise despite the technical_features failure, and must still
-    # save both the risk and technical flags normally.
     asyncio.run(rt_mod._run_daily_risk_technical(["AAPL"]))
-    assert calls == ["AAPL"]
 
     from portfolio_agent.tools.risk_flags_db import get_flags_for_ticker
+    assert set(get_flags_for_ticker("AAPL", LOCAL_OWNER)) == {"risk"}
+
+    feats = {"current_price": 120.0, "sma_20": 115.0, "sma_50": 110.0, "sma_200": 100.0,
+             "rsi_14": 60.0, "macd_histogram": 1.2, "price_vs_sma50_pct": 9.1}
+    monkeypatch.setattr(tf_mod, "fetch_and_store_technical_features", lambda t, **kw: {"features": feats})
+    asyncio.run(rt_mod._run_daily_risk_technical(["AAPL"]))
     flags = get_flags_for_ticker("AAPL", LOCAL_OWNER)
-    assert set(flags) == {"risk", "technical"}   # both specialist writes succeeded despite the side-write failing
+    assert set(flags) == {"risk", "technical"}
+    assert flags["technical"]["score"] == 9 and not flags["technical"]["flag"]
+
+
+def test_rule_based_technical_trend_momentum_and_flag():
+    from portfolio_agent.pipeline.daily.risk_technical import _rule_based_technical as rb
+    down = rb("XYZ", {"current_price": 80.0, "sma_20": 90.0, "sma_50": 95.0, "sma_200": 100.0,
+                      "rsi_14": 35.0, "macd_histogram": -1.0})
+    assert down["primary_trend"] == "DOWNTREND" and down["momentum"] == "BEARISH"
+    assert down["technical_score"] <= 3
+    assert rb("XYZ", {"current_price": "UNKNOWN", "sma_50": "UNKNOWN"}) == {}   # no data -> failure, not a guess
+    thin = rb("XYZ", {"current_price": 10.0, "sma_20": 9.0, "sma_50": 9.5, "sma_200": "UNKNOWN",
+                      "rsi_14": 55.0, "macd_histogram": 0.1})
+    assert thin["price_vs_sma200_pct"] is None and thin["technical_score"] >= 1
 
 
 def test_technical_features_records_coverage_and_unknown_for_thin_history(monkeypatch):

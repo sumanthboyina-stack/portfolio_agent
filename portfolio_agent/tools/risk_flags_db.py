@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from typing import Optional
+from typing import Callable, Optional
 
 from portfolio_agent.tools.db import db_conn, safe_float
 
@@ -177,6 +177,96 @@ def needs_risk_refresh(ticker: str, as_of_date: str, owner: str) -> bool:
             (ticker.upper(), as_of_date, owner),
         ).fetchone()
     return (row["n"] if row else 0) < 1
+
+
+RISK_CADENCE_DAYS = 7          # baseline re-run interval when nothing changed (same as research)
+PRICE_MOVE_PCT = 5.0           # |1-day move| at or above this re-runs the risk check
+EVENT_MIN_SEVERITY = 3         # trigger_events severity that re-runs the risk check
+HOLDINGS_SIG_KEY = "_holdings_sig"   # stored inside raw_json — no schema change
+
+
+def get_last_risk_row(ticker: str, owner: str) -> Optional[dict]:
+    """Most recent 'risk' row for this owner/ticker (any date), or None."""
+    with _db() as c:
+        row = c.execute(
+            "SELECT as_of_date, fetched_at, raw_json FROM risk_flags "
+            "WHERE ticker = ? AND source = 'risk' AND owner = ? "
+            "ORDER BY as_of_date DESC, id DESC LIMIT 1",
+            (ticker.upper(), owner),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def risk_refresh_reason(
+    ticker: str,
+    today: str,
+    owner: str,
+    *,
+    holdings_sig: str | None = None,
+    price_move_pct: float | None = None,
+    event_tickers_since: Optional[Callable[[str], dict[str, str]]] = None,
+    new_filing_date: str | None = None,
+) -> str | None:
+    """
+    Pure-Python decision (no LLM) on whether to re-run *owner*'s risk check for
+    *ticker*. Returns a reason string, or None to skip. Mirrors research's
+    needs_llm_summary(): run weekly, or sooner only when something changed.
+
+    Triggers, in order:
+      1. Already computed today                          → None
+      2. Never computed                                  → "no_risk_flag"
+      3. Last run >= RISK_CADENCE_DAYS ago               → "weekly_Nd"
+      4. Owner's holdings (tickers/shares) changed       → "holdings_changed"
+         (legacy rows without a stored signature never trigger this)
+      5. |1-day price move| >= PRICE_MOVE_PCT            → "price_move_X%"
+      6. Severity>=3 event detected after the last run   → "event_<type>"
+         (event_tickers_since(fetched_at_iso) -> {ticker: event_type})
+      7. New filing newer than the last run              → "new_filing_<date>"
+    """
+    import json
+    from datetime import date, datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    last = get_last_risk_row(ticker, owner)
+    if not last:
+        return "no_risk_flag"
+    if last["as_of_date"] == today:
+        return None
+
+    try:
+        age_days = (date.fromisoformat(today) - date.fromisoformat(last["as_of_date"])).days
+    except ValueError:
+        return "bad_date"
+    if age_days >= RISK_CADENCE_DAYS:
+        return f"weekly_{age_days}d"
+
+    if holdings_sig is not None:
+        try:
+            stored_sig = (json.loads(last["raw_json"] or "{}") or {}).get(HOLDINGS_SIG_KEY)
+        except (ValueError, TypeError):
+            stored_sig = None
+        if stored_sig and stored_sig != holdings_sig:
+            return "holdings_changed"
+
+    if price_move_pct is not None and abs(price_move_pct) >= PRICE_MOVE_PCT:
+        return f"price_move_{price_move_pct:+.1f}%"
+
+    if event_tickers_since is not None:
+        # fetched_at is UTC (sqlite datetime('now')); events.db stores CST ISO strings
+        # and compares them as text, so hand the provider a CST ISO timestamp.
+        try:
+            since = (datetime.fromisoformat(last["fetched_at"]).replace(tzinfo=timezone.utc)
+                     .astimezone(ZoneInfo("America/Chicago")).isoformat())
+        except (ValueError, TypeError):
+            since = last["as_of_date"]
+        ev = event_tickers_since(since).get(ticker.upper())
+        if ev:
+            return f"event_{ev}"
+
+    if new_filing_date and new_filing_date > last["as_of_date"]:
+        return f"new_filing_{new_filing_date}"
+
+    return None
 
 
 def get_active_flags(owner: str, as_of_date: Optional[str] = None) -> list[dict]:
