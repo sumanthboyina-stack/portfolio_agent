@@ -2,6 +2,7 @@
 Trade plan persistence + the data lookups around tools.trade_plan (which is pure).
 
     create_plan_for_prediction(prediction_id)   one immutable plan per shared_market forecast; a re-run is a no-op
+    atr_as_of / recent_range_as_of              the market-data lookups (ATR; high/low of the last N completed daily bars)
     get_plan(prediction_id) / get_plans(ids)    read back
     backfill_plans(since)                       plans for stored shared forecasts that have none
 
@@ -67,6 +68,31 @@ def atr_as_of(ticker: str, as_of_date: str, *, fetch_history: Callable | None = 
         return None
 
 
+def recent_range_as_of(ticker: str, as_of_date: str, n: int, *, fetch_history: Callable | None = None) -> tuple[float, float] | None:
+    """
+    (highest high, lowest low) of the last `n` completed daily bars dated on or before as_of_date, or None when there is no history
+    recent enough or fewer than `n` bars. Same history source as atr_as_of, and the same look-ahead cut: the fetched frame is cut at
+    as_of_date BEFORE the window is taken, so a bar dated after it can never move the range.
+    """
+    as_of = date.fromisoformat(str(as_of_date)[:10])
+    n = int(n)
+    if n < 1:
+        return None
+    try:
+        hist = (fetch_history or _default_fetch_history)(ticker.upper(), as_of)
+        if hist is None or len(hist) == 0:
+            return None
+        hist = hist[[d.date() <= as_of for d in hist.index]]       # the cut that keeps later bars out
+        if len(hist) < n or hist.index[-1].date() < as_of - timedelta(days=MAX_ATR_STALENESS_DAYS):
+            return None
+        win = hist.iloc[-n:]
+        high, low = tp._num(win["High"].max()), tp._num(win["Low"].min())
+        return (high, low) if high is not None and low is not None else None
+    except Exception as exc:
+        _log.warning(f"  [plan] {ticker} range fetch failed: {exc}", event_type="warning", ticker=ticker)
+        return None
+
+
 def _row_to_plan(row) -> dict | None:
     return dict(row) if row is not None else None
 
@@ -105,22 +131,35 @@ def create_plan_for_prediction(prediction_id: int, *, settings: dict | None = No
 
     direction, h = pred["predicted_direction"], pred["horizon_days"]
     atr = None
+    range_hl = None
+    # A shared plan always uses the DEFAULT rules (settings), never a user's own numbers: those live in custom_trade_plans.
+    stop_rule = settings.get("plan_default_stop_rule", tp.SEED_DEFAULT_STOP_RULE)
     if str(direction or "").upper() == "UP" and h in tp.SUPPORTED_HORIZONS and tp._num(pred["start_price"]):
         atr = atr_as_of(pred["ticker"], pred["as_of_date"], fetch_history=fetch_history)
+        if stop_rule in ("range_low", "range_mid"):
+            range_hl = recent_range_as_of(pred["ticker"], pred["as_of_date"],
+                                          settings["plan_range_lookback_days"][h], fetch_history=fetch_history)
     ret_high = tp._num(pred["predicted_return_high"])
     result = tp.build_plan(pred["start_price"], atr, h, direction, settings, as_of_date=pred["as_of_date"],
                            # predictions stores returns in percentage points (3.0 = 3%); build_plan takes a fraction
-                           predicted_return_high=None if ret_high is None else ret_high / 100.0)
+                           predicted_return_high=None if ret_high is None else ret_high / 100.0,
+                           rules_version=tp.RULES_VERSION, stop_rule=stop_rule,
+                           target_rule=settings.get("plan_default_target_rule", tp.SEED_DEFAULT_TARGET_RULE), range_hl=range_hl)
     if isinstance(result, tp.TradePlan):
         vals = ("planned", None, result.entry, result.stop, result.target, result.risk_per_share, result.reward_risk,
-                result.time_stop_date, result.atr_14, result.llm_target)
+                result.time_stop_date, result.atr_14, result.llm_target, result.stop_rule, result.stop_param,
+                result.target_rule, result.target_param)
     else:
-        vals = ("no_plan", result.reason, None, None, None, None, None, None, result.atr_14, result.llm_target)
+        # A DOWN forecast keeps the reason it has always had on a shared row; FLAT / no direction say which case it is.
+        reason = "not_up" if result.reason == "down" else result.reason
+        vals = ("no_plan", reason, None, None, None, None, None, None, result.atr_14, result.llm_target,
+                stop_rule, None, settings.get("plan_default_target_rule", tp.SEED_DEFAULT_TARGET_RULE), None)
     with _db() as c:
         c.execute("""INSERT OR IGNORE INTO trade_plans
                      (prediction_id, plan_status, no_plan_reason, entry, stop, target, risk_per_share, reward_risk,
-                      time_stop_date, atr_14, llm_target, rules_version, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      time_stop_date, atr_14, llm_target, stop_rule, stop_param, target_rule, target_param,
+                      rules_version, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                   [int(prediction_id), *vals, tp.RULES_VERSION, _now()])
         c.commit()
     return get_plan(prediction_id)

@@ -379,6 +379,57 @@ def _migrate(conn: sqlite3.Connection) -> None:
             rules_version   TEXT NOT NULL,
             created_at      TEXT NOT NULL
         )""")
+    # Exit Planner v2: which rule produced the stop / target. Rows written before v2 read as the rules v1 always used.
+    migrate_columns(conn, "trade_plans", [
+        ("stop_rule",    "TEXT NOT NULL DEFAULT 'atr'"),
+        ("stop_param",   "REAL"),
+        ("target_rule",  "TEXT NOT NULL DEFAULT 'r_multiple'"),
+        ("target_param", "REAL"),
+    ])
+    # Owner-scoped plans (a user's own stop/target, or a protective exit for a position they hold). PRIVATE: never read by the
+    # shared forecast path. History is kept: a new plan supersedes the old one; the only column that may ever change is
+    # superseded_by (NULL -> the newer id, once).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS custom_trade_plans (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner          TEXT NOT NULL,
+            prediction_id  INTEGER NOT NULL REFERENCES predictions(id),
+            kind           TEXT NOT NULL CHECK(kind IN ('custom_long','protective')),
+            stop_rule      TEXT NOT NULL,
+            stop_param     REAL,
+            target_rule    TEXT,
+            target_param   REAL,
+            entry          REAL,
+            stop           REAL,
+            target         REAL,
+            trim_level     REAL,
+            risk_per_share REAL,
+            reward_risk    REAL,
+            time_stop_date TEXT,
+            plan_status    TEXT NOT NULL,
+            no_plan_reason TEXT,
+            rules_version  TEXT NOT NULL,
+            created_at     TEXT NOT NULL,
+            created_by     TEXT NOT NULL,
+            superseded_by  INTEGER REFERENCES custom_trade_plans(id)
+        )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_custom_trade_plans_owner ON custom_trade_plans(owner, prediction_id, kind)")
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS custom_trade_plans_no_delete BEFORE DELETE ON custom_trade_plans
+        BEGIN SELECT RAISE(ABORT, 'custom_trade_plans rows are immutable'); END""")
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS custom_trade_plans_only_supersede BEFORE UPDATE ON custom_trade_plans
+        WHEN OLD.superseded_by IS NOT NULL OR NEW.superseded_by IS NULL
+          OR NEW.id IS NOT OLD.id OR NEW.owner IS NOT OLD.owner OR NEW.prediction_id IS NOT OLD.prediction_id
+          OR NEW.kind IS NOT OLD.kind OR NEW.stop_rule IS NOT OLD.stop_rule OR NEW.stop_param IS NOT OLD.stop_param
+          OR NEW.target_rule IS NOT OLD.target_rule OR NEW.target_param IS NOT OLD.target_param
+          OR NEW.entry IS NOT OLD.entry OR NEW.stop IS NOT OLD.stop OR NEW.target IS NOT OLD.target
+          OR NEW.trim_level IS NOT OLD.trim_level OR NEW.risk_per_share IS NOT OLD.risk_per_share
+          OR NEW.reward_risk IS NOT OLD.reward_risk OR NEW.time_stop_date IS NOT OLD.time_stop_date
+          OR NEW.plan_status IS NOT OLD.plan_status OR NEW.no_plan_reason IS NOT OLD.no_plan_reason
+          OR NEW.rules_version IS NOT OLD.rules_version OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.created_by IS NOT OLD.created_by
+        BEGIN SELECT RAISE(ABORT, 'custom_trade_plans rows are immutable (only superseded_by may be set, once)'); END""")
     # What the stock's own past bars say about that plan (tools.plan_simulator / plan_sim_db). Not a forecast.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS plan_simulations (

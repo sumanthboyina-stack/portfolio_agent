@@ -22,6 +22,12 @@ Settings shape (engine_settings_db.get_trade_plan_settings):
     plan_min_reward_risk              no plan if reward:risk is below this
     plan_max_stop_pct                 {horizon: widest allowed stop, fraction of entry}; wider = 'too_volatile'
     plan_max_loss_pct_by_risk_profile {profile: fraction of total portfolio value lost if the stop hits}
+  v2 additions:
+    plan_min_stop_pct                 smallest stop distance as a fraction of entry (spread / tick-noise floor)
+    plan_min_stop_atr_frac            {horizon: smallest stop distance as a fraction of one day's ATR}; closer = 'too_tight'
+    plan_range_lookback_days          {horizon: N completed daily bars for the range_low / range_mid stop}
+    plan_default_stop_rule            rule shared plans use: atr | range_low | range_mid
+    plan_default_target_rule          rule shared plans use: r_multiple
 """
 
 from __future__ import annotations
@@ -61,6 +67,12 @@ def seed_settings() -> dict:
         "plan_min_reward_risk": SEED_MIN_REWARD_RISK,
         "plan_max_stop_pct": dict(SEED_MAX_STOP_PCT),
         "plan_max_loss_pct_by_risk_profile": dict(SEED_MAX_LOSS_PCT),
+        # v2
+        "plan_min_stop_pct": SEED_MIN_STOP_PCT,
+        "plan_min_stop_atr_frac": dict(SEED_MIN_STOP_ATR_FRAC),
+        "plan_range_lookback_days": dict(SEED_RANGE_LOOKBACK_DAYS),
+        "plan_default_stop_rule": SEED_DEFAULT_STOP_RULE,
+        "plan_default_target_rule": SEED_DEFAULT_TARGET_RULE,
     }
 
 

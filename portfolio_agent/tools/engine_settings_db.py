@@ -215,7 +215,11 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
-_PLAN_HORIZON_KEYS = ("plan_stop_atr_mult", "plan_target_r_multiple", "plan_max_stop_pct")
+_PLAN_HORIZON_KEYS = ("plan_stop_atr_mult", "plan_target_r_multiple", "plan_max_stop_pct",
+                      "plan_min_stop_atr_frac", "plan_range_lookback_days")
+# Rules a SHARED plan may default to: pct needs a fraction and price needs a user's number, so neither can be a default.
+_PLAN_DEFAULT_STOP_RULES = ("atr", "range_low", "range_mid")
+_PLAN_DEFAULT_TARGET_RULES = ("r_multiple",)
 _PLAN_PROFILES = ("conservative", "moderate", "aggressive")
 
 
@@ -234,6 +238,14 @@ def _plan_from_json(raw) -> dict:
     for k in _PLAN_HORIZON_KEYS:
         got = stored.get(k) or {}
         out[k] = {h: float(got.get(str(h), v)) for h, v in seed[k].items()}
+    out["plan_range_lookback_days"] = {h: int(v) for h, v in out["plan_range_lookback_days"].items()}
+    for k, allowed in (("plan_default_stop_rule", _PLAN_DEFAULT_STOP_RULES), ("plan_default_target_rule", _PLAN_DEFAULT_TARGET_RULES)):
+        v = stored.get(k)
+        out[k] = v if v in allowed else seed[k]
+    try:
+        out["plan_min_stop_pct"] = float(stored.get("plan_min_stop_pct", seed["plan_min_stop_pct"]))
+    except (TypeError, ValueError):
+        out["plan_min_stop_pct"] = seed["plan_min_stop_pct"]
     got = stored.get("plan_max_loss_pct_by_risk_profile") or {}
     out["plan_max_loss_pct_by_risk_profile"] = {p: float(got.get(p, v)) for p, v in seed["plan_max_loss_pct_by_risk_profile"].items()}
     try:
@@ -259,8 +271,21 @@ def _validate_trade_plan(patch: dict, current: dict) -> dict:
                 if kk not in keys:
                     raise ValueError(f"{k}: unsupported key {kk!r}; supported: {list(keys)}")
                 merged[k][kk] = float(vv)
+        elif k in ("plan_default_stop_rule", "plan_default_target_rule"):
+            allowed = _PLAN_DEFAULT_STOP_RULES if k == "plan_default_stop_rule" else _PLAN_DEFAULT_TARGET_RULES
+            if v not in allowed:
+                raise ValueError(f"{k}: must be one of {list(allowed)}")
+            merged[k] = v
         else:
             merged[k] = float(v)
+    if not (0 < merged["plan_min_stop_pct"] <= 0.01):
+        raise ValueError("plan_min_stop_pct: must be a fraction above 0 and at most 0.01 (1% of the entry price)")
+    if any(not (0 <= x <= 3) for x in merged["plan_min_stop_atr_frac"].values()):
+        raise ValueError("plan_min_stop_atr_frac: every value must be between 0 and 3 (fractions of one day's ATR)")
+    lo, hi = _tp.RANGE_LOOKBACK_BOUNDS
+    if any(not (lo <= x <= hi) or x != int(x) for x in merged["plan_range_lookback_days"].values()):
+        raise ValueError(f"plan_range_lookback_days: every value must be a whole number of days from {lo} to {hi}")
+    merged["plan_range_lookback_days"] = {h: int(x) for h, x in merged["plan_range_lookback_days"].items()}
     for k in ("plan_stop_atr_mult", "plan_target_r_multiple"):
         if any(not (0 < x <= 20) for x in merged[k].values()):
             raise ValueError(f"{k}: every multiple must be > 0 and at most 20")
