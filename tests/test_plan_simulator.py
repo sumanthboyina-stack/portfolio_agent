@@ -103,7 +103,7 @@ def test_same_inputs_give_identical_results_and_seeds_differ_by_key():
     assert _sim(bars, seed=seed) == _sim(bars, seed=seed)
     assert ps.sim_seed("AAPL", AS_OF, 5, tp.RULES_VERSION) == seed
     others = {ps.sim_seed("MSFT", AS_OF, 5, tp.RULES_VERSION), ps.sim_seed("AAPL", "2026-10-27", 5, tp.RULES_VERSION),
-              ps.sim_seed("AAPL", AS_OF, 21, tp.RULES_VERSION), ps.sim_seed("AAPL", AS_OF, 5, "trade-plan-v2")}
+              ps.sim_seed("AAPL", AS_OF, 21, tp.RULES_VERSION), ps.sim_seed("AAPL", AS_OF, 5, "trade-plan-v99-other")}
     assert seed not in others and len(others) == 4
     assert _sim(bars, seed=seed) != _sim(bars, seed=seed + 1)
 
