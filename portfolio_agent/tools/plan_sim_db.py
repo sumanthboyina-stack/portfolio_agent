@@ -121,7 +121,7 @@ def create_simulation_for_prediction(prediction_id: int, *, settings: dict | Non
     with _db() as c:
         row = c.execute(
             """SELECT p.ticker, p.as_of_date, p.horizon_days, p.scope, t.plan_status, t.entry, t.stop, t.target, t.risk_per_share,
-                      t.reward_risk, t.rules_version
+                      t.reward_risk, t.rules_version, t.stop_rule, t.stop_param, t.target_rule, t.target_param
                FROM predictions p JOIN trade_plans t ON t.prediction_id = p.id WHERE p.id = ?""", [int(prediction_id)]).fetchone()
     if row is None or row["scope"] != SCOPE_SHARED or row["plan_status"] != "planned":
         return None
@@ -143,7 +143,7 @@ def create_simulation_for_prediction(prediction_id: int, *, settings: dict | Non
             vals = {**base, "sim_status": "insufficient_history"}
         else:
             r = ps.simulate(pool, plan, settings["sim_paths"], settings["sim_block_len"], seed)
-            rep = ps.historical_replay(pool, ps.rule_from_settings(plan_settings, h), h)
+            rep = ps.historical_replay(pool, ps.rule_for_plan(dict(row), plan_settings, h), h)
             vals = {**base, "sim_status": "ok", "p_target_first": r.p_target_first, "p_stop_first": r.p_stop_first,
                     "p_timeout": r.p_timeout, "p_target_first_zero_drift": r.p_target_first_zero_drift,
                     "expected_r": r.expected_r, "p_close_above_entry": r.p_close_above_entry, "end_ret_p05": r.end_return_p05,

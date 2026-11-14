@@ -29,13 +29,17 @@ from dataclasses import dataclass
 
 import numpy as np
 
-SIM_VERSION = "plan-sim-v1"
+SIM_VERSION = "plan-sim-v1"          # the simulation method itself is unchanged by Exit Planner v2 (only the plans it is given)
 MIN_HISTORY_BARS = 250          # fewer bars than this and no simulation is run
 ATR_WINDOW = 14
 
 
 class InsufficientHistory(ValueError):
     pass
+
+
+class NotSimulated(ValueError):
+    """A plan this module deliberately does not simulate (a protective exit has no target to hit first)."""
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,8 @@ def simulate(bars, plan, paths: int, block_len: int, seed: int) -> SimResult:
     bars: High / Low / Close dated on or before the forecast (see prepare_bars). plan: anything with entry, stop, target,
     risk_per_share, reward_risk and horizon_days (a TradePlan, or a stored plan row with its horizon).
     """
+    if getattr(plan, "kind", None) == "protective" or getattr(plan, "target", None) is None:
+        raise NotSimulated("protective exit plans are not simulated")
     horizon = int(plan.horizon_days)
     entry, stop, target = float(plan.entry), float(plan.stop), float(plan.target)
     risk, rr = float(plan.risk_per_share), float(plan.reward_risk)
@@ -212,11 +218,37 @@ def sim_disagrees(raw_conviction, p_target_first, min_conviction: float, max_p_t
     return conv >= float(min_conviction) and p < float(max_p_target)
 
 
-def rule_from_settings(settings: dict, horizon_days: int) -> dict:
-    """The plan rule for one horizon, in the shape historical_replay reads (same numbers tools.trade_plan.build_plan uses)."""
+def rule_from_settings(settings: dict, horizon_days: int, *, stop_rule=None, stop_param=None, target_rule=None,
+                       target_param=None) -> dict:
+    """
+    The plan rule for one horizon, in the shape historical_replay reads (same numbers tools.trade_plan.build_plan uses).
+    With no rule arguments it is the v1 rule (ATR stop, R-multiple target) and replays on the original path. Pass any of
+    stop_rule / stop_param / target_rule / target_param (a stored plan's own, see rule_for_plan) to replay a v2 rule: stop_rule in
+    atr | pct | range_low | range_mid | price, target_rule in r_multiple | price. A `price` rule replays as FIXED prices.
+    """
     h = int(horizon_days)
-    return {"stop_atr_mult": settings["plan_stop_atr_mult"][h], "target_r_multiple": settings["plan_target_r_multiple"][h],
+    rule = {"stop_atr_mult": settings["plan_stop_atr_mult"][h], "target_r_multiple": settings["plan_target_r_multiple"][h],
             "max_stop_pct": settings["plan_max_stop_pct"][h], "min_reward_risk": settings["plan_min_reward_risk"]}
+    if stop_rule is None and target_rule is None and stop_param is None and target_param is None:
+        return rule
+    rule.update({
+        "stop_rule": stop_rule or settings.get("plan_default_stop_rule", "atr"), "stop_param": stop_param,
+        "target_rule": target_rule or settings.get("plan_default_target_rule", "r_multiple"), "target_param": target_param,
+        "range_lookback": int((settings.get("plan_range_lookback_days") or {}).get(h, 5)),
+        "min_stop_pct": settings.get("plan_min_stop_pct", 0.0005),
+        "min_stop_atr_frac": (settings.get("plan_min_stop_atr_frac") or {}).get(h, 0.0),
+    })
+    return rule
+
+
+def rule_for_plan(plan, settings: dict, horizon_days: int) -> dict:
+    """The replay rule matching a STORED plan row: its own stop/target rule and parameter (a v1 row, or one with no rule recorded,
+    replays on the v1 path)."""
+    get = plan.get if isinstance(plan, dict) else (lambda k, d=None: getattr(plan, k, d))
+    if get("rules_version") in (None, "trade-plan-v1"):
+        return rule_from_settings(settings, horizon_days)
+    return rule_from_settings(settings, horizon_days, stop_rule=get("stop_rule") or "atr", stop_param=get("stop_param"),
+                              target_rule=get("target_rule") or "r_multiple", target_param=get("target_param"))
 
 
 def _atr_series(high, low, close, window: int = ATR_WINDOW) -> np.ndarray:
@@ -245,6 +277,8 @@ def historical_replay(bars, rule: dict, horizon_days: int) -> ReplayResult:
     close = np.asarray(bars["Close"], dtype=float)
     n_bars = len(close)
     atr = _atr_series(high, low, close)
+    if "stop_rule" in rule:
+        return _historical_replay_v2(bars, high, low, close, atr, rule, h)
     risk = rule["stop_atr_mult"] * atr
     entry = close
     rr = rule["target_r_multiple"]
@@ -264,6 +298,81 @@ def historical_replay(bars, rule: dict, horizon_days: int) -> ReplayResult:
     is_target = (first_target < h) & (first_target < first_stop)
     is_timeout = ~(is_stop | is_target)
     r_timeout = (close[days + h] - entry[days]) / risk[days]
+    r = np.where(is_target, rr, np.where(is_stop, -1.0, r_timeout))
+    return ReplayResult(n=int(len(days)), hits_target=int(is_target.sum()), hits_stop=int(is_stop.sum()),
+                        timeouts=int(is_timeout.sum()), avg_r=float(r.mean()))
+
+
+
+def _half_up_cents(x):
+    return np.floor(np.asarray(x, dtype=float) * 100.0 + 0.5) / 100.0
+
+
+def _floor_cents(x):
+    return np.floor(np.asarray(x, dtype=float) * 100.0 + 1e-9) / 100.0
+
+
+def _levels_v2(high, low, close, atr, rule: dict):
+    """Per-bar entry / stop / target / risk / valid for the v2 rule. Every value at bar i is a function of bars 0..i only (rolling
+    windows end at i), which is what keeps the replay free of look-ahead (tested by recomputing on prefixes)."""
+    import pandas as pd
+    n_bars = len(close)
+    entry = _half_up_cents(close)
+    srule, trule = rule["stop_rule"], rule["target_rule"]
+    nan = np.full(n_bars, np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if srule == "atr":
+            k = rule["stop_param"] if rule.get("stop_param") is not None else rule["stop_atr_mult"]
+            raw_stop = close - k * atr
+        elif srule == "pct":
+            raw_stop = close * (1.0 - float(rule["stop_param"])) if rule.get("stop_param") is not None else nan
+        elif srule in ("range_low", "range_mid"):
+            n = int(rule["stop_param"]) if rule.get("stop_param") is not None else int(rule["range_lookback"])
+            rh = pd.Series(high).rolling(n).max().to_numpy()
+            rl = pd.Series(low).rolling(n).min().to_numpy()
+            raw_stop = rl if srule == "range_low" else (rh + rl) / 2.0
+        else:                                                        # "price": a fixed stop
+            raw_stop = np.full(n_bars, float(rule["stop_param"])) if rule.get("stop_param") is not None else nan
+        stop = _floor_cents(raw_stop)
+        risk = entry - stop
+        if trule == "price":
+            target = _half_up_cents(np.full(n_bars, float(rule["target_param"]))) if rule.get("target_param") is not None else nan
+            tol = 0.0
+        else:
+            r = rule["target_param"] if rule.get("target_param") is not None else rule["target_r_multiple"]
+            target, tol = _half_up_cents(entry + r * risk), 0.005
+        floor = np.maximum(entry * float(rule["min_stop_pct"]), float(rule["min_stop_atr_frac"]) * np.nan_to_num(atr))
+        valid = (np.isfinite(stop) & np.isfinite(target) & (stop < entry) & (stop > 0) & (risk / entry <= rule["max_stop_pct"])
+                 & (risk >= floor - 1e-9) & (target > entry)
+                 & ((target - entry + tol) / risk >= rule["min_reward_risk"] - 1e-9))
+        if srule == "atr":
+            valid &= np.isfinite(atr) & (atr > 0)
+    return entry, stop, target, risk, valid
+
+
+def _historical_replay_v2(bars, high, low, close, atr, rule: dict, h: int) -> ReplayResult:
+    """
+    The v2 rule on every past day: entry = that day's close (cents, half up); stop by stop_rule, floored to the cent; target by
+    target_rule (cents, half up); a day counts only if build_plan would have produced a plan (stop below entry and above zero, not
+    wider than max_stop_pct, not inside the too-tight floors, target above entry, reward:risk at least the minimum). The range rules
+    use the N bars ENDING at the entry day (bars <= that day): no later bar can reach them. `price` rules are fixed dollars.
+    Same walk and same-day-touch = stop convention as the v1 replay.
+    """
+    n_bars = len(close)
+    entry, stop, target, risk, valid = _levels_v2(high, low, close, atr, rule)
+    days = np.flatnonzero(valid[: max(n_bars - h, 0)])
+    if len(days) == 0:
+        return ReplayResult(0, 0, 0, 0, None)
+    win = np.arange(1, h + 1)[None, :] + days[:, None]
+    st, tg, en, rk = stop[days][:, None], target[days][:, None], entry[days], risk[days]
+    hit_stop, hit_target = low[win] <= st, high[win] >= tg
+    first_stop = np.where(hit_stop.any(axis=1), hit_stop.argmax(axis=1), h)
+    first_target = np.where(hit_target.any(axis=1), hit_target.argmax(axis=1), h)
+    is_stop = (first_stop < h) & (first_stop <= first_target)
+    is_target = (first_target < h) & (first_target < first_stop)
+    is_timeout = ~(is_stop | is_target)
+    rr = (target[days] - en) / rk
+    r_timeout = (close[days + h] - en) / rk
     r = np.where(is_target, rr, np.where(is_stop, -1.0, r_timeout))
     return ReplayResult(n=int(len(days)), hits_target=int(is_target.sum()), hits_stop=int(is_stop.sum()),
                         timeouts=int(is_timeout.sum()), avg_r=float(r.mean()))

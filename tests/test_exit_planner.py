@@ -444,3 +444,112 @@ def test_reset_restores_seeds_and_updates_are_versioned_and_audited(monkeypatch)
     assert reset == tp.seed_settings() and esdb.get_trade_plan_settings() == tp.seed_settings()
     ops = [e["operation"] for e in repo.get_audit_events()]
     assert ops.count("update_trade_plan_settings") == 2
+
+
+# ══ Simulator ═════════════════════════════════════════════════════════════════
+
+import numpy as np                                                   # noqa: E402
+from types import SimpleNamespace                                     # noqa: E402
+
+from portfolio_agent.tools import plan_simulator as ps               # noqa: E402
+from tests.test_plan_simulator import _bars                          # noqa: E402
+
+LOOSE = {"max_stop_pct": 0.5, "min_reward_risk": 1.5, "min_stop_pct": 0.0005, "min_stop_atr_frac": 0.0}
+
+
+def _rule(stop_rule, stop_param=None, target_rule="r_multiple", target_param=None, **kw):
+    return {"stop_atr_mult": 1.0, "target_r_multiple": 2.0, **LOOSE, "stop_rule": stop_rule, "stop_param": stop_param,
+            "target_rule": target_rule, "target_param": target_param, "range_lookback": 3, **kw}
+
+
+def test_rule_from_settings_stays_v1_without_rule_arguments_and_adds_v2_keys_with_them():
+    legacy = ps.rule_from_settings(S, 5)
+    assert set(legacy) == {"stop_atr_mult", "target_r_multiple", "max_stop_pct", "min_reward_risk"}
+    v2 = ps.rule_from_settings(S, 21, stop_rule="range_low", target_rule="price", target_param=110.0)
+    assert (v2["stop_rule"], v2["target_rule"], v2["target_param"], v2["range_lookback"]) == ("range_low", "price", 110.0, 10)
+    assert v2["min_stop_pct"] == 0.0005 and v2["min_stop_atr_frac"] == 0.75
+
+
+def test_rule_for_plan_uses_the_stored_rule_and_v1_rows_stay_on_the_v1_path():
+    v1 = ps.rule_for_plan({"rules_version": "trade-plan-v1", "stop_rule": "atr"}, S, 5)
+    assert "stop_rule" not in v1
+    v2 = ps.rule_for_plan({"rules_version": "trade-plan-v2", "stop_rule": "range_low", "stop_param": 7.0,
+                           "target_rule": "r_multiple", "target_param": 2.0}, S, 5)
+    assert (v2["stop_rule"], v2["stop_param"], v2["target_param"]) == ("range_low", 7.0, 2.0)
+
+
+def test_v2_default_replay_matches_v1_replay_on_a_random_walk():
+    rng = np.random.default_rng(3)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.012, 400)))
+    bars = _bars(close, up=0.006, down=0.006)
+    for h in (5, 21):
+        a = ps.historical_replay(bars, ps.rule_from_settings(S, h), h)
+        b = ps.historical_replay(bars, ps.rule_from_settings(S, h, stop_rule="atr", target_rule="r_multiple"), h)
+        assert a.n > 100 and abs(a.n - b.n) <= max(2, 0.03 * a.n)
+        assert abs(a.hits_target - b.hits_target) <= 0.05 * a.n and abs(a.avg_r - b.avg_r) < 0.1
+
+
+def test_replay_range_low_hand_checked():
+    # lows rise 0.5/day from 90, so the N-bar low sits below every later low and the stop is never touched; highs never reach 2R
+    idx = np.arange(20)
+    close = np.full(20, 100.0)
+    bars = _bars(close).assign(High=100.5, Low=90.0 + 0.5 * idx)
+    r = ps.historical_replay(bars, _rule("range_low", 3), 2)
+    valid_days = range(2, 18)                                    # a 3-bar window needs bars d-2..d; two bars must follow
+    assert (r.n, r.hits_stop, r.hits_target, r.timeouts) == (len(valid_days), 0, 0, len(valid_days))
+    assert r.avg_r == pytest.approx(0.0)
+    # now a spike to 130 on bar 12: any day whose 2-bar horizon contains it hits the 2R target (risk 10 - 0.5*(d-2))
+    spiked = bars.copy()
+    spiked.iloc[12, spiked.columns.get_loc("High")] = 130.0
+    r2 = ps.historical_replay(spiked, _rule("range_low", 3), 2)
+    assert r2.n == r.n and r2.hits_target == 2 and r2.hits_stop == 0     # days 10 and 11 see bar 12
+
+
+def test_replay_range_mid_uses_the_midpoint_and_skips_days_where_it_is_not_below_entry():
+    idx = np.arange(20)
+    bars = _bars(np.full(20, 100.0)).assign(High=100.5, Low=90.0 + 0.5 * idx)
+    r = ps.historical_replay(bars, _rule("range_mid", 3), 2)          # mid = (100.5 + low)/2 = 95.25..99: below entry 100 -> valid
+    # ...and above the next day's rising low every time (unlike range_low, whose stop sits at the low itself): all 16 days stop out
+    assert (r.n, r.hits_stop, r.hits_target) == (16, 16, 0) and r.avg_r == pytest.approx(-1.0)
+    high_bars = bars.assign(High=130.0)                                # midpoint (130 + low)/2 > 100 -> stop not below entry
+    assert ps.historical_replay(high_bars, _rule("range_mid", 3), 2).n == 0
+
+
+def test_replay_pct_and_price_rules_are_fixed_levels():
+    flat = _bars(np.full(20, 100.0), up=0.01, down=0.01)              # 99..101 every day
+    flat.iloc[10, flat.columns.get_loc("High")] = 110.0
+    pct = ps.historical_replay(flat, _rule("pct", 0.05, target_rule="r_multiple", target_param=2.0), 2)   # stop 95, target 110
+    assert pct.n == 18 and pct.hits_target == 2 and pct.hits_stop == 0
+    price = ps.historical_replay(flat, _rule("price", 95.0, target_rule="price", target_param=109.0), 2)  # fixed $95 / $109
+    assert price.n == 18 and price.hits_target == 2 and price.hits_stop == 0
+    low_target = ps.historical_replay(flat, _rule("price", 95.0, target_rule="price", target_param=99.0), 2)
+    assert low_target.n == 0                                           # a target at/below entry is never a valid day
+    too_tight = ps.historical_replay(flat, _rule("pct", 0.00001), 2)
+    assert too_tight.n == 0                                            # inside the 0.05% floor
+
+
+@pytest.mark.parametrize("rule", [_rule("range_low", 4), _rule("range_mid", 4), _rule("atr", 1.5), _rule("pct", 0.04)])
+def test_v2_levels_at_each_bar_depend_only_on_bars_up_to_it(rule):
+    rng = np.random.default_rng(11)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 80)))
+    bars = _bars(close, up=0.008, down=0.008)
+    hi, lo, cl = (np.asarray(bars[c], dtype=float) for c in ("High", "Low", "Close"))
+    full = ps._levels_v2(hi, lo, cl, ps._atr_series(hi, lo, cl), rule)
+    for i in (20, 40, 79):
+        part = ps._levels_v2(hi[: i + 1], lo[: i + 1], cl[: i + 1], ps._atr_series(hi[: i + 1], lo[: i + 1], cl[: i + 1]), rule)
+        for a, b in zip(full, part):
+            assert np.array_equal(a[i : i + 1], b[i : i + 1], equal_nan=True) if a.dtype != bool else a[i] == b[i]
+
+
+def test_simulate_accepts_price_plans_as_fixed_prices_and_refuses_protective_ones():
+    rng = np.random.default_rng(5)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 400)))
+    bars = _bars(close, up=0.006, down=0.006)
+    p = plan(close[-1].round(2), 2.0, 5, stop_rule="price", stop_param=float(close[-1] * 0.96), target_rule="price",
+             target_param=float(close[-1] * 1.07))
+    sim = SimpleNamespace(**{**p.to_dict(), "horizon_days": 5})
+    r = ps.simulate(bars, sim, 2_000, 5, 1)
+    assert 0 <= r.p_target_first <= 1 and r.p_target_first + r.p_stop_first + r.p_timeout == pytest.approx(1.0)
+    prot = SimpleNamespace(**{**tp.build_protective_plan(100.0, 2.0, 5, "DOWN", S, as_of_date=AS_OF).to_dict(), "horizon_days": 5})
+    with pytest.raises(ps.NotSimulated):
+        ps.simulate(bars, prot, 100, 5, 1)
