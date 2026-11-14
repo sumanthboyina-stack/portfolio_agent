@@ -97,6 +97,14 @@ def _row_to_plan(row) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def get_shared_prediction(prediction_id: int) -> dict | None:
+    """The market facts of one shared_market forecast (never a private one), or None. Market data only: no owner."""
+    with _db() as c:
+        row = c.execute("SELECT id, ticker, scope, as_of_date, horizon_days, predicted_direction, predicted_return_high, "
+                        "start_price FROM predictions WHERE id = ? AND scope = ?", [int(prediction_id), SCOPE_SHARED]).fetchone()
+    return dict(row) if row else None
+
+
 def get_plan(prediction_id: int) -> dict | None:
     with _db() as c:
         return _row_to_plan(c.execute("SELECT * FROM trade_plans WHERE prediction_id = ?", [int(prediction_id)]).fetchone())
@@ -132,7 +140,7 @@ def create_plan_for_prediction(prediction_id: int, *, settings: dict | None = No
     direction, h = pred["predicted_direction"], pred["horizon_days"]
     atr = None
     range_hl = None
-    # A shared plan always uses the DEFAULT rules (settings), never a user's own numbers: those live in custom_trade_plans.
+    # A shared plan always uses the DEFAULT rules (settings), never a user's own numbers: those are owner-scoped and stored elsewhere.
     stop_rule = settings.get("plan_default_stop_rule", tp.SEED_DEFAULT_STOP_RULE)
     if str(direction or "").upper() == "UP" and h in tp.SUPPORTED_HORIZONS and tp._num(pred["start_price"]):
         atr = atr_as_of(pred["ticker"], pred["as_of_date"], fetch_history=fetch_history)

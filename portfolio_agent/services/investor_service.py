@@ -482,3 +482,154 @@ def refresh_fund_data_now(ctx: RequestContext, *, reason: str | None = None) -> 
     with _uow() as c:
         _audit(ctx, c, "refresh_fund_data_now", after={"funds": summary["funds"], "counts": summary["counts"]}, reason=reason)
     return summary
+
+
+# ── Exit Planner: owner-scoped plans (tools.custom_plan_db) ───────────────────
+
+class NotHeld(PermissionError):
+    """A protective exit plan was requested for a ticker the actor does not hold."""
+
+
+def _owner_holds(ctx: RequestContext, ticker: str) -> bool:
+    portfolio = repo.get_portfolio_by_owner(ctx.actor)
+    if not portfolio:
+        return False
+    t = ticker.upper()
+    return any(str(h.get("ticker") or "").upper() == t and (h.get("shares") or 0) > 0
+               for h in repo.get_holdings(portfolio_id=portfolio["portfolio_id"]))
+
+
+def _plan_inputs(pred: dict, settings: dict, stop_rule: str, stop_param, fetch_history):
+    """Market lookups for one shared forecast (ATR; the recent range when the rule needs one). Network happens here, never
+    inside a write transaction."""
+    from portfolio_agent.tools import trade_plan as tp
+    from portfolio_agent.tools import trade_plan_db as tpdb
+    h = pred["horizon_days"]
+    atr = range_hl = None
+    if h in tp.SUPPORTED_HORIZONS and tp._num(pred["start_price"]):
+        atr = tpdb.atr_as_of(pred["ticker"], pred["as_of_date"], fetch_history=fetch_history)
+        if stop_rule in ("range_low", "range_mid"):
+            n = stop_param if stop_param is not None else settings["plan_range_lookback_days"].get(h)
+            try:
+                range_hl = tpdb.recent_range_as_of(pred["ticker"], pred["as_of_date"], int(n), fetch_history=fetch_history)
+            except (TypeError, ValueError):
+                range_hl = None
+    return atr, range_hl
+
+
+def _custom_plan_snapshot(row: dict | None) -> dict | None:
+    if row is None:
+        return None
+    return {k: row.get(k) for k in ("id", "kind", "prediction_id", "stop_rule", "stop_param", "target_rule", "target_param",
+                                    "entry", "stop", "target", "trim_level", "risk_per_share", "reward_risk", "plan_status",
+                                    "no_plan_reason", "rules_version")}
+
+
+def create_custom_plan(ctx: RequestContext, prediction_id: int, stop_rule: str | None = None, stop_param=None,
+                       target_rule: str | None = None, target_param=None, *, fetch_history=None,
+                       reason: str | None = None) -> dict:
+    """
+    The actor's OWN plan for a shared forecast: their stop rule / price and target rule / price (UP forecast: kind custom_long), or
+    their stop for a protective exit on a position they HOLD (DOWN forecast: kind protective; no target, never a short).
+    Built by the same pure rules as a shared plan (tools.trade_plan, trade-plan-v2), so every refusal (too_tight, too_volatile,
+    stop_not_below_entry, ...) applies; a refused plan is recorded too, with its reason. Stored per owner in custom_trade_plans, history
+    kept (the previous plan is superseded, never edited), one transaction with its audit event. Returns the stored row plus `message`.
+    """
+    require_context(ctx)
+    from portfolio_agent.tools import custom_plan_db as cpdb
+    from portfolio_agent.tools import prediction_db as predb
+    from portfolio_agent.tools import trade_plan as tp
+    from portfolio_agent.tools import trade_plan_db as tpdb
+    from portfolio_agent.tools.engine_settings_db import get_trade_plan_settings
+
+    predb.ensure_schema()
+    pred = tpdb.get_shared_prediction(prediction_id)
+    if pred is None:
+        raise ValueError("custom plans attach to a shared market forecast; that prediction is not one")
+    settings = get_trade_plan_settings()
+    stop_rule = stop_rule or settings["plan_default_stop_rule"]
+    if stop_rule not in tp.STOP_RULES:
+        raise ValueError(f"stop_rule must be one of {list(tp.STOP_RULES)}")
+    direction = str(pred["predicted_direction"] or "").upper()
+    ret = tp._num(pred["predicted_return_high"])
+    ret_frac = None if ret is None else ret / 100.0                 # predictions stores percentage points
+    atr, range_hl = _plan_inputs(pred, settings, stop_rule, stop_param, fetch_history)
+
+    if direction == "UP":
+        kind = "custom_long"
+        target_rule = target_rule or settings["plan_default_target_rule"]
+        if target_rule not in tp.TARGET_RULES:
+            raise ValueError(f"target_rule must be one of {list(tp.TARGET_RULES)}")
+        result = tp.build_plan(pred["start_price"], atr, pred["horizon_days"], direction, settings,
+                               as_of_date=pred["as_of_date"], predicted_return_high=ret_frac, rules_version=tp.RULES_VERSION,
+                               stop_rule=stop_rule, stop_param=stop_param, target_rule=target_rule, target_param=target_param,
+                               range_hl=range_hl)
+    elif direction == "DOWN":
+        kind = "protective"
+        if target_rule is not None or target_param is not None:
+            raise ValueError("a protective exit has no target: it caps the loss on a position you hold")
+        if not _owner_holds(ctx, pred["ticker"]):
+            raise NotHeld(f"you do not hold {pred['ticker']}; a protective exit applies only to a position you hold")
+        result = tp.build_protective_plan(pred["start_price"], atr, pred["horizon_days"], direction, settings,
+                                          as_of_date=pred["as_of_date"], predicted_return_high=ret_frac,
+                                          stop_rule=stop_rule, stop_param=stop_param, range_hl=range_hl)
+    else:
+        raise ValueError(f"no plan exists for a {direction or 'directionless'} forecast")
+
+    vals = dict(owner=ctx.actor, prediction_id=int(prediction_id), kind=kind, stop_rule=stop_rule, rules_version=tp.RULES_VERSION,
+                created_by=ctx.actor, target_rule=target_rule if kind == "custom_long" else None)
+    if isinstance(result, tp.NoPlan):
+        vals.update(stop_param=tp._num(stop_param), target_param=tp._num(target_param), plan_status="no_plan",
+                    no_plan_reason=result.reason)
+        message = result.message
+    else:
+        d = result.to_dict()
+        vals.update(stop_param=d["stop_param"], target_param=d.get("target_param"), entry=d["entry"], stop=d["stop"],
+                    target=d.get("target"), trim_level=d.get("trim_level"), risk_per_share=d["risk_per_share"],
+                    reward_risk=d.get("reward_risk"), time_stop_date=d["time_stop_date"], plan_status="planned")
+        message = ""
+    with _uow() as c:
+        before = _custom_plan_snapshot(cpdb.active_in(c, ctx.actor, int(prediction_id), kind))
+        new_id = cpdb.insert_plan(c, **vals)
+        after = _custom_plan_snapshot(cpdb.active_in(c, ctx.actor, int(prediction_id), kind))
+        _audit(ctx, c, "create_custom_plan", before=before, after=after, reason=reason)
+    row = cpdb.get_active(ctx.actor, [prediction_id])[int(prediction_id)][kind]
+    assert row["id"] == new_id
+    return {**row, "message": message}
+
+
+def get_custom_plans(ctx: RequestContext, prediction_ids) -> dict[int, dict[str, dict]]:
+    """The actor's own current custom / protective plans, {prediction_id: {kind: row}}. Never another owner's."""
+    require_context(ctx)
+    from portfolio_agent.tools import custom_plan_db as cpdb
+    from portfolio_agent.tools import prediction_db as predb
+    predb.ensure_schema()
+    return cpdb.get_active(ctx.actor, prediction_ids)
+
+
+def get_protective_plan(ctx: RequestContext, prediction_id: int, *, fetch_history=None) -> dict | None:
+    """
+    The protective exit for the actor on a DOWN forecast, only if they HOLD the ticker (None otherwise: no holding, no plan, and
+    nothing is revealed about the forecast's plan to a non-holder). The actor's own stored stop wins; with none, the default-rule plan
+    is built at read time (not stored). A refusal comes back as {plan_status: 'no_plan', no_plan_reason, message}.
+    """
+    require_context(ctx)
+    from portfolio_agent.tools import custom_plan_db as cpdb
+    from portfolio_agent.tools import trade_plan as tp
+    from portfolio_agent.tools import trade_plan_db as tpdb
+    from portfolio_agent.tools.engine_settings_db import get_trade_plan_settings
+
+    pred = tpdb.get_shared_prediction(prediction_id)
+    if pred is None or str(pred["predicted_direction"] or "").upper() != "DOWN" or not _owner_holds(ctx, pred["ticker"]):
+        return None
+    stored = get_custom_plans(ctx, [prediction_id]).get(int(prediction_id), {}).get("protective")
+    if stored:
+        return {**stored, "source": "custom"}
+    settings = get_trade_plan_settings()
+    rule = settings["plan_default_stop_rule"]
+    atr, range_hl = _plan_inputs(pred, settings, rule, None, fetch_history)
+    ret = tp._num(pred["predicted_return_high"])
+    res = tp.build_protective_plan(pred["start_price"], atr, pred["horizon_days"], "DOWN", settings, as_of_date=pred["as_of_date"],
+                                   predicted_return_high=None if ret is None else ret / 100.0, stop_rule=rule, range_hl=range_hl)
+    d = res.to_dict()
+    return {**d, "source": "default", "prediction_id": int(prediction_id), "kind": "protective", "message": d.get("message", "")}

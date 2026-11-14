@@ -72,9 +72,14 @@ class PortfolioFit:
     # Private: the owner's max-loss share count for the plan's stop (tools.trade_plan.size_position), computed at read time
     # from their own portfolio. None when the forecast has no plan or the portfolio value is unknown.
     plan_sizing: dict | None = None
+    # Private (owner-scoped): the owner's OWN stored plans for this forecast, if any. A custom_long plan replaces
+    # the shared plan for sizing; a protective exit (DOWN forecast on a holding) is shown beside it. Never part of MarketOutlook.
+    custom_plan: dict | None = None
+    protective_plan: dict | None = None
 
     def to_dict(self) -> dict:
-        return {"plan_sizing": self.plan_sizing, "status": self.status, "current_weight_pct": self.current_weight_pct,
+        return {"plan_sizing": self.plan_sizing, "custom_plan": self.custom_plan, "protective_plan": self.protective_plan,
+                "status": self.status, "current_weight_pct": self.current_weight_pct,
                 "sector_concentration_pct": self.sector_concentration_pct,
                 "issuer_concentration_pct": self.issuer_concentration_pct, "fit_score": self.fit_score,
                 "limits": [c.to_dict() if hasattr(c, "to_dict") else c for c in self.limits],
@@ -177,8 +182,8 @@ def plan_sizing(ctx, plan: dict | None, *, total_value=None, ticker: str | None 
     from the owner's own portfolio and policy at read time and NEVER stored, so it always reflects today's book. None if
     there is no planned trade or the portfolio value is unknown.
     """
-    if not plan or plan.get("plan_status") != "planned":
-        return None
+    if not plan or plan.get("plan_status") != "planned" or plan.get("kind") == "protective":
+        return None                                  # a protective exit is for a position already held: nothing to buy
     from types import SimpleNamespace
     from portfolio_agent.tools.engine_settings_db import get_trade_plan_settings
     from portfolio_agent.tools.portfolio_policy import get_effective_policy
@@ -201,12 +206,22 @@ def _portfolio_fit(ctx, ticker: str, plan: dict | None = None) -> PortfolioFit:
     from portfolio_agent.tools.portfolio_assessment import build_portfolio_assessment
 
     pa = build_portfolio_assessment(ctx, ticker)
+    custom = protective = None
+    try:                                             # the owner's own plans for this forecast (private; absent for everyone else)
+        pid = (plan or {}).get("prediction_id")
+        if pid is not None:
+            from portfolio_agent.services.investor_service import get_custom_plans
+            mine = get_custom_plans(ctx, [pid]).get(int(pid), {})
+            custom, protective = mine.get("custom_long"), mine.get("protective")
+    except Exception:
+        custom = protective = None
     try:
-        sizing_for_plan = plan_sizing(ctx, plan, total_value=pa.exposures.get("total_value"))
+        sizing_for_plan = plan_sizing(ctx, custom if custom and custom.get("plan_status") == "planned" else plan,
+                                      total_value=pa.exposures.get("total_value"))
     except Exception:
         sizing_for_plan = None
     return PortfolioFit(
-        plan_sizing=sizing_for_plan,
+        plan_sizing=sizing_for_plan, custom_plan=custom, protective_plan=protective,
         status=pa.fit.get("status", "OK"), current_weight_pct=pa.exposures.get("current_weight_pct"),
         sector_concentration_pct=pa.exposures.get("sector_concentration_pct"),
         issuer_concentration_pct=pa.exposures.get("issuer_concentration_pct"), fit_score=pa.fit.get("fit_score"),

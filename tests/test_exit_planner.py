@@ -553,3 +553,188 @@ def test_simulate_accepts_price_plans_as_fixed_prices_and_refuses_protective_one
     prot = SimpleNamespace(**{**tp.build_protective_plan(100.0, 2.0, 5, "DOWN", S, as_of_date=AS_OF).to_dict(), "horizon_days": 5})
     with pytest.raises(ps.NotSimulated):
         ps.simulate(bars, prot, 100, 5, 1)
+
+
+# ══ Owner-scoped plans: service, audit, privacy ═══════════════════════════════
+
+import inspect                                                        # noqa: E402
+
+from portfolio_agent.services import investor_service as svc          # noqa: E402
+from portfolio_agent.services.account_service import add_position, create_account   # noqa: E402
+from portfolio_agent.services.context import RequestContext, _mint_identity_for_tests, local_context   # noqa: E402
+from portfolio_agent.tools import custom_plan_db as cpdb              # noqa: E402
+from portfolio_agent.tools import holdings_db as repo                 # noqa: E402
+
+ALICE = local_context("test")
+BOB = RequestContext(identity=_mint_identity_for_tests("bob"), source="test")
+FLAT_OHLC = lambda t, d: _ohlc(False)                                 # noqa: E731  ATR 2.0, last close 100
+
+
+def _hold(ctx, ticker, shares=10):
+    acct = create_account(ctx, broker="fidelity", account_number=f"{ctx.actor}-1", display_name="Main", account_type="TAXABLE")
+    add_position(ctx, acct["account_id"], {"ticker": ticker, "shares": shares, "avg_cost": 90.0, "cost_basis_total": 90.0 * shares,
+                                           "account_name": "Main", "account_type": "TAXABLE"}, as_of_date="2026-09-01")
+
+
+def _ops():
+    return [e["operation"] for e in repo.get_audit_events()]
+
+
+def test_custom_long_plan_uses_the_users_own_prices_and_is_audited_and_superseded():
+    pid = _shared("AAPL")
+    row = svc.create_custom_plan(ALICE, pid, "price", 96.5, "price", 108.0, fetch_history=FLAT_OHLC)
+    assert (row["kind"], row["owner"], row["plan_status"], row["rules_version"]) == ("custom_long", ALICE.actor, "planned", "trade-plan-v2")
+    assert (row["entry"], row["stop"], row["target"], row["risk_per_share"]) == (100.0, 96.5, 108.0, 3.5)
+    assert row["reward_risk"] == pytest.approx(8.0 / 3.5, abs=1e-4) and row["created_by"] == ALICE.actor
+    assert (row["stop_rule"], row["stop_param"], row["target_rule"], row["target_param"]) == ("price", 96.5, "price", 108.0)
+    second = svc.create_custom_plan(ALICE, pid, "pct", 0.05, fetch_history=FLAT_OHLC, reason="widen")
+    assert second["id"] != row["id"] and second["stop"] == 95.0 and second["target_rule"] == "r_multiple"
+    hist = cpdb.get_history(ALICE.actor, pid)
+    assert [h["id"] for h in hist] == [row["id"], second["id"]]
+    assert hist[0]["superseded_by"] == second["id"] and hist[1]["superseded_by"] is None
+    assert hist[0]["stop"] == 96.5                                    # history is never rewritten
+    events = [e for e in repo.get_audit_events() if e["operation"] == "create_custom_plan"]
+    assert len(events) == 2 and events[0]["reason"] == "widen"
+    assert events[0]["before"]["stop"] == 96.5 and events[0]["after"]["stop"] == 95.0     # newest first: before = the plan it replaced
+    assert events[1]["before"] is None and events[1]["after"]["stop"] == 96.5
+
+
+def test_a_refused_custom_plan_is_recorded_with_its_reason_and_message():
+    pid = _shared("AAPL")
+    row = svc.create_custom_plan(ALICE, pid, "price", 99.99, fetch_history=FLAT_OHLC)
+    assert (row["plan_status"], row["no_plan_reason"], row["stop"]) == ("no_plan", "too_tight", None)
+    assert "Widen it" in row["message"] and "$0.01" in row["message"]
+    ok = svc.create_custom_plan(ALICE, pid, "price", 96.0, fetch_history=FLAT_OHLC)
+    assert ok["plan_status"] == "planned" and cpdb.get_history(ALICE.actor, pid)[0]["superseded_by"] == ok["id"]
+
+
+def test_custom_plans_validate_their_inputs():
+    pid = _shared("AAPL")
+    with pytest.raises(ValueError):
+        svc.create_custom_plan(ALICE, pid, "bogus", 1.0, fetch_history=FLAT_OHLC)
+    with pytest.raises(ValueError):
+        svc.create_custom_plan(ALICE, pid, "pct", 0.05, "bogus", fetch_history=FLAT_OHLC)
+    with pytest.raises(ValueError):
+        svc.create_custom_plan(ALICE, 99999, "pct", 0.05, fetch_history=FLAT_OHLC)           # no such forecast
+    with pytest.raises(ValueError):
+        svc.create_custom_plan(ALICE, _shared("MSFT", direction="FLAT"), "pct", 0.05, fetch_history=FLAT_OHLC)
+    with pytest.raises(Exception):
+        svc.create_custom_plan(None, pid, "pct", 0.05, fetch_history=FLAT_OHLC)             # needs a verified context
+
+
+def test_a_private_forecast_cannot_carry_a_custom_plan():
+    from portfolio_agent.tools.forecast_writer import ForecastProvenance, write_private_forecast
+    res = write_private_forecast(ALICE.actor, ForecastProvenance(origin="chat.ticker_prediction", model_used="x:y"), ticker="AAPL",
+                                 prediction="BULLISH", recommendation="BUY", horizon_days=5, predicted_direction="UP",
+                                 predicted_return_high=3.0, start_price=100.0)
+    with pytest.raises(ValueError):
+        svc.create_custom_plan(ALICE, res["id"], "pct", 0.05, fetch_history=FLAT_OHLC)
+
+
+def test_custom_plans_are_invisible_to_other_owners():
+    pid = _shared("AAPL")
+    svc.create_custom_plan(ALICE, pid, "price", 96.5, "price", 108.0, fetch_history=FLAT_OHLC)
+    assert svc.get_custom_plans(BOB, [pid]) == {} and cpdb.get_active("bob", [pid]) == {} and cpdb.get_history("bob", pid) == []
+    assert svc.get_custom_plans(ALICE, [pid])[pid]["custom_long"]["stop"] == 96.5
+    with pytest.raises(ValueError):
+        cpdb.get_active("", [pid])                                    # there is no un-owned read
+    # bob writing his own plan neither shows alice's nor supersedes it
+    svc.create_custom_plan(BOB, pid, "pct", 0.04, fetch_history=FLAT_OHLC)
+    assert svc.get_custom_plans(ALICE, [pid])[pid]["custom_long"]["stop"] == 96.5
+    assert svc.get_custom_plans(BOB, [pid])[pid]["custom_long"]["stop"] == 96.0
+
+
+def test_the_shared_plan_never_changes_and_never_carries_owner_data():
+    _store_snapshot("AAPL", AS_OF, 2.0)
+    pid = _shared("AAPL")
+    shared = tpdb.create_plan_for_prediction(pid)
+    svc.create_custom_plan(ALICE, pid, "price", 96.5, "price", 108.0, fetch_history=FLAT_OHLC)
+    assert tpdb.get_plan(pid) == shared and shared["stop"] == 97.0
+    assert not {"owner", "created_by", "kind", "trim_level"} & set(shared)
+
+
+def test_composer_uses_the_owners_custom_plan_for_sizing_and_only_for_them(monkeypatch):
+    from portfolio_agent.tools import decision_composer as dc
+    from portfolio_agent.tools import trade_plan_db  # noqa: F401
+    _store_snapshot("AAPL", AS_OF, 2.0)
+    pid = _shared("AAPL")
+    tpdb.create_plan_for_prediction(pid)
+    svc.create_custom_plan(ALICE, pid, "price", 92.0, "price", 130.0, fetch_history=FLAT_OHLC)          # risk $8 (the 5d max), not the shared $3
+    monkeypatch.setattr(dc, "plan_sizing", lambda ctx, plan, **kw: {"risk_per_share": (plan or {}).get("risk_per_share")})
+    monkeypatch.setattr("portfolio_agent.tools.portfolio_assessment.build_portfolio_assessment",
+                        lambda ctx, t: SimpleNamespace(exposures={"total_value": 100000.0}, fit={"status": "OK"}, limits=[], sizing={}, built_at="x"))
+    mine = dc._portfolio_fit(ALICE, "AAPL", tpdb.get_plan(pid))
+    theirs = dc._portfolio_fit(BOB, "AAPL", tpdb.get_plan(pid))
+    assert mine.custom_plan["stop"] == 92.0 and mine.plan_sizing == {"risk_per_share": 8.0}
+    assert theirs.custom_plan is None and theirs.plan_sizing == {"risk_per_share": 3.0}
+
+
+# ── protective exits ──────────────────────────────────────────────────────────
+
+def test_protective_plan_only_for_a_holder_and_never_for_a_non_holder():
+    pid = _shared("MSFT", direction="DOWN", ret_high=2.0)
+    assert svc.get_protective_plan(ALICE, pid, fetch_history=FLAT_OHLC) is None          # no holding, no plan
+    with pytest.raises(svc.NotHeld):
+        svc.create_custom_plan(ALICE, pid, "pct", 0.05, fetch_history=FLAT_OHLC)
+    _hold(ALICE, "MSFT")
+    plan_ = svc.get_protective_plan(ALICE, pid, fetch_history=FLAT_OHLC)
+    assert plan_["source"] == "default" and plan_["plan_status"] == "planned" and plan_["kind"] == "protective"
+    assert (plan_["stop"], plan_["entry"], plan_["target"], plan_["reward_risk"]) == (97.0, 100.0, None, None)
+    assert plan_["trim_level"] == 102.0                                                   # 100 * (1 + 2%) is above entry
+    assert svc.get_protective_plan(BOB, pid, fetch_history=FLAT_OHLC) is None             # alice holds it; bob does not
+    assert cpdb.get_active(ALICE.actor, [pid]) == {}                                      # the default plan is read-time only, not stored
+    assert _ops().count("create_custom_plan") == 0
+
+
+def test_protective_trim_level_is_absent_when_not_above_entry():
+    pid = _shared("MSFT", direction="DOWN", ret_high=-1.0)
+    _hold(ALICE, "MSFT")
+    assert svc.get_protective_plan(ALICE, pid, fetch_history=FLAT_OHLC)["trim_level"] is None
+
+
+def test_a_users_own_protective_stop_is_stored_per_owner_and_has_no_target():
+    pid = _shared("MSFT", direction="DOWN", ret_high=2.0)
+    _hold(ALICE, "MSFT")
+    with pytest.raises(ValueError):
+        svc.create_custom_plan(ALICE, pid, "pct", 0.05, "price", 90.0, fetch_history=FLAT_OHLC)   # a protective exit has no target
+    row = svc.create_custom_plan(ALICE, pid, "pct", 0.05, fetch_history=FLAT_OHLC)
+    assert (row["kind"], row["stop"], row["target"], row["target_rule"], row["plan_status"]) == ("protective", 95.0, None, None, "planned")
+    got = svc.get_protective_plan(ALICE, pid, fetch_history=FLAT_OHLC)
+    assert got["source"] == "custom" and got["stop"] == 95.0
+    assert svc.get_protective_plan(BOB, pid, fetch_history=FLAT_OHLC) is None and svc.get_custom_plans(BOB, [pid]) == {}
+    assert "create_custom_plan" in _ops()
+
+
+def test_a_down_forecast_never_yields_a_short_plan():
+    pid = _shared("MSFT", direction="DOWN")
+    _hold(ALICE, "MSFT")
+    got = svc.get_protective_plan(ALICE, pid, fetch_history=FLAT_OHLC)
+    assert got["target"] is None and got["reward_risk"] is None
+    assert got["stop"] < got["entry"]                                                     # a stop BELOW the position: an exit, never a short entry
+    assert "never plans a short" in tp.NoPlan("down").message
+
+
+# ── boundary: the shared path never touches the private table ─────────────────
+
+@pytest.mark.parametrize("modname", [
+    "portfolio_agent.tools.trade_plan", "portfolio_agent.tools.trade_plan_db", "portfolio_agent.tools.plan_simulator",
+    "portfolio_agent.tools.plan_sim_db", "portfolio_agent.tools.forecast_writer", "portfolio_agent.tools.market_context",
+    "portfolio_agent.tools.instrument_reference", "portfolio_agent.pipeline.daily.apex",
+])
+def test_shared_forecast_path_never_imports_or_reads_custom_plans(modname):
+    import importlib
+    src = inspect.getsource(importlib.import_module(modname))
+    assert "custom_plan_db" not in src and "custom_trade_plans" not in src
+
+
+def test_prediction_db_only_creates_the_private_table_and_never_reads_it():
+    src = inspect.getsource(pdb)
+    assert "custom_plan_db" not in src and "FROM custom_trade_plans" not in src and "INTO custom_trade_plans" not in src
+
+
+def test_only_the_service_imports_the_private_store():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent / "portfolio_agent"
+    users = sorted(str(p.relative_to(root)) for p in root.rglob("*.py")
+                   if "custom_plan_db" in p.read_text() and p.name != "custom_plan_db.py")
+    assert users == ["services/investor_service.py"], users
