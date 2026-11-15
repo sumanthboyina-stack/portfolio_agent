@@ -446,6 +446,59 @@ Note: some companies (e.g. Apple since 2020) do not provide quantitative quarter
 
 ---
 
+## Trade plans and the Exit Planner
+
+Every shared UP forecast on the 5, 21 and 63 day horizons gets a deterministic trade plan: an entry (the forecast's as-of close), a stop, a target and a time stop (the horizon, in trading days). The model sets none of these numbers; they are a pure function of the prices, the ATR, the settings and the rule (`tools/trade_plan.py`). The model's own upper return is shown beside the plan as `llm_target`, for comparison only. **Nothing here places an order and nothing here is a short sale.**
+
+Plans are immutable: one row per forecast, never updated or deleted. A new rule set gets a new version (`trade-plan-v2`; older rows stay `trade-plan-v1` and are never rewritten by a backfill).
+
+### Stop and target rules
+
+| Stop rule | Long stop | Parameter |
+|---|---|---|
+| `atr` (default) | entry − k × ATR14 | k, default `plan_stop_atr_mult[h]` |
+| `pct` | entry × (1 − p) | p as a fraction |
+| `range_low` | lowest low of the last N completed daily bars up to the forecast date | N, default `plan_range_lookback_days[h]` (5 / 10 / 20) |
+| `range_mid` | midpoint of the highest high and lowest low over the same N bars | N (refused unless below the entry) |
+| `price` | your own price | the price (private, see below) |
+
+| Target rule | Long target | Parameter |
+|---|---|---|
+| `r_multiple` (default) | entry + R × risk | R, default `plan_target_r_multiple[h]` |
+| `price` | your own price | the price (private) |
+
+Prices round to the cent: the stop **down** (away from the entry), the target and entry half-up. Risk per share is the entry minus the rounded stop, and reward:risk is recomputed from the rounded prices. Shared plans always use the default rules (`plan_default_stop_rule`, `plan_default_target_rule`).
+
+### Why a plan is refused
+
+The first reason that applies is reported:
+
+| Reason | Meaning |
+|---|---|
+| `down` / `flat` / `no_direction` | A shared plan exists only for UP. (A stored DOWN row keeps the older `not_up` code, which old v1 rows also use.) |
+| `unsupported_horizon` | Only 5, 21 and 63 days; 250d has no plan. |
+| `missing_price`, `missing_atr`, `missing_range` | The input the rule needs was not available as of the forecast date. |
+| `invalid_rule`, `invalid_rule_param` | An unknown rule, or a missing or out-of-range value. |
+| `stop_not_below_entry`, `stop_at_or_below_zero` | The stop is not a real stop. |
+| `too_volatile` | The stop is wider than `plan_max_stop_pct[h]` of the entry. |
+| `too_tight` | The stop is inside normal noise: closer than `plan_min_stop_pct` of the entry (the spread / tick floor, 0.05%) or than `plan_min_stop_atr_frac[h]` of a day's ATR (0.5 / 0.75 / 1.0). The message gives the dollars, e.g. "The stop is $0.42 under the entry, inside half a day's typical move ($0.61). Widen it." There is no bid/ask feed, so `min_risk_floor(..., spread=None)` is where a real spread plugs in later. |
+| `target_not_above_entry`, `below_min_rr` | The target is not above the entry, or reward:risk is under `plan_min_reward_risk`. |
+
+### Your own plan, and protective exits (private)
+
+Anything that depends on one person lives in an owner-scoped table (`custom_trade_plans`), written only through `investor_service.create_custom_plan` (authorised, one transaction, audited, history kept: a new plan supersedes the old one, which is never edited). The shared forecast path never reads it.
+
+- **Your stop and target.** On an UP forecast you can set your own stop (any rule above, including a price) and target. The same checks apply, and a refused plan is recorded with its reason.
+- **Protective exit.** A DOWN forecast has no shared plan and never a short. If you **hold** the stock, you see a protective exit: a stop (same rules) that caps the damage if the call is right, the model's own trim level (`entry × (1 + predicted_return_high)`, shown only when above the entry, display only), and the horizon as the time stop. It has no target and is not simulated. If you do not hold the stock you see nothing.
+
+### History replay
+
+Each stored plan is replayed against the stock's own past bars (`tools/plan_simulator.py`), using the plan's own rule: the range rules are recomputed on every past day from bars up to that day only. A plan with a `price` stop is replayed as fixed prices. Protective exits are not simulated. The replay is not a forecast.
+
+### Settings
+
+All `plan_*` settings are admin-only (Investor profile → Admin → Trade plan), versioned with `expected_version`, audited, and resettable to the seeds: `plan_stop_atr_mult`, `plan_target_r_multiple`, `plan_min_reward_risk`, `plan_max_stop_pct`, `plan_max_loss_pct_by_risk_profile`, and (new) `plan_min_stop_pct`, `plan_min_stop_atr_frac`, `plan_range_lookback_days`, `plan_default_stop_rule` (`atr` / `range_low` / `range_mid`) and `plan_default_target_rule` (`r_multiple`). A change applies to new plans only.
+
 ## Dynamic weight engine
 
 The four analyst scores are not combined with fixed weights. The weight engine adjusts based on market conditions at prediction time:

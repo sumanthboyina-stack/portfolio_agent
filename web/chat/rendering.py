@@ -330,7 +330,7 @@ def render_trade_plan_and_sizing(ticker: str) -> None:
     from portfolio_agent.tools.plan_sim_db import get_flagged_ids, get_raw_convictions, get_sim
     from portfolio_agent.tools.trade_plan_db import get_plan
     from web.auth import current_context
-    from web.components.trade_plan_view import blended_odds, plan_block_html
+    from web.components.trade_plan_view import blended_odds, owner_plan_html, plan_block_html, render_owner_plan_form
 
     ticker = ticker.upper()
     try:
@@ -342,6 +342,7 @@ def render_trade_plan_and_sizing(ticker: str) -> None:
         except Exception:
             total_value = None                      # no portfolio / not authorized: the plan still shows, sizing does not
         blocks = []
+        owner_forms: list = []
         for h in (5, 21, 63):
             latest = get_latest_prediction(ticker, h, scopes=SHARED_SCOPES)
             plan = get_plan(latest.id) if latest is not None and latest.id is not None else None
@@ -351,10 +352,20 @@ def render_trade_plan_and_sizing(ticker: str) -> None:
             blocks.append(plan_block_html(plan, horizon_days=h, sizing=sizing, sim=get_sim(latest.id),
                                           flagged=latest.id in get_flagged_ids([latest.id]),
                                           blend_p=blended_odds(h, get_sim(latest.id), get_raw_convictions([latest.id]).get(latest.id))))
+            direction = str(getattr(latest, "predicted_direction", "") or "").upper()
+            if direction in ("UP", "DOWN"):                     # the viewer's OWN plan: private, shown only to them
+                mine = owner_plan_html(ctx, latest.id, direction, plan, horizon_days=h)
+                if mine:
+                    blocks.append(mine)
+                owner_forms.append((latest.id, direction, bool(mine)))
         if blocks:
             st.markdown("".join(blocks), unsafe_allow_html=True)
-            st.caption("Trade plan rules: stop = ATR multiple below entry, target = multiple of that risk, set by rules and not by the model. "
-                       "Sizing is private to you.")
+            st.caption("Trade plan rules: the stop (ATR multiple, percent, recent range or a price) and the target (multiple of the risk or a "
+                       "price) are set by rules and not by the model; prices round to the cent. A DOWN forecast never gets a short: a "
+                       "protective exit appears only for a position you hold. Your own plans and sizing are private to you.")
+        for pid_, direction, has_mine in owner_forms:
+            if direction == "UP" or has_mine:
+                render_owner_plan_form(ctx, pid_, direction, key=f"chat_{ticker}_{pid_}")
     except Exception:
         return
 

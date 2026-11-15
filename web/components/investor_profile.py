@@ -508,9 +508,10 @@ def render_investor_admin(ctx) -> None:
             es = esdb.get_engine_settings()
             tps = esdb.get_trade_plan_settings(es)
             hzs = (5, 21, 63)
-            st.caption("The rules behind every trade plan: the stop sits an ATR multiple below the entry, the target is a multiple of "
-                       "that risk above it, and the time stop is the forecast horizon. The model sets none of these numbers. A change "
-                       "applies to NEW plans; plans already written are never rewritten.")
+            st.caption("The rules behind every trade plan: by default the stop sits an ATR multiple below the entry, the target is a "
+                       "multiple of that risk above it, and the time stop is the forecast horizon. The model sets none of these numbers. "
+                       "Prices round to the cent (stop down, target up). A change applies to NEW plans; plans already written are never "
+                       "rewritten. Owners can set their own stop and target on a plan; those stay private to them.")
             with st.form("admin_trade_plan"):
                 cols = st.columns(len(hzs))
                 stop_m, tgt_m, max_stop = {}, {}, {}
@@ -519,6 +520,17 @@ def render_investor_admin(ctx) -> None:
                     tgt_m[h] = c.number_input(f"{h}d target (× risk)", 0.1, 20.0, float(tps["plan_target_r_multiple"][h]), 0.25, key=f"tp_tgt_{h}")
                     max_stop[h] = c.number_input(f"{h}d widest stop %", 0.5, 100.0, float(tps["plan_max_stop_pct"][h] * 100), 0.5, key=f"tp_max_{h}",
                                                  help="If the ATR stop is wider than this share of the entry price, the stock is 'too volatile' and gets no plan.")
+                tight_f, lookback = {}, {}
+                for c, h in zip(st.columns(len(hzs)), hzs):
+                    tight_f[h] = c.number_input(f"{h}d too-tight floor (× a day's ATR)", 0.0, 3.0, float(tps["plan_min_stop_atr_frac"][h]), 0.05, key=f"tp_tf_{h}",
+                                                help="A stop closer to the entry than this share of one day's typical move is refused as 'too tight'.")
+                    lookback[h] = int(c.number_input(f"{h}d range lookback (days)", 2, 60, int(tps["plan_range_lookback_days"][h]), 1, key=f"tp_lb_{h}",
+                                                     help="Completed daily bars used by the range-low / range-midpoint stop rules."))
+                f1, f2 = st.columns(2)
+                min_stop_pct = f1.number_input("Too-tight floor (% of entry)", 0.01, 1.0, float(tps["plan_min_stop_pct"] * 100), 0.01, key="tp_msp",
+                                               help="Spread / tick-noise floor: a stop closer than this share of the entry price is 'too tight'.")
+                rules = ("atr", "range_low", "range_mid")
+                def_stop = f2.selectbox("Default stop rule for shared plans", rules, index=rules.index(tps["plan_default_stop_rule"]), key="tp_dsr")
                 min_rr = st.number_input("Minimum reward : risk", 0.1, 20.0, float(tps["plan_min_reward_risk"]), 0.1, key="tp_min_rr",
                                          help="A plan whose target is closer than this multiple of its risk is dropped.")
                 st.markdown("**Most you may lose if the stop hits, as % of total portfolio value**")
@@ -533,6 +545,8 @@ def render_investor_admin(ctx) -> None:
                 _admin_call(lambda: svc.reset_trade_plan_settings(ctx) if reset else svc.update_trade_plan_settings(
                     ctx, {"plan_stop_atr_mult": stop_m, "plan_target_r_multiple": tgt_m, "plan_min_reward_risk": min_rr,
                           "plan_max_stop_pct": {h: round(v / 100, 6) for h, v in max_stop.items()},
+                          "plan_min_stop_atr_frac": tight_f, "plan_range_lookback_days": lookback,
+                          "plan_min_stop_pct": round(min_stop_pct / 100, 6), "plan_default_stop_rule": def_stop,
                           "plan_max_loss_pct_by_risk_profile": {p: round(v / 100, 6) for p, v in loss.items()}},
                     expected_version=es["version"]), "Trade plan rules " + ("reset." if reset else "saved."))
 

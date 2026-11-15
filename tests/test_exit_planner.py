@@ -738,3 +738,81 @@ def test_only_the_service_imports_the_private_store():
     users = sorted(str(p.relative_to(root)) for p in root.rglob("*.py")
                    if "custom_plan_db" in p.read_text() and p.name != "custom_plan_db.py")
     assert users == ["services/investor_service.py"], users
+
+
+# ══ UI helpers ════════════════════════════════════════════════════════════════
+
+def test_rule_words_and_the_rule_line():
+    from web.components.trade_plan_view import plan_block_html, stop_rule_words, target_rule_words
+    assert stop_rule_words({"stop_rule": "range_low", "stop_param": 10}) == "10-day range low"
+    assert stop_rule_words({"stop_rule": "range_mid", "stop_param": 5.0}) == "5-day range midpoint"
+    assert stop_rule_words({"stop_rule": "pct", "stop_param": 0.05}) == "5% below entry"
+    assert stop_rule_words({"stop_rule": "atr", "stop_param": 1.5}) == "1.5× ATR14 below entry"
+    assert stop_rule_words({"stop_rule": "price", "stop_param": 96.5}) == "your price"
+    assert stop_rule_words({"stop_rule": "atr", "stop_param": None}) == "ATR stop"          # a row from before v2
+    assert target_rule_words({"target_rule": "r_multiple", "target_param": 2.0}) == "2× the risk above entry"
+    assert target_rule_words({"target_rule": "price", "target_param": 110.0}) == "your price"
+    row = {"plan_status": "planned", "entry": 190.0, "stop": 182.4, "target": 205.2, "reward_risk": 2.0, "time_stop_date": "2026-11-24",
+           "stop_rule": "range_low", "stop_param": 10, "target_rule": "r_multiple", "target_param": 2.0, "rules_version": "trade-plan-v2"}
+    h = plan_block_html(row, horizon_days=21)
+    assert "Stop: 10-day range low, $182.40, rounded down" in h and "Target: 2× the risk above entry, $205.20" in h and "TRADE PLAN" in h
+    old = plan_block_html({**row, "rules_version": "trade-plan-v1", "stop_rule": "atr", "stop_param": None})
+    assert "rounded down" not in old and "ATR stop" in old
+    assert "YOUR PLAN" in plan_block_html(row, title="YOUR PLAN")
+
+
+def test_no_plan_messages_in_the_block():
+    from web.components.trade_plan_view import plan_block_html
+    assert "inside half a day" in plan_block_html({"plan_status": "no_plan", "no_plan_reason": "too_tight",
+                                                   "message": "The stop is $0.42 under the entry, inside half a day's typical move ($0.61). Widen it."})
+    assert "too close to the entry" in plan_block_html({"plan_status": "no_plan", "no_plan_reason": "too_tight"})
+    assert "FLAT: no directional trade plan" in plan_block_html({"plan_status": "no_plan", "no_plan_reason": "flat"})
+    assert "never plans a short" in plan_block_html({"plan_status": "no_plan", "no_plan_reason": "down"})
+    assert "not UP" in plan_block_html({"plan_status": "no_plan", "no_plan_reason": "not_up"})            # old v1 rows still read
+    assert "Your plan was not created: " in plan_block_html({"plan_status": "no_plan", "no_plan_reason": "too_tight"}, title="YOUR PLAN")
+
+
+def test_protective_block_wording():
+    from web.components.trade_plan_view import protective_block_html
+    p = tp.build_protective_plan(100.0, 2.0, 5, "DOWN", S, as_of_date=AS_OF, predicted_return_high=0.02).to_dict()
+    h = protective_block_html({**p, "source": "default"})
+    for needle in ("PROTECTIVE EXIT", "a forecast of DOWN, not a short", "$97.00", "$102.00", "model's number, display only", "Not simulated",
+                   "nothing here is a short sale", "default rule"):
+        assert needle in h
+    assert "Target" not in h and "TRADE PLAN" not in h
+    assert "your own stop" in protective_block_html({**p, "source": "custom"})
+    assert "No trim" not in h and "Model's trim level" not in protective_block_html(
+        {**tp.build_protective_plan(100.0, 2.0, 5, "DOWN", S, as_of_date=AS_OF, predicted_return_high=-0.01).to_dict(), "source": "default"})
+    refused = protective_block_html({"plan_status": "no_plan", "no_plan_reason": "too_tight", "message": "The stop is $0.10 under. Widen it."})
+    assert "No protective exit" in refused and "Widen it" in refused
+    assert protective_block_html(None) == ""
+
+
+def test_form_values_become_service_arguments():
+    from web.components.trade_plan_view import to_service_args
+    assert to_service_args("pct", 5.0, "r_multiple", 2.0) == {"stop_rule": "pct", "stop_param": 0.05, "target_rule": "r_multiple", "target_param": 2.0}
+    assert to_service_args("range_low", 10.0, None, None)["stop_param"] == 10
+    assert to_service_args("price", 96.5, "price", 108.0) == {"stop_rule": "price", "stop_param": 96.5, "target_rule": "price", "target_param": 108.0}
+
+
+def test_owner_plan_html_shows_only_the_viewers_own_plans():
+    from web.components.trade_plan_view import owner_plan_html
+    up = _shared("AAPL")
+    svc.create_custom_plan(ALICE, up, "price", 96.5, "price", 108.0, fetch_history=FLAT_OHLC)
+    assert "YOUR PLAN" in owner_plan_html(ALICE, up, "UP", None) and "$96.50" in owner_plan_html(ALICE, up, "UP", None)
+    assert owner_plan_html(BOB, up, "UP", None) == ""
+    down = _shared("MSFT", direction="DOWN", ret_high=2.0)
+    assert owner_plan_html(ALICE, down, "DOWN", None, fetch_history=FLAT_OHLC) == ""          # not held -> nothing, not even a refusal
+    _hold(ALICE, "MSFT")
+    assert "PROTECTIVE EXIT" in owner_plan_html(ALICE, down, "DOWN", None, fetch_history=FLAT_OHLC)
+    assert owner_plan_html(BOB, down, "DOWN", None, fetch_history=FLAT_OHLC) == ""
+
+
+def test_the_chat_and_admin_modules_import_and_the_admin_form_round_trips_the_new_settings():
+    import web.chat.rendering  # noqa: F401
+    import web.components.investor_profile  # noqa: F401
+    patch = {"plan_min_stop_atr_frac": {5: 0.6, 21: 0.8, 63: 1.1}, "plan_range_lookback_days": {5: 6, 21: 11, 63: 21},
+             "plan_min_stop_pct": 0.0007, "plan_default_stop_rule": "range_low"}
+    esdb.update_engine_settings(updated_by="t", trade_plan=patch)
+    got = esdb.get_trade_plan_settings()
+    assert all(got[k] == v for k, v in patch.items())
