@@ -18,8 +18,14 @@ Architecture:
      (ticker, date), so it is random across tickers but the same ticker always gets
      the same model on the same day (a re-run never flips it). The picked model is
      that run's champion; the other pool members, then the configured fallbacks,
-     follow in order if it fails. A model whose account is out of credit is skipped
-     as a pick for the rest of the process. Every row records the model that made it.
+     follow in order if it fails. Every row records the model that made it.
+  3c. Out-of-credit memory (every mode): a model whose provider refused for lack of
+     credit / quota is marked unavailable for DEAD_MODEL_TTL_SECONDS. While marked it
+     is not CALLED at all (not as the pick, not as a fallback), so later tickers go
+     straight to a model that works instead of failing down the whole chain again. A
+     success clears the mark; after the TTL it is retried (a topped-up account comes
+     back by itself). If every model in a chain is marked, ONE (the mark closest to
+     expiry) is probed per ticker, so recovery is noticed without a full walk.
   4. Optional challenger (off by default): for apex_challenger_sample_pct % of
      tickers — chosen deterministically per (ticker, date), see
      challenger_selected — the pipeline ALSO runs apex_challenger_model on the
@@ -218,20 +224,61 @@ def load_model_plan() -> ModelPlan:
     )
 
 
-# Models whose provider refused for lack of credit in THIS process: not picked again from a random pool (the run would only burn a
-# failed call on every ticker that drew them). Cleared by restarting the process; a normal timeout or rate limit never lands here.
+# Models whose provider refused for lack of credit / quota in THIS process. _OUT_OF_CREDIT is the set of currently marked labels;
+# _DEAD_UNTIL holds each mark's expiry (a label in the set with no expiry, e.g. put there by hand, never expires). A normal timeout,
+# rate limit or bad JSON never lands here. Cleared by restarting the process.
+DEAD_MODEL_TTL_SECONDS = 600.0
 _OUT_OF_CREDIT: set[str] = set()
+_DEAD_UNTIL: dict[str, float] = {}
+_now = time.monotonic          # patched in tests
 _CREDIT_MARKERS = ("insufficient balance", "insufficient_balance", "credit balance is too low", "payment required", "insufficient_quota",
                    "insufficient credits", "requires more credits", "billing", "tier_not_allowed", "subscription tier",
-                   "authentication_error", "authenticationerror", "invalid x-api-key", "invalid api key", "incorrect api key")
+                   "authentication_error", "authenticationerror", "invalid x-api-key", "invalid api key", "incorrect api key",
+                   "no credits remaining")
+
+
+def _dead_labels() -> set[str]:
+    """The labels currently marked unavailable; expired marks are dropped here, so a topped-up account is retried."""
+    now = _now()
+    for label in [l for l in _OUT_OF_CREDIT if _DEAD_UNTIL.get(l, float("inf")) <= now]:
+        _OUT_OF_CREDIT.discard(label)
+        _DEAD_UNTIL.pop(label, None)
+    for label in [l for l in _DEAD_UNTIL if l not in _OUT_OF_CREDIT]:
+        _DEAD_UNTIL.pop(label, None)
+    return set(_OUT_OF_CREDIT)
 
 
 def _mark_if_out_of_credit(result: "SinglePrediction") -> None:
     err = (result.error or "").lower()
-    if not result.succeeded and any(m in err for m in _CREDIT_MARKERS) and result.display_name not in _OUT_OF_CREDIT:
-        _OUT_OF_CREDIT.add(result.display_name)
-        _log.warning(f"  [apex] {result.display_name} refused for lack of credit — not picked from the random pool again in this run",
+    if result.succeeded or not any(m in err for m in _CREDIT_MARKERS):
+        return
+    new = result.display_name not in _OUT_OF_CREDIT
+    _OUT_OF_CREDIT.add(result.display_name)
+    _DEAD_UNTIL[result.display_name] = _now() + DEAD_MODEL_TTL_SECONDS      # a failed probe extends the mark
+    if new:
+        _log.warning(f"  [apex] {result.display_name} refused for lack of credit — not called again for "
+                     f"{DEAD_MODEL_TTL_SECONDS / 60:.0f} min (or until it works)",
                      event_type="warning", model=result.display_name)
+
+
+def _mark_alive(label: str) -> None:
+    if label in _OUT_OF_CREDIT:
+        _OUT_OF_CREDIT.discard(label)
+        _log.info(f"  [apex] {label} is working again — back in rotation", event_type="info", model=label)
+    _DEAD_UNTIL.pop(label, None)
+
+
+def _models_to_skip(chain: list) -> set[str]:
+    """Labels in this chain that must not be called for this ticker: the marked ones. If EVERY model in the chain is marked, none is
+    skipped except that all but one: the mark closest to expiry is probed (one call per ticker, rotating as probes fail and re-mark),
+    so a recovered provider is noticed without walking the whole chain."""
+    dead = _dead_labels()
+    skip = {m[2] for m in chain if m[2] in dead}
+    if chain and len(skip) == len({m[2] for m in chain}):
+        ordered = [m[2] for m in chain]                      # chain order breaks ties between marks that expire together
+        probe = min(dict.fromkeys(ordered), key=lambda l: _DEAD_UNTIL.get(l, float("inf")))
+        skip.discard(probe)
+    return skip
 
 
 def pool_pick(ticker: str, as_of_date: str, labels: list[str] | tuple[str, ...]) -> str:
@@ -247,11 +294,12 @@ def plan_for_ticker(plan: ModelPlan, ticker: str, as_of_date: str) -> ModelPlan:
     """
     The plan this ticker runs under. A "champion" plan is returned unchanged. A "random_pool" plan becomes a champion plan whose champion is
     the model the ticker drew; the other pool members come next as fallbacks, then the configured fallbacks. Models out of credit are not
-    drawn (unless every pool member is). The result has selection_mode "champion", so resolving it again changes nothing.
+    drawn (unless every pool member is); run_apex also never CALLS a marked model, whether it is the pick or a fallback. The result has selection_mode "champion", so resolving it again changes nothing.
     """
     if plan.selection_mode != "random_pool" or not plan.pool:
         return plan
-    usable = [m for m in plan.pool if m[2] not in _OUT_OF_CREDIT] or list(plan.pool)
+    dead = _dead_labels()
+    usable = [m for m in plan.pool if m[2] not in dead] or list(plan.pool)
     picked = _MODELS_BY_LABEL[pool_pick(ticker, as_of_date, [m[2] for m in usable])]
     rest = [m for m in plan.pool if m != picked]
     fallbacks = rest + [m for m in plan.fallbacks if m != picked and m not in rest]
@@ -294,11 +342,19 @@ async def run_apex(ticker: str, prompt: str, *, plan: ModelPlan | None = None, a
     chain = [plan.champion, *plan.fallbacks]
     attempts: list[SinglePrediction] = []
     reason = ""
+    prev_label = ""
+    skip = _models_to_skip(chain)
+    if skip:
+        _log.info(f"  [apex] {ticker} — skipping {', '.join(sorted(skip))} (out of credit earlier; retried after "
+                  f"{DEAD_MODEL_TTL_SECONDS / 60:.0f} min)", event_type="apex_skip_dead", ticker=ticker, models=sorted(skip))
 
     for i, (mid, prov, label) in enumerate(chain):
         role = ROLE_CHAMPION if i == 0 else ROLE_FALLBACK
+        if label in skip:
+            reason, prev_label = "skipped_out_of_credit", label
+            continue
         why = (("random pick from " + plan.picked_from if plan.picked_from else "champion") if i == 0
-               else f"fallback {i}/{len(chain) - 1} after {attempts[-1].display_name} {reason}")
+               else f"fallback {i}/{len(chain) - 1} after {prev_label} {reason}")
         _log.info(
             f"  [apex] {ticker} — {label} ({why})",
             event_type="apex_model_select", ticker=ticker, model=label, role=role, reason=why,
@@ -307,6 +363,7 @@ async def run_apex(ticker: str, prompt: str, *, plan: ModelPlan | None = None, a
         attempts.append(result)
 
         if result.succeeded:
+            _mark_alive(label)
             _log.info(
                 f"  ✓ [apex] {ticker} — {label} ✓ ({result.latency_ms}ms, {role})",
                 event_type="apex_complete", ticker=ticker, model=label,
@@ -322,9 +379,9 @@ async def run_apex(ticker: str, prompt: str, *, plan: ModelPlan | None = None, a
                 selection=("random pick from " + plan.picked_from) if plan.picked_from else "champion",
             )
 
-        reason = _failure_reason(result)
+        reason, prev_label = _failure_reason(result), label
         _mark_if_out_of_credit(result)
-        nxt = chain[i + 1][2] if i + 1 < len(chain) else None
+        nxt = next((m[2] for m in chain[i + 1:] if m[2] not in skip), None)
         if nxt:
             _log.warning(
                 f"  [apex] {ticker} — {label} {reason}, retrying with {nxt}",
@@ -335,7 +392,7 @@ async def run_apex(ticker: str, prompt: str, *, plan: ModelPlan | None = None, a
     _log.error(
         f"  [apex] {ticker} — all {len(chain)} models failed — skipping",
         event_type="apex_exhausted", ticker=ticker,
-        models=[a.display_name for a in attempts],
+        models=[a.display_name for a in attempts], skipped=sorted(skip),
         errors=[a.error[:120] for a in attempts],
     )
     return None
@@ -350,6 +407,8 @@ async def run_challenger(ticker: str, prompt: str, plan: ModelPlan) -> ModelResu
     if plan.challenger is None:
         return None
     mid, prov, label = plan.challenger
+    if label in _dead_labels():                                   # marked out of credit: do not pay for a call that will fail
+        return None
     _log.info(
         f"  [apex] {ticker} — challenger {label} (champion {plan.champion[2]})",
         event_type="apex_challenger", ticker=ticker, model=label, role=ROLE_CHALLENGER,
@@ -357,6 +416,7 @@ async def run_challenger(ticker: str, prompt: str, plan: ModelPlan) -> ModelResu
     )
     result = await _call_model_with_timeout(mid, prov, label, prompt, ticker)
     if not result.succeeded:
+        _mark_if_out_of_credit(result)
         _log.warning(
             f"  [apex] {ticker} — challenger {label} {_failure_reason(result)} — no challenger row",
             event_type="apex_challenger", ticker=ticker, model=label, role=ROLE_CHALLENGER, reason=result.error,
