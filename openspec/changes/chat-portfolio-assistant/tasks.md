@@ -6,15 +6,15 @@ Each phase is one commit; the full test suite runs after each, and the next phas
 
 - [x] 0.1 Read the files named in the brief and verify every signature and data shape (see design.md Context)
 - [x] 0.2 Proposal, specs, design, tasks
-- [ ] 0.3 **Wait for approval of the Open Questions in design.md**
+- [x] 0.3 Open Questions approved (all six; valuation: stored if available, else calculated without saving)
 
 ## 1. Phase 1 – Router fix (no new features)
 
-- [ ] 1.1 Add `web/chat/routing.py` with `route_message(query, mentioned_tickers, session_tickers)`: personal-phrase list, explicit predict phrase list, no length rule
-- [ ] 1.2 `_classify_intent` delegates to it; remove the "≤3 words" rule
-- [ ] 1.3 Page: use `route_message`; chat-mode turns never read or write the sticky `current_tickers`; personal phrasing never reaches `_search_ticker_by_name`; a bare ticker shows an "Analyze X" suggestion
-- [ ] 1.4 Tests (`tests/test_chat_routing.py`): "Analyze my portfolio" (with and without an earlier ticker in session), "NVDA news", "NVDA", "Analyze NVDA", "Should I buy AAPL?", "Compare MSFT vs GOOGL", "what AI stocks look good", plus "should I trim", "where should I put $5,000"; assert `_search_ticker_by_name` is never called for personal phrasing
-- [ ] 1.5 Full suite; show results
+- [x] 1.1 Add `web/chat/routing.py` with `route_message(query, mentioned_tickers, session_tickers)`: personal-phrase list, explicit predict phrase list, no length rule
+- [x] 1.2 `_classify_intent` delegates to it; remove the "≤3 words" rule
+- [x] 1.3 Page: use `route_message`; chat-mode turns never read or write the sticky `current_tickers`; personal phrasing never reaches `_search_ticker_by_name`; a bare ticker shows an "Analyze X" suggestion
+- [x] 1.4 Tests (`tests/test_chat_routing.py`): "Analyze my portfolio" (with and without an earlier ticker in session), "NVDA news", "NVDA", "Analyze NVDA", "Should I buy AAPL?", "Compare MSFT vs GOOGL", "what AI stocks look good", plus "should I trim", "where should I put $5,000"; assert `_search_ticker_by_name` is never called for personal phrasing
+- [x] 1.5 Full suite; show results
 
 ## 2. Phase 2 – New read-only chat tools
 

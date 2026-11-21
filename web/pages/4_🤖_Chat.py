@@ -38,6 +38,7 @@ from web.styles import (
     REC_STYLES, SUCCESS, WARNING, DANGER, PRIMARY, NEUTRAL, NEUTRAL_LIGHT,
     SUCCESS_LIGHT, WARNING_LIGHT, DANGER_LIGHT, PRIMARY_LIGHT,
 )
+from web.chat.routing import route_message
 from web.chat.tools import _CHAT_TOOLS, _execute_chat_tool, _search_ticker_by_name
 from web.chat.rendering import (
     _build_plan, _render_plan_card, _render_prediction_card, render_action_permission_and_fit,
@@ -605,37 +606,29 @@ if user_input:
         rename_session(current_context("web:chat"), st.session_state.session_id, title)
 
     tickers = _extract_tickers(user_input)
-    if tickers:
-        st.session_state.current_tickers = tickers
+    route = route_message(user_input, tickers, st.session_state.current_tickers)
+    st.session_state.route_suggest = route.suggest
+    st.session_state.ticker_confirm = None
+    if route.mode == "chat":
+        # Personal / portfolio, broad, comparison and plain questions. Only tickers named in THIS message (or, for a general
+        # follow-up, the session's) are kept as context; nothing here can start APEX or resolve a company name.
+        st.session_state.current_tickers = route.tickers
+        st.session_state.chat_no_ticker  = True
+    elif route.mode == "predict":
+        st.session_state.current_tickers = route.tickers
         st.session_state.chat_no_ticker  = False
-        st.session_state.ticker_confirm  = None
-    elif not st.session_state.current_tickers:
-        _q_lower = user_input.lower()
-        _predict_kw = {
-            "analyze", "full analysis", "should i buy", "should i sell",
-            "buy or sell", "worth buying", "investment thesis",
-            "full report", "deep dive", "apex analysis", "run apex",
-        }
-        _wants_prediction = any(kw in _q_lower for kw in _predict_kw)
-
-        if _wants_prediction:
-            # Try to resolve a company name in the query before asking the user
-            _candidate_tk, _candidate_name = _search_ticker_by_name(user_input)
-            if _candidate_tk:
-                # Found a match -- confirm with user instead of silently assuming
-                st.session_state.ticker_confirm = {
-                    "ticker": _candidate_tk,
-                    "name":   _candidate_name,
-                    "query":  user_input,
-                    "intent": "predict",
-                }
-            else:
-                st.session_state.awaiting_ticker = True
+    else:
+        # "resolve": a full analysis was asked for but no ticker is named. Try to resolve a company from the message and confirm it
+        # with the user instead of silently assuming; otherwise ask which stock.
+        st.session_state.current_tickers = []
+        st.session_state.chat_no_ticker  = False
+        _candidate_tk, _candidate_name = _search_ticker_by_name(user_input)
+        if _candidate_tk:
+            st.session_state.ticker_confirm = {
+                "ticker": _candidate_tk, "name": _candidate_name, "query": user_input, "intent": "predict",
+            }
         else:
-            # General financial question -- route to chat agent; it can call
-            # search_ticker itself if it needs to resolve a company name.
-            st.session_state.chat_no_ticker = True
-            st.session_state.ticker_confirm = None
+            st.session_state.awaiting_ticker = True
 
     st.rerun()
 
@@ -721,6 +714,9 @@ if _has_message and (_has_ticker or _no_ticker):
             # Answer rendered directly in the chat message, outside the status block
             if chat_text:
                 st.markdown(chat_text)
+            _hint = st.session_state.pop("route_suggest", None)
+            if _hint:
+                st.caption(_hint)                # e.g. a bare ticker: 'Type Analyze NVDA for the full APEX panel'
 
             # Persist to chat DB
             final_text = chat_text or "_No response._"

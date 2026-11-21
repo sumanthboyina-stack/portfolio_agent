@@ -149,39 +149,16 @@ When showing results from `get_latest_opportunities`, `get_undervalued_opportuni
 
 # ── Intent classifier ─────────────────────────────────────────────────────────
 
-_PREDICT_PHRASE_RE = re.compile(
-    r"\b("
-    r"analyz\w*|analysis|predict|prediction|"
-    r"should i buy|should i sell|buy or sell|worth buying|"
-    r"investment thesis|investment recommendation|"
-    r"full report|deep dive|apex analysis|"
-    r"give me a report|run apex|run analysis"
-    r")\b"
-)
+# The routing rules live in web/chat/routing.py (pure, shared by the page and the tests).
+from web.chat.routing import PREDICT_PHRASE_RE as _PREDICT_PHRASE_RE, route_message
 
 
 def _classify_intent(query: str, tickers: list[str]) -> str:
     """
-    Classify the query as 'predict' (full APEX panel) or 'chat' (conversational).
-
-    'predict' triggers only when the user names a specific ticker AND clearly
-    wants a fresh investment recommendation for it. Broad/exploratory questions
-    (screening, comparisons, "what looks good") always route to the
-    conversational tool-calling agent, which can pull DB records (predictions,
-    research, price history, validation outcomes) and web search as needed --
-    even for questions that happen to mention a ticker.
+    'predict' (full APEX panel) or 'chat' (conversational). A thin wrapper over routing.route_message: predict needs an explicit
+    predict phrase AND a ticker, and personal / portfolio phrasing is always chat. Message length never decides it.
     """
-    if not tickers:
-        return "chat"
-    q = query.lower()
-    # Word-boundary match -- a plain substring check would match "predict"/
-    # "prediction" inside "predictions", turning "analyst predictions are
-    # strong" into a false "predict" classification.
-    if _PREDICT_PHRASE_RE.search(q):
-        return "predict"
-    if len(query.split()) <= 3:
-        return "predict"
-    return "chat"
+    return "predict" if route_message(query, tickers, ()).mode == "predict" else "chat"
 
 
 # ── Conversational chat agent thread ─────────────────────────────────────────

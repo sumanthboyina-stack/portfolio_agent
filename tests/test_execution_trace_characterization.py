@@ -233,7 +233,7 @@ def test_classify_intent_fixed_inputs():
 
     assert _classify_intent("Analyze AAPL", ["AAPL"]) == "predict"
     assert _classify_intent("Should I buy MSFT?", ["MSFT"]) == "predict"
-    assert _classify_intent("AAPL", ["AAPL"]) == "predict"                       # <=3 words, has ticker
+    assert _classify_intent("AAPL", ["AAPL"]) == "chat"                          # the old "<=3 words -> predict" rule was removed on purpose (chat-portfolio-assistant, Phase 1)
     assert _classify_intent("what are analyst predictions on AAPL saying", ["AAPL"]) == "chat"  # "predictions" != "predict"
     assert _classify_intent("what looks undervalued right now", []) == "chat"     # no ticker at all
     assert _classify_intent("how correlated is my portfolio to AAPL", ["AAPL"]) == "chat"

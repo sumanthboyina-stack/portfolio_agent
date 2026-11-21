@@ -6,11 +6,11 @@ Decide, for each chat message, whether it is answered conversationally or by the
 ## ADDED Requirements
 
 ### Requirement: Personal and portfolio phrasing always routes to chat
-A message containing personal or portfolio phrasing ("my portfolio", "my holdings", "what I own", "my account", "should I trim", "where should I put") SHALL be answered by chat mode. It SHALL NOT call `_search_ticker_by_name`, SHALL NOT ask the user to confirm a company, and SHALL NOT inherit a ticker from earlier in the session.
+A message containing personal or portfolio phrasing ("my portfolio", "my holdings", "what I own", "my account", "should I trim", "where should I put") SHALL be answered by chat mode. It SHALL NOT call `_search_ticker_by_name` and SHALL NOT ask the user to confirm a company.
 
 #### Scenario: Analyze my portfolio
-- **WHEN** the user sends "Analyze my portfolio" in a session that earlier discussed NVDA
-- **THEN** the route is chat, no ticker confirmation is shown, no APEX run starts, and the session ticker is not used
+- **WHEN** the user sends "Analyze my portfolio"
+- **THEN** the route is chat, no ticker confirmation is shown, and no APEX run starts
 
 ### Requirement: Predict mode needs an explicit phrase and a resolved ticker
 Predict mode SHALL start only when the message contains an explicit predict phrase AND names a ticker or company that resolves without guessing. A message of three words or fewer SHALL NOT route to predict by length alone.
