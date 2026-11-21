@@ -25,13 +25,20 @@ from queue import Queue
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
+from web.chat.loop_support import (
+    BUDGET_NOTE, ToolBudget, cap_tool_result, digest_tool_result, history_with_digests,
+)
 from web.chat.tools import _CHAT_TOOLS, _execute_chat_tool
 
 
 # ── Chat history formatter ────────────────────────────────────────────────────
 
 def _build_chat_history(messages: list[dict], limit: int = 12) -> list[dict]:
-    """Convert session messages to LLM-compatible history (last N exchanges)."""
+    """
+    Convert session messages to LLM-compatible history (last N exchanges). An assistant answer keeps up to 1,500 characters of its text
+    plus the digests of the tools it was based on (stored in the message metadata), so a follow-up can be answered from what was
+    already fetched.
+    """
     result = []
     for msg in messages[-limit:]:
         if msg["role"] == "user":
@@ -46,7 +53,8 @@ def _build_chat_history(messages: list[dict], limit: int = 12) -> list[dict]:
             )
             result.append({"role": "assistant", "content": summary})
         else:
-            content = (msg.get("content") or "")[:600]
+            digests = (msg.get("metadata") or {}).get("tool_digests")
+            content = history_with_digests(msg.get("content") or "", digests)
             if content:
                 result.append({"role": "assistant", "content": content})
     return result
@@ -190,6 +198,41 @@ def _classify_intent(query: str, tickers: list[str]) -> str:
     return "predict" if route_message(query, tickers, ()).mode == "predict" else "chat"
 
 
+async def _chat_round(litellm, model_id: str, messages: list[dict], offer_tools: bool, q: Queue):
+    """
+    One model call of the chat loop; returns the assistant message. Streams: text that arrives before any tool call is pushed to the page as
+    ("delta", chunk) events (a later tool call sends ("reset", "") so the page drops it). A response that is not a stream (a stub, or a
+    provider that ignored stream=True) is used as is. Tools are omitted when the budget is spent, which forces a final answer.
+    """
+    kwargs = dict(model=model_id, messages=messages, temperature=0.2, max_tokens=2500)
+    if offer_tools:
+        kwargs.update(tools=_CHAT_TOOLS, tool_choice="auto")
+    try:
+        resp = await litellm.acompletion(stream=True, **kwargs)
+    except Exception as exc:
+        if "stream" not in str(exc).lower():
+            raise
+        resp = await litellm.acompletion(**kwargs)                  # this model cannot stream with tools: one plain retry
+    if not hasattr(resp, "__aiter__"):
+        return resp.choices[0].message
+    chunks, saw_tool, streamed = [], False, False
+    async for ch in resp:
+        chunks.append(ch)
+        delta = ch.choices[0].delta if getattr(ch, "choices", None) else None
+        if delta is None:
+            continue
+        if getattr(delta, "tool_calls", None):
+            saw_tool = True
+            if streamed:
+                q.put(("reset", ""))
+                streamed = False
+        text = getattr(delta, "content", None)
+        if text and not saw_tool:
+            q.put(("delta", text))
+            streamed = True
+    return litellm.stream_chunk_builder(chunks, messages=messages).choices[0].message
+
+
 # ── Conversational chat agent thread ─────────────────────────────────────────
 
 def _run_chat_agent_thread(
@@ -222,25 +265,31 @@ def _run_chat_agent_thread(
         for model_id, provider, label in chat_chain:
             q.put(("info", f"{label} ({provider})"))
             try:
-                for _round in range(8):
-                    resp = await litellm.acompletion(
-                        model=model_id,
-                        messages=messages,
-                        tools=_CHAT_TOOLS,
-                        tool_choice="auto",
-                        temperature=0.2,
-                        max_tokens=2500,
-                    )
-                    msg = resp.choices[0].message
+                budget = ToolBudget()
+                digests: list[dict] = []
+                for _round in range(budget.max_rounds):
+                    offer = budget.offer_tools(_round)
+                    msg = await _chat_round(litellm, model_id, messages, offer, q)
 
                     if msg.tool_calls:
+                        allowed = budget.take(len(msg.tool_calls)) if offer else 0
                         tool_results = []
-                        for tc in msg.tool_calls:
+                        for i, tc in enumerate(msg.tool_calls):
                             fn_name = tc.function.name
-                            fn_args = json.loads(tc.function.arguments or "{}")
-                            q.put(("tool", f"{fn_name}({json.dumps(fn_args)})"))
-                            result_str = _execute_chat_tool(fn_name, fn_args, owner=owner, **({"ctx": ctx} if ctx is not None else {}))
-                            q.put(("result", f"{fn_name} → {result_str[:250]}"))
+                            try:
+                                fn_args = json.loads(tc.function.arguments or "{}")
+                            except ValueError:
+                                fn_args = {}
+                            if i < allowed:
+                                q.put(("tool", f"{fn_name}({json.dumps(fn_args)})"))
+                                result_str = _execute_chat_tool(fn_name, fn_args, owner=owner,
+                                                                **({"ctx": ctx} if ctx is not None else {}))
+                                result_str = cap_tool_result(result_str)
+                                digests.append(digest_tool_result(fn_name, fn_args, result_str))
+                                q.put(("result", f"{fn_name} → {result_str[:250]}"))
+                            else:
+                                result_str = json.dumps(BUDGET_NOTE)
+                                q.put(("warn", f"{fn_name} not run: tool budget for this turn is used up"))
                             tool_results.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
@@ -265,11 +314,15 @@ def _run_chat_agent_thread(
                     else:
                         text = msg.content or "_No response generated._"
                         q.put(("text", text))
+                        if digests:
+                            q.put(("digests", digests))
                         q.put(("model_used", (label, provider)))
                         q.put(("done", "chat"))
                         return
 
                 q.put(("text", "_Agent did not produce a final answer within tool limits._"))
+                if digests:
+                    q.put(("digests", digests))
                 q.put(("done", "chat"))
                 return
 

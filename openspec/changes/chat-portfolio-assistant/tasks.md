@@ -29,13 +29,13 @@ Each phase is one commit; the full test suite runs after each, and the next phas
 
 ## 3. Phase 3 – Context and loop hardening
 
-- [ ] 3.1 `digest_tool_result` (≤10 rows / key figures, ≤1,500 chars) and storage in `metadata["tool_digests"]`
-- [ ] 3.2 `_build_chat_history`: replay digests, larger assistant cap
-- [ ] 3.3 `ToolBudget` (6 tools across parallel calls, 8 rounds); forced tool-less final answer
-- [ ] 3.4 12 KB result cap with `"truncated": true`
-- [ ] 3.5 Stream the final answer to the page
-- [ ] 3.6 Tests: digest size and content; replay; follow-up answered without a tool call (mock LLM asserts no tool call); parallel-call budget; truncation flag; streaming order
-- [ ] 3.7 Full suite; show results
+- [x] 3.1 `digest_tool_result` (≤10 rows / key figures, ≤1,500 chars) and storage in `metadata["tool_digests"]`
+- [x] 3.2 `_build_chat_history`: replay digests, larger assistant cap
+- [x] 3.3 `ToolBudget` (6 tools across parallel calls, 8 rounds); forced tool-less final answer
+- [x] 3.4 12 KB result cap with `"truncated": true`
+- [x] 3.5 Stream the final answer to the page
+- [x] 3.6 Tests: digest size and content; replay; follow-up answered without a tool call (mock LLM asserts no tool call); parallel-call budget; truncation flag; streaming order
+- [x] 3.7 Full suite; show results
 
 ## 4. Phase 4 – Model tiering
 

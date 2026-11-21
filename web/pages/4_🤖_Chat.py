@@ -661,10 +661,14 @@ if _has_message and (_has_ticker or _no_ticker):
             ct.start()
             start_chat = time.time()
             chat_text = ""
+            live_text = ""
+            tool_digests: list = []
             used_label_chat = None
 
-            # Tool log lives inside the collapsible status; answer is rendered below it
-            with st.status("Fetching data…", expanded=True) as chat_st:
+            # Tool log lives inside the collapsible status; the answer streams into the placeholder below it
+            _status_box = st.container()
+            answer_ph = st.empty()
+            with _status_box, st.status("Fetching data…", expanded=True) as chat_st:
                 tool_ph_c  = st.empty()
                 tool_log_c: list[str] = []
 
@@ -688,8 +692,16 @@ if _has_message and (_has_ticker or _no_ticker):
                             f'<span style="color:{color};font-size:0.78rem">'
                             f'{icon_html(icon_name, 13, color=color)} {ev_val[:220]}</span>'
                         )
+                    elif ev_type == "delta":
+                        live_text += ev_val   # the answer as it is written
+                        answer_ph.markdown(live_text + "▌")
+                    elif ev_type == "reset":
+                        live_text = ""        # a tool call followed: what streamed was not the answer
+                        answer_ph.empty()
                     elif ev_type == "text":
-                        chat_text += ev_val   # collected; rendered below after status closes
+                        chat_text = ev_val    # the complete answer; rendered below after status closes
+                    elif ev_type == "digests":
+                        tool_digests = ev_val
                     elif ev_type == "model_used":
                         used_label_chat = ev_val[0]
                     elif ev_type == "error":
@@ -713,7 +725,7 @@ if _has_message and (_has_ticker or _no_ticker):
 
             # Answer rendered directly in the chat message, outside the status block
             if chat_text:
-                st.markdown(chat_text)
+                answer_ph.markdown(chat_text)
             _hint = st.session_state.pop("route_suggest", None)
             if _hint:
                 st.caption(_hint)                # e.g. a bare ticker: 'Type Analyze NVDA for the full APEX panel'
@@ -721,10 +733,11 @@ if _has_message and (_has_ticker or _no_ticker):
             # Persist to chat DB
             final_text = chat_text or "_No response._"
             from portfolio_agent.tools.chat_db import add_message as _add_msg
-            _add_msg(current_context("web:chat"), st.session_state.session_id, "assistant", final_text)
+            _meta = {"tool_digests": tool_digests} if tool_digests else {}
+            _add_msg(current_context("web:chat"), st.session_state.session_id, "assistant", final_text, metadata=_meta)
             st.session_state.messages.append({
                 "role": "assistant", "type": "text",
-                "content": final_text, "metadata": {},
+                "content": final_text, "metadata": _meta,
             })
 
         st.session_state.current_tickers = []
