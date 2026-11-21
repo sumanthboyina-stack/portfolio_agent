@@ -47,11 +47,11 @@ Each phase is one commit; the full test suite runs after each, and the next phas
 
 ## 5. Phase 5 – Web research
 
-- [ ] 5.1 `web_search` records returned URLs per turn; `web_fetch(url)` accepts only those
-- [ ] 5.2 Safe fetch: scheme check, DNS resolve and IP validation per hop, connect to the validated IP, manual redirects (max 3), 10 s timeout, 2 MB cap, no cookies/auth, content-type check, stdlib text extraction
-- [ ] 5.3 Prompt: list URLs used; fetched text is untrusted
-- [ ] 5.4 Tests (all offline): refused URL not from search; localhost/10.x/169.254.169.254/IPv6 loopback; redirect to a private address; oversize body; timeout; non-text content type
-- [ ] 5.5 Full suite; show results
+- [x] 5.1 `web_search` records returned URLs per turn; `web_fetch(url)` accepts only those
+- [x] 5.2 Safe fetch: scheme check, DNS resolve and IP validation per hop, connect to the validated IP, manual redirects (max 3), 10 s timeout, 2 MB cap, no cookies/auth, content-type check, stdlib text extraction
+- [x] 5.3 Prompt: list URLs used; fetched text is untrusted
+- [x] 5.4 Tests (all offline): refused URL not from search; localhost/10.x/169.254.169.254/IPv6 loopback; redirect to a private address; oversize body; timeout; non-text content type
+- [x] 5.5 Full suite; show results
 
 ## 6. Acceptance (mocked data)
 
