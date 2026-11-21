@@ -199,6 +199,12 @@ ENGINE_TOOL_SCHEMAS: list[dict] = [
 ]
 ENGINE_TOOL_NAMES = frozenset(t["function"]["name"] for t in ENGINE_TOOL_SCHEMAS)
 
+# A chat turn that ran any of these gets the stronger synthesis model (Phase 4): the ten engine tools, the engine-backed opportunity list,
+# and the existing tools that read the signed-in owner's own portfolio.
+SYNTHESIS_TRIGGER_TOOLS = frozenset(ENGINE_TOOL_NAMES | {
+    "get_latest_opportunities", "get_portfolio_summary", "get_portfolio_sector_allocation", "get_portfolio_risk_flags",
+    "get_portfolio_health"})
+
 # Tools that read the owner's own data: a turn that used one gets the stronger synthesis model (Phase 4).
 OWNER_SCOPED_ENGINE_TOOLS = frozenset({"get_personal_opportunities", "recommend_cash_allocation", "simulate_hypothetical_trades",
                                        "get_fund_lookthrough", "get_tax_lots_and_gains", "get_investor_profile"})

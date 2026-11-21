@@ -482,3 +482,22 @@ def refresh_fund_data_now(ctx: RequestContext, *, reason: str | None = None) -> 
     with _uow() as c:
         _audit(ctx, c, "refresh_fund_data_now", after={"funds": summary["funds"], "counts": summary["counts"]}, reason=reason)
     return summary
+
+
+def update_chat_synthesis_tier(ctx: RequestContext, tier: str, *, expected_version: int | None = None, reason: str | None = None) -> str:
+    """Admin: who writes a chat answer that used the user's own data or an engine tool ("flash" | "analyst"; see engine_settings_db).
+    Versioned (expected_version), audited, one transaction. Applies to the next chat turn. Returns the tier in force afterwards."""
+    require_admin(ctx)
+    from portfolio_agent.tools import engine_settings_db as esdb
+    esdb.get_engine_settings()                       # make sure the table exists BEFORE the write transaction opens
+    with _uow() as c:
+        before = esdb.get_chat_synthesis_tier(esdb.get_engine_settings(conn=c))
+        after = esdb.get_chat_synthesis_tier(esdb.update_engine_settings(
+            updated_by=ctx.actor, expected_version=expected_version, chat_synthesis_tier=tier, conn=c))
+        _audit(ctx, c, "update_chat_synthesis_tier", before={"chat_synthesis_tier": before}, after={"chat_synthesis_tier": after}, reason=reason)
+    return after
+
+
+def reset_chat_synthesis_tier(ctx: RequestContext, *, reason: str | None = None) -> str:
+    from portfolio_agent.tools import engine_settings_db as esdb
+    return update_chat_synthesis_tier(ctx, esdb.DEFAULT_CHAT_SYNTHESIS_TIER, reason=reason or "reset to default")

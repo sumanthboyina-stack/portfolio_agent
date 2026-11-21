@@ -39,11 +39,11 @@ Each phase is one commit; the full test suite runs after each, and the next phas
 
 ## 4. Phase 4 – Model tiering
 
-- [ ] 4.1 `chat_synthesis_tier` column (`migrate_columns`), validation, getter, admin control, audit
-- [ ] 4.2 One tool-less `analyst`-chain synthesis call when an owner-scoped or engine tool ran; fall back to the flash answer; skip models marked out of credit; log `model_used`
-- [ ] 4.3 Test that chat code never references the `reasoning` chain
-- [ ] 4.4 Tests: tool-only-public turn makes no analyst call; private-tool turn makes exactly one; analyst failure falls back; `flash` setting disables it; no retry of a credit-failed model
-- [ ] 4.5 Full suite; show results
+- [x] 4.1 `chat_synthesis_tier` column (`migrate_columns`), validation, getter, admin control, audit
+- [x] 4.2 One tool-less `analyst`-chain synthesis call when an owner-scoped or engine tool ran; fall back to the flash answer; skip models marked out of credit; log `model_used`
+- [x] 4.3 Test that chat code never references the `reasoning` chain
+- [x] 4.4 Tests: tool-only-public turn makes no analyst call; private-tool turn makes exactly one; analyst failure falls back; `flash` setting disables it; no retry of a credit-failed model
+- [x] 4.5 Full suite; show results
 
 ## 5. Phase 5 – Web research
 

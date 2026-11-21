@@ -141,6 +141,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("trade_plan_json",               f"TEXT NOT NULL DEFAULT {_lit(json.dumps(_plan_to_json(_tp.seed_settings())))}"),
         # Plan simulation (tools.plan_simulator): paths, history pool, block length, the disagreement flag and its guardrail mode.
         ("sim_json",                      f"TEXT NOT NULL DEFAULT {_lit(json.dumps(SEED_SIM_SETTINGS))}"),
+        # Chat: which chain writes the final answer when a turn used the user's own data or an engine tool ('flash' = no extra call).
+        ("chat_synthesis_tier",           "TEXT NOT NULL DEFAULT 'analyst'"),
     ])
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bucket_edges_history (
@@ -214,6 +216,9 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         d["horizon_bucket_edges"] = dict(be.SEED_EDGES)
     return d
 
+
+CHAT_SYNTHESIS_TIERS = ("flash", "analyst")
+DEFAULT_CHAT_SYNTHESIS_TIER = "analyst"      # who writes a chat answer that used the user's own data or an engine: see web/chat
 
 _PLAN_HORIZON_KEYS = ("plan_stop_atr_mult", "plan_target_r_multiple", "plan_max_stop_pct")
 _PLAN_PROFILES = ("conservative", "moderate", "aggressive")
@@ -382,6 +387,15 @@ def get_engine_settings(*, conn: sqlite3.Connection | None = None) -> dict:
     return _row_to_dict(row)
 
 
+def get_chat_synthesis_tier(settings: dict | None = None) -> str:
+    """'flash' or 'analyst'. Anything missing or unreadable is the default: a settings problem must never break a chat answer."""
+    try:
+        tier = (settings if settings is not None else get_engine_settings()).get("chat_synthesis_tier")
+    except Exception:
+        return DEFAULT_CHAT_SYNTHESIS_TIER
+    return tier if tier in CHAT_SYNTHESIS_TIERS else DEFAULT_CHAT_SYNTHESIS_TIER
+
+
 def _normalize_weights(weights: dict, *, what: str) -> dict:
     missing = set(_SOURCES) - set(weights)
     extra = set(weights) - set(_SOURCES)
@@ -453,6 +467,7 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
                            horizon_cadence: dict | None = None,
                            trade_plan: dict | None = None,
                            sim: dict | None = None,
+                           chat_synthesis_tier: str | None = None,
                            conn: sqlite3.Connection | None = None) -> dict:
     """
     Update one or more settings groups. Every weight dict is validated (exactly
@@ -477,6 +492,9 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
 
     sim: a (partial) {sim_paths, sim_lookback_days, sim_block_len, sim_flag_min_conviction, sim_flag_max_p_target,
     sim_guardrail_mode} patch, merged and validated (see tools.plan_simulator). Takes effect on the next simulation.
+
+    chat_synthesis_tier: "flash" | "analyst" (CHAT_SYNTHESIS_TIERS). With "analyst" a chat turn that used the user's own data or an engine
+    tool gets ONE final tool-less answer call on the analyst chain; "flash" keeps the free chain's own answer. Applies to the next chat turn.
 
     conn: join the caller's transaction (nothing is committed here, so a settings change and its audit event can land
     together). The caller must have touched the engine-settings table once beforehand (get_engine_settings()) so its
@@ -536,6 +554,10 @@ def update_engine_settings(*, updated_by: str, expected_version: int | None = No
         fields["trade_plan_json"] = json.dumps(_plan_to_json(merged_p))
     if sim is not None:
         fields["sim_json"] = json.dumps(_validate_sim(sim, get_sim_settings(get_engine_settings(conn=conn))))
+    if chat_synthesis_tier is not None:
+        if chat_synthesis_tier not in CHAT_SYNTHESIS_TIERS:
+            raise ValueError(f"chat_synthesis_tier must be one of {list(CHAT_SYNTHESIS_TIERS)}, got {chat_synthesis_tier!r}")
+        fields["chat_synthesis_tier"] = chat_synthesis_tier
     bump_edges = False
     if horizon_bucket_edges is not None:
         current = get_engine_settings(conn=conn)["horizon_bucket_edges"]

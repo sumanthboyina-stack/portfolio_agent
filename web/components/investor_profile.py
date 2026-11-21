@@ -252,8 +252,8 @@ def render_investor_admin(ctx) -> None:
     if not _tile:
         return
     with _tile:
-        t_res, t_prof, t_quiz, t_fund, t_health, t_hz, t_edges, t_cad, t_plan, t_src = st.tabs(
-            ["Default emergency reserve", "Profiles", "Quiz", "Fund data & snapshots", "Health thresholds", "Horizons by type", "Return buckets", "Schedule cadence", "Trade Plan", "Fund sources"])
+        t_res, t_prof, t_quiz, t_fund, t_health, t_hz, t_edges, t_cad, t_plan, t_src, t_chat = st.tabs(
+            ["Default emergency reserve", "Profiles", "Quiz", "Fund data & snapshots", "Health thresholds", "Horizons by type", "Return buckets", "Schedule cadence", "Trade Plan", "Fund sources", "Chat"])
 
         with t_res:
             ps = sdb.get_portfolio_settings()
@@ -561,6 +561,25 @@ def render_investor_admin(ctx) -> None:
                     ctx, {"sim_paths": int(paths), "sim_lookback_days": int(look), "sim_block_len": int(blk),
                           "sim_flag_min_conviction": fmc, "sim_flag_max_p_target": round(fpt / 100, 6), "sim_guardrail_mode": mode},
                     expected_version=es["version"]), "Simulation settings " + ("reset." if reset_s else "saved."))
+
+        with t_chat:
+            from portfolio_agent.tools import engine_settings_db as esdb
+            es_chat = esdb.get_engine_settings()
+            cur_tier = esdb.get_chat_synthesis_tier(es_chat)
+            st.caption("Chat picks its tools with the free fast models. When a turn used your own portfolio data or one of the engines, one "
+                       "final answer call on the stronger 'analyst' models writes the reply from those results (no tools, and it is skipped "
+                       "if those models are out of credit). 'flash' turns that extra call off. Predict mode is separate and unaffected.")
+            with st.form("admin_chat_tier"):
+                tier_pick = st.radio("Who writes answers that used your data or an engine", list(esdb.CHAT_SYNTHESIS_TIERS),
+                                     index=list(esdb.CHAT_SYNTHESIS_TIERS).index(cur_tier), horizontal=True, key="chat_tier_pick")
+                st.caption(f"Engine settings version {es_chat['version']}")
+                c1, c2 = st.columns(2)
+                save_t = c1.form_submit_button("Save", type="primary")
+                reset_t = c2.form_submit_button("Reset to default")
+            if save_t or reset_t:
+                _admin_call(lambda: svc.reset_chat_synthesis_tier(ctx) if reset_t else
+                            svc.update_chat_synthesis_tier(ctx, tier_pick, expected_version=es_chat["version"]),
+                            "Chat setting " + ("reset." if reset_t else "saved."))
 
         with t_src:
             from portfolio_agent.tools import fund_data_db as fdb
