@@ -23,6 +23,23 @@ sys.path.insert(0, str(_ROOT))
 from portfolio_agent.tools.prediction_db import not_challenger_sql as _not_challenger_sql
 
 
+
+def _db_path() -> Path:
+    """The database file, looked up at CALL time from portfolio_agent.tools.db so a test (or any redirect of DB_PATH) isolates every
+    chat tool. Before this, seven tools hard-coded <repo>/data/portfolio.db and always read the live file."""
+    from portfolio_agent.tools import db as _db_mod
+    return Path(_db_mod.DB_PATH)
+
+
+def _visible_sql(owner: str | None, alias: str = "") -> tuple[str, list]:
+    """SQL + params limiting a `predictions` read to rows this viewer may see: shared market forecasts, plus THEIR OWN private / legacy
+    rows (owner_scope = user:<owner>). With no owner: shared only. Never another owner's private forecast."""
+    a = f"{alias}." if alias else ""
+    if owner:
+        return (f"({a}scope = 'shared_market' OR ({a}scope IN ('private','legacy_unclassified') AND {a}owner_scope = ?))",
+                [f"user:{owner}"])
+    return f"{a}scope = 'shared_market'", []
+
 def _resolve_portfolio_id(owner: str | None) -> tuple[int | None, bool]:
     """
     (portfolio_id, scoped). scoped=False means no owner was supplied (a
@@ -419,6 +436,17 @@ _CHAT_TOOLS = [
 ]
 
 
+from web.chat.engine_tools import ENGINE_TOOL_SCHEMAS, run_engine_tool, data_block as _data_block  # noqa: E402
+
+_CHAT_TOOLS.extend(ENGINE_TOOL_SCHEMAS)
+
+# Tools whose result is third-party or stored free text (news, search snippets, broker research, stored model reasoning). The whole
+# JSON result is wrapped as UNTRUSTED_DATA so the model treats anything instruction-like inside as data (see _CHAT_SYSTEM).
+_UNTRUSTED_RESULT_TOOLS = frozenset({
+    "web_search", "get_ticker_news", "get_market_news", "get_research", "get_ipo_info", "get_prediction_history",
+})
+
+
 # ── Tool implementations ───────────────────────────────────────────────────────
 
 def _chat_tool_get_news(ticker: str) -> dict:
@@ -465,26 +493,30 @@ def _chat_tool_get_macro() -> dict:
         return {"note": "Macro data temporarily unavailable."}
 
 
-def _chat_tool_get_predictions(ticker: str) -> dict:
+def _chat_tool_get_predictions(ticker: str, owner: str | None = None) -> dict:
     from portfolio_agent.tools.prediction_db import DISPLAY_SCOPES, get_prediction_history
-    hist = get_prediction_history(ticker.upper(), limit=10, scopes=DISPLAY_SCOPES)   # own view: shared + legacy + private
+    hist = get_prediction_history(ticker.upper(), limit=60, scopes=DISPLAY_SCOPES)
+    mine = f"user:{owner}" if owner else None
+    # shared forecasts plus the viewer's OWN private / legacy rows; another owner's private forecast is never shown
+    hist = [p for p in hist if getattr(p, "scope", None) == "shared_market" or (mine and getattr(p, "owner_scope", None) == mine)][:10]
     return {"ticker": ticker.upper(), "prediction_history": hist}
 
 
-def _chat_tool_get_prediction_accuracy(ticker: str) -> dict:
-    db_path = _ROOT / "data" / "portfolio.db"
+def _chat_tool_get_prediction_accuracy(ticker: str, owner: str | None = None) -> dict:
+    db_path = _db_path()
     if not db_path.exists():
         return {"ticker": ticker.upper(), "note": "Database not found."}
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
+        _vis, _vp = _visible_sql(owner)
         rows = conn.execute(f"""
             SELECT horizon_days, outcome, outcome_score, brier_score,
                    actual_direction, actual_return, evaluated_at, recommendation
             FROM predictions
-            WHERE ticker = ? AND evaluation_status = 'evaluated' AND {_not_challenger_sql()}
+            WHERE ticker = ? AND evaluation_status = 'evaluated' AND {_not_challenger_sql()} AND {_vis}
             ORDER BY evaluated_at DESC
-        """, [ticker.upper()]).fetchall()
+        """, [ticker.upper(), *_vp]).fetchall()
         conn.close()
         rows = [dict(r) for r in rows]
         if not rows:
@@ -663,84 +695,34 @@ def _chat_tool_search_ticker(company_name: str) -> dict:
             "note": "Could not find a ticker for this company. Ask the user to provide the ticker symbol."}
 
 
-def _chat_tool_get_latest_opportunities(min_confidence: int = 6, limit: int = 10) -> dict:
-    db_path = _ROOT / "data" / "portfolio.db"
-    if not db_path.exists():
-        return {"note": "Database not found. Run the pipeline first to populate data."}
+def _chat_tool_get_latest_opportunities(min_confidence: int = 6, limit: int = 10, owner: str | None = None, ctx=None) -> dict:
+    """Backed by the Opportunity Engine ranking (see engine_tools.rebased_latest_opportunities); keeps the keys this tool always
+    returned. A signed-in owner gets held / compliance labels and a ranking judged against their own holdings."""
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(f"""
-            SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
-                   p.news_score, p.research_score, p.fundamental_score,
-                   p.reasoning, p.created_at
-            FROM predictions p
-            JOIN (
-                SELECT ticker, MAX(created_at) dt
-                FROM predictions WHERE trigger_type='trending_opportunity' AND {_not_challenger_sql()}
-                GROUP BY ticker
-            ) x ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
-            WHERE p.trigger_type='trending_opportunity'
-              AND p.recommendation IN ('BUY','STRONG_BUY')
-              AND COALESCE(p.confidence, 0) >= ?
-            ORDER BY p.composite_score DESC NULLS LAST
-            LIMIT ?
-        """, [min_confidence, limit]).fetchall()
-        conn.close()
-        opportunities = [dict(r) for r in rows]
-        if not opportunities:
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(f"""
-                SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
-                       p.news_score, p.research_score, p.fundamental_score,
-                       p.reasoning, p.created_at
-                FROM predictions p
-                JOIN (
-                    SELECT ticker, MAX(created_at) dt
-                    FROM predictions WHERE trigger_type='trending_opportunity' AND {_not_challenger_sql()}
-                    GROUP BY ticker
-                ) x ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
-                WHERE p.trigger_type='trending_opportunity'
-                ORDER BY p.created_at DESC, p.composite_score DESC NULLS LAST
-                LIMIT ?
-            """, [limit]).fetchall()
-            conn.close()
-            opportunities = [dict(r) for r in rows]
-            if not opportunities:
-                return {
-                    "source": "db", "count": 0,
-                    "note": (
-                        "No trending opportunity predictions found yet. "
-                        "The pipeline discovers trending tickers during intraday and morning "
-                        "batch runs. Check back after the next scheduled run."
-                    ),
-                }
-        return {
-            "source": "db", "count": len(opportunities),
-            "as_of": opportunities[0]["created_at"][:10] if opportunities else None,
-            "opportunities": opportunities,
-        }
+        from web.chat.engine_tools import rebased_latest_opportunities
+        return rebased_latest_opportunities(owner, ctx, min_confidence=min_confidence, limit=limit)
     except Exception as exc:
-        return {"note": f"DB query failed: {exc}"}
+        return {"note": f"Opportunities unavailable: {exc}"}
 
 
-def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: int = 10) -> dict:
-    db_path = _ROOT / "data" / "portfolio.db"
+def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: int = 10, owner: str | None = None) -> dict:
+    db_path = _db_path()
     if not db_path.exists():
         return {"note": "Database not found. Run the pipeline first to populate data."}
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
+        _vis_sub, _vp_sub = _visible_sql(owner)
+        _vis_out, _vp_out = _visible_sql(owner, "p")
         rows = conn.execute(f"""
             SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
                    p.pt_mean, p.pt_current_price, p.pt_num_analysts, p.created_at
             FROM predictions p
-            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions WHERE {_not_challenger_sql()} GROUP BY ticker) x
+            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions WHERE {_not_challenger_sql()} AND {_vis_sub} GROUP BY ticker) x
               ON p.ticker = x.ticker AND p.created_at = x.dt AND {_not_challenger_sql("p")}
-            WHERE p.recommendation IN ('BUY', 'STRONG_BUY')
+            WHERE p.recommendation IN ('BUY', 'STRONG_BUY') AND {_vis_out}
               AND p.pt_mean IS NOT NULL AND p.pt_current_price > 0
-        """).fetchall()
+        """, _vp_sub + _vp_out).fetchall()
         conn.close()
         candidates = []
         for r in rows:
@@ -750,6 +732,18 @@ def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: i
                 d["upside_to_target_pct"] = round(upside, 2)
                 candidates.append(d)
         candidates.sort(key=lambda d: d["upside_to_target_pct"], reverse=True)
+        withheld = []
+        if owner:                     # a ticker the owner's own rules do not currently permit is labelled, never suggested
+            from web.chat.engine_tools import _withheld, compliance_label
+            kept = []
+            for d in candidates:
+                lab = compliance_label(owner, d["ticker"], side="BUY")
+                if lab["withhold"]:
+                    withheld.append(_withheld(lab))
+                else:
+                    from web.chat.engine_tools import _compliance_field
+                    kept.append({**d, "compliance": _compliance_field(lab)})
+            candidates = kept
         candidates = candidates[:limit]
         if not candidates:
             return {
@@ -761,13 +755,14 @@ def _chat_tool_get_undervalued_opportunities(min_upside_pct: float = 5, limit: i
                     "stored analyst price target."
                 ),
             }
-        return {"source": "db", "count": len(candidates), "opportunities": candidates}
+        return {"source": "db", "as_of": max((c.get("created_at") or "")[:10] for c in candidates) or None,
+                "count": len(candidates), "opportunities": candidates, **({"restricted_or_blocked": withheld} if withheld else {})}
     except Exception as exc:
         return {"note": f"DB query failed: {exc}"}
 
 
 def _chat_tool_get_portfolio_summary(owner: str | None = None) -> dict:
-    db_path = _ROOT / "data" / "portfolio.db"
+    db_path = _db_path()
     if not db_path.exists():
         return {"note": "Database not found. Run the pipeline first."}
     portfolio_id, scoped = _resolve_portfolio_id(owner)
@@ -911,7 +906,7 @@ def _compute_day_performance(conn: "sqlite3.Connection", holdings: list[dict]) -
 def _chat_tool_get_predictions_summary(segment: str = "all",
                                         recommendation: str | None = None,
                                         owner: str | None = None) -> dict:
-    db_path = _ROOT / "data" / "portfolio.db"
+    db_path = _db_path()
     if not db_path.exists():
         return {"note": "Database not found."}
     try:
@@ -939,17 +934,19 @@ def _chat_tool_get_predictions_summary(segment: str = "all",
             rec_clause = "AND p.recommendation=?"
             rec_params = [recommendation.upper()]
 
+        _vis_sub, _vp_sub = _visible_sql(owner)
+        _vis_out, _vp_out = _visible_sql(owner, "p")
         rows = conn.execute(f"""
             SELECT p.ticker, p.recommendation, p.confidence, p.composite_score,
                    p.fundamental_score, p.research_score, p.news_score,
                    p.trigger_type, p.created_at
             FROM predictions p
-            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions WHERE {_not_challenger_sql()} GROUP BY ticker) x
+            JOIN (SELECT ticker, MAX(created_at) dt FROM predictions WHERE {_not_challenger_sql()} AND {_vis_sub} GROUP BY ticker) x
               ON p.ticker=x.ticker AND p.created_at=x.dt AND {_not_challenger_sql("p")}
-            WHERE 1=1 {seg_clause} {rec_clause}
+            WHERE {_vis_out} {seg_clause} {rec_clause}
             ORDER BY p.composite_score DESC NULLS LAST
             LIMIT 30
-        """, seg_params + rec_params).fetchall()
+        """, _vp_sub + _vp_out + seg_params + rec_params).fetchall()
         conn.close()
         preds = [dict(r) for r in rows]
         return {"source": "db", "segment": segment, "count": len(preds), "predictions": preds}
@@ -966,7 +963,7 @@ def _chat_tool_get_technical_snapshot(ticker: str) -> dict:
 
 
 def _chat_tool_get_portfolio_sector_allocation(owner: str | None = None) -> dict:
-    db_path = _ROOT / "data" / "portfolio.db"
+    db_path = _db_path()
     if not db_path.exists():
         return {"note": "Database not found. Run the pipeline first."}
     portfolio_id, scoped = _resolve_portfolio_id(owner)
@@ -1038,7 +1035,7 @@ def _chat_tool_get_portfolio_risk_flags(ticker: str = "", owner: str | None = No
         if scoped and portfolio_id is None:
             return {"as_of_date": None, "count": 0, "flags": [],
                     "note": "No portfolio found for this account yet."}
-        db_path = _ROOT / "data" / "portfolio.db"
+        db_path = _db_path()
         holding_tickers: set = set()
         if db_path.exists():
             conn = sqlite3.connect(str(db_path))
@@ -1102,13 +1099,19 @@ def _chat_tool_get_portfolio_health(owner: str | None = None) -> dict:
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
-def _execute_chat_tool(name: str, args: dict, owner: str | None = None) -> str:
+def _execute_chat_tool(name: str, args: dict, owner: str | None = None, ctx=None) -> str:
     """
     owner: the logged-in user (current_context("web:chat").actor), threaded
     through from web/chat/orchestration.py — every portfolio-reading tool
     below scopes its read to this owner instead of the whole database.
+    ctx: the verified RequestContext of that same owner (server-side, never from the model) for the tools that call services.
+    The model's own arguments can never set owner, ctx, portfolio_id or account_id.
     """
     try:
+        args = {k: v for k, v in (args or {}).items() if k not in ("owner", "ctx", "portfolio_id", "account_id")}
+        engine_result = run_engine_tool(name, args, owner, ctx)
+        if engine_result is not None:
+            return json.dumps(engine_result, default=str)
         if name == "web_search":
             result = _chat_tool_web_search(args.get("query", ""), args.get("max_results", 5))
         elif name == "search_ticker":
@@ -1128,9 +1131,9 @@ def _execute_chat_tool(name: str, args: dict, owner: str | None = None) -> str:
         elif name == "get_macro_snapshot":
             result = _chat_tool_get_macro()
         elif name == "get_prediction_history":
-            result = _chat_tool_get_predictions(args.get("ticker", ""))
+            result = _chat_tool_get_predictions(args.get("ticker", ""), owner)
         elif name == "get_prediction_accuracy":
-            result = _chat_tool_get_prediction_accuracy(args.get("ticker", ""))
+            result = _chat_tool_get_prediction_accuracy(args.get("ticker", ""), owner)
         elif name == "get_price_history":
             result = _chat_tool_get_price_history(
                 args.get("ticker", ""), args.get("period", "3mo")
@@ -1139,11 +1142,13 @@ def _execute_chat_tool(name: str, args: dict, owner: str | None = None) -> str:
             result = _chat_tool_get_latest_opportunities(
                 min_confidence=args.get("min_confidence", 6),
                 limit=args.get("limit", 10),
+                owner=owner, ctx=ctx,
             )
         elif name == "get_undervalued_opportunities":
             result = _chat_tool_get_undervalued_opportunities(
                 min_upside_pct=args.get("min_upside_pct", 5),
                 limit=args.get("limit", 10),
+                owner=owner,
             )
         elif name == "get_portfolio_summary":
             result = _chat_tool_get_portfolio_summary(owner)
@@ -1163,6 +1168,9 @@ def _execute_chat_tool(name: str, args: dict, owner: str | None = None) -> str:
             result = _chat_tool_get_portfolio_health(owner)
         else:
             result = {"error": f"Unknown tool: {name}"}
-        return json.dumps(result, default=str)
+        out = json.dumps(result, default=str)
+        if name in _UNTRUSTED_RESULT_TOOLS:
+            out = _data_block(out, f"tool:{name}") or out
+        return out
     except Exception as exc:
         return json.dumps({"error": str(exc)})

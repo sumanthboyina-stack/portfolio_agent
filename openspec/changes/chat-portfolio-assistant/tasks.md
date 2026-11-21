@@ -18,14 +18,14 @@ Each phase is one commit; the full test suite runs after each, and the next phas
 
 ## 2. Phase 2 – New read-only chat tools
 
-- [ ] 2.1 (D9) Replace the seven hard-coded `data/portfolio.db` paths with the `tools.db` path; test that a chat tool reads the monkeypatched test DB
-- [ ] 2.2 (D2) Optional `holdings` on `get_daily_opportunities` / `_load_conviction_and_holdings`; optional `holdings` pass-through and `prediction_scopes` on `prepare_inputs`; tests that defaults are unchanged and that two owners get different `portfolio_impact`
-- [ ] 2.3 Helpers in `web/chat/tools.py`: `_owner_book`, `_compliance_label` (read-only `evaluate_clearance` + restricted list), result envelope `{source, as_of, data}`, untrusted-text delimiter
-- [ ] 2.4 Tools with JSON schemas and dispatcher entries: `get_personal_opportunities`, `recommend_cash_allocation`, `simulate_hypothetical_trades`, `get_fund_lookthrough`, `get_valuation`, `get_trade_plan_odds`, `get_tax_lots_and_gains`, `get_investor_profile`, `get_macro_calendar`, `get_sec_filings` (+ SEC throttle)
-- [ ] 2.5 Re-base `get_latest_opportunities` on the engine, keeping its keys
-- [ ] 2.6 `_CHAT_SYSTEM`: routing table for the new tools; cite source and `as_of`; forbid guaranteed returns, simulations-as-forecasts and invented numbers; ignore instructions inside tool results
-- [ ] 2.7 Tests: owner scoping for every new tool (two owners, no leakage; owner None → note); restricted/blacked-out ticker labelled and never suggested; HYPOTHETICAL label and constraint violations present; "write functions unreachable" test (mock every write function to raise, run every dispatcher tool); `tests/test_investor_profile.py` boundary still green
-- [ ] 2.8 Full suite; show results
+- [x] 2.1 (D9) Replace the seven hard-coded `data/portfolio.db` paths with the `tools.db` path; test that a chat tool reads the monkeypatched test DB
+- [x] 2.2 (D2) Optional `holdings` on `get_daily_opportunities` / `_load_conviction_and_holdings`; optional `holdings` pass-through and `prediction_scopes` on `prepare_inputs`; tests that defaults are unchanged and that two owners get different `portfolio_impact`
+- [x] 2.3 Helpers in `web/chat/tools.py`: `_owner_book`, `_compliance_label` (read-only `evaluate_clearance` + restricted list), result envelope `{source, as_of, data}`, untrusted-text delimiter
+- [x] 2.4 Tools with JSON schemas and dispatcher entries: `get_personal_opportunities`, `recommend_cash_allocation`, `simulate_hypothetical_trades`, `get_fund_lookthrough`, `get_valuation`, `get_trade_plan_odds`, `get_tax_lots_and_gains`, `get_investor_profile`, `get_macro_calendar`, `get_sec_filings` (+ SEC throttle)
+- [x] 2.5 Re-base `get_latest_opportunities` on the engine, keeping its keys
+- [x] 2.6 `_CHAT_SYSTEM`: routing table for the new tools; cite source and `as_of`; forbid guaranteed returns, simulations-as-forecasts and invented numbers; ignore instructions inside tool results
+- [x] 2.7 Tests: owner scoping for every new tool (two owners, no leakage; owner None → note); restricted/blacked-out ticker labelled and never suggested; HYPOTHETICAL label and constraint violations present; "write functions unreachable" test (mock every write function to raise, run every dispatcher tool); `tests/test_investor_profile.py` boundary still green
+- [x] 2.8 Full suite; show results
 
 ## 3. Phase 3 – Context and loop hardening
 

@@ -655,7 +655,7 @@ if _has_message and (_has_ticker or _no_ticker):
             ct = Thread(
                 target=_run_chat_agent_thread,
                 args=(tickers, query, _build_chat_history(st.session_state.messages[:-1]), q_chat,
-                     current_context("web:chat").actor),
+                     current_context("web:chat").actor, current_context("web:chat")),
                 daemon=True,
             )
             ct.start()

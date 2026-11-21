@@ -25,7 +25,9 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
                    funding_account_id: int | None = None,
                    starting_cash_overrides: dict[int, Decimal | None] | None = None,
                    assumptions: Assumptions | None = None,
-                   opportunities_top_n: int = 15, owner: str | None = None) -> tuple[ScenarioInputs, dict]:
+                   opportunities_top_n: int = 15, owner: str | None = None,
+                   opportunity_holdings: list[dict] | None = None,
+                   prediction_scopes: tuple[str, ...] | None = None) -> tuple[ScenarioInputs, dict]:
     """
     holdings: account-level holding rows for the scope (dicts with account_id,
     ticker, shares, sector, current_price, price_as_of). contribution: new
@@ -37,6 +39,10 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
     context carries the float-world research the proposer scores with
     (baseline metrics, risk context, predictions, opportunities) and is not
     needed to evaluate.
+
+    opportunity_holdings / prediction_scopes: a per-request caller (chat) passes the owner's own holdings, to judge candidates' portfolio
+    fit against, and the shared scopes only, so another owner's private forecast cannot reach expected returns. Both default to None =
+    the behaviour every existing caller has always had.
     """
     from portfolio_agent.tools import holdings_db as repo
     from portfolio_agent.tools.db import db_conn
@@ -88,9 +94,9 @@ def prepare_inputs(*, scope: str, holdings: list[dict], contribution: float | De
     consolidated = _consolidate(rows)
     baseline = compute_portfolio_aggregate_metrics(consolidated) if consolidated else None
     risk_ctx = compute_portfolio_risk_context(consolidated) if consolidated else {}
-    latest_preds = get_all_latest_predictions()
+    latest_preds = get_all_latest_predictions(scopes=prediction_scopes) if prediction_scopes else get_all_latest_predictions()
     held = {r["ticker"] for r in rows}
-    opportunities = [o for o in get_daily_opportunities(top_n=opportunities_top_n)
+    opportunities = [o for o in get_daily_opportunities(top_n=opportunities_top_n, holdings=opportunity_holdings)
                      if o.get("ticker") and str(o["ticker"]).upper() not in held]
 
     # Pinned prices: latest close where the market answered, else the price the last import carried.

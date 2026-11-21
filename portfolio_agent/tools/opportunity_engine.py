@@ -204,7 +204,9 @@ def _score_candidate(
     }
 
 
-def _load_conviction_and_holdings() -> tuple[dict[str, float], list[dict]]:
+def _load_conviction_and_holdings(holdings: list[dict] | None = None) -> tuple[dict[str, float], list[dict]]:
+    """holdings: the book to judge portfolio fit against. None (batch, dashboards) keeps the single-portfolio / system-wide read it has
+    always had; a per-request caller (chat) passes the signed-in owner's own holdings so nobody is ranked against another book."""
     from portfolio_agent.tools.universe_db import (
         get_latest_signal_date, get_signals, get_conviction_data, rank_by_conviction,
     )
@@ -218,6 +220,8 @@ def _load_conviction_and_holdings() -> tuple[dict[str, float], list[dict]]:
         ranked_signals = rank_by_conviction(signals, conviction_data)
         conviction_by_ticker = {s["ticker"]: s["_conviction"] for s in ranked_signals}
 
+    if holdings is not None:
+        return conviction_by_ticker, [dict(h) for h in holdings]
     try:
         holdings = json.loads(get_portfolio_holdings()).get("holdings", [])
     except Exception:
@@ -276,7 +280,7 @@ def get_opportunity_history(ticker: str, window_days: int = 30) -> dict:
     }
 
 
-def get_daily_opportunities(top_n: int = 10) -> list[dict]:
+def get_daily_opportunities(top_n: int = 10, holdings: list[dict] | None = None) -> list[dict]:
     """
     Rank today's trending_opportunity APEX predictions into a portfolio-aware
     top *top_n* list. Returns [] if the morning batch hasn't produced any
@@ -284,12 +288,14 @@ def get_daily_opportunities(top_n: int = 10) -> list[dict]:
 
     Each item: {ticker, rank, opportunity_score, call (BUY|WATCH), why,
                 composite_score, recommendation, portfolio_impact}
+
+    holdings: judge portfolio fit against this book instead of the default one (see _load_conviction_and_holdings).
     """
     predictions = _latest_trending_opportunity_predictions()
     if not predictions:
         return []
 
-    conviction_by_ticker, holdings = _load_conviction_and_holdings()
+    conviction_by_ticker, holdings = _load_conviction_and_holdings(holdings)
 
     scored = [_score_candidate(row, conviction_by_ticker, holdings) for row in predictions]
     scored = [s for s in scored if s["call"] is not None]
