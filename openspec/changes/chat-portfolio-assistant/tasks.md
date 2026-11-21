@@ -55,14 +55,14 @@ Each phase is one commit; the full test suite runs after each, and the next phas
 
 ## 6. Acceptance (mocked data)
 
-- [ ] 6.1 "Analyze my portfolio" → chat mode, portfolio tools, no ticker prompt
-- [ ] 6.2 "NVDA news" → chat, no APEX run, no prediction row
-- [ ] 6.3 "I have $5,000, where should it go?" → `recommend_cash_allocation`, restricted list respected, synthesis on the `analyst` chain
-- [ ] 6.4 "What if I sell half my AAPL and buy VOO?" → `simulate_hypothetical_trades`, labelled hypothetical
-- [ ] 6.5 "How much NVDA do I really own including funds?" → `get_fund_lookthrough`
-- [ ] 6.6 Follow-up "which of those do I already own?" answered from the stored digest
-- [ ] 6.7 User A never sees user B's data through any tool
-- [ ] 6.8 Full suite green; summary of files changed and open risks
+- [x] 6.1 "Analyze my portfolio" → chat mode, portfolio tools, no ticker prompt
+- [x] 6.2 "NVDA news" → chat, no APEX run, no prediction row
+- [x] 6.3 "I have $5,000, where should it go?" → `recommend_cash_allocation`, restricted list respected, synthesis on the `analyst` chain
+- [x] 6.4 "What if I sell half my AAPL and buy VOO?" → `simulate_hypothetical_trades`, labelled hypothetical
+- [x] 6.5 "How much NVDA do I really own including funds?" → `get_fund_lookthrough`
+- [x] 6.6 Follow-up "which of those do I already own?" answered from the stored digest
+- [x] 6.7 User A never sees user B's data through any tool
+- [x] 6.8 Full suite green; summary of files changed and open risks
 
 ## 7. Phase 6 (propose only – not built without approval)
 
