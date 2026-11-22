@@ -8,7 +8,7 @@ A personal investment research assistant that runs a structured multi-analyst pi
 
 - **Daily pipeline** — fetches fundamentals (EDGAR XBRL + 8-K guidance), sell-side research (Finnhub consensus), news (RSS + Finnhub), short interest (FINRA, twice-monthly refresh), and macroeconomic data (FRED) for every ticker in your portfolio and watchlist
 - **APEX predictions** — four analyst roles (Fundamental, Research, Macro, News) each score their domain 1–10; a dynamic weight engine blends the scores into a composite recommendation across multiple time horizons (5d, 21d, 63d, 250d)
-- **Event-driven triggers** — material news (severity ≥ 3, detected from the news filter log) fires intraday predictions outside the normal batch schedule. Earnings, SEC 8-K, rating-change, and macro-event detectors are wired into the pipeline but not yet implemented (they return empty lists today)
+- **Event-driven triggers** — material news (severity ≥ 3, detected from the news filter log) fires intraday predictions outside the normal batch schedule. Held (portfolio) tickers skip the news scoring stage and so carry no severity score; in practice only scored tickers (watchlist, trending) can raise a material-news event. Earnings, SEC 8-K, rating-change, and macro-event detectors are wired into the pipeline but not yet implemented (they return empty lists today)
 - **8-K guidance extraction** — each fundamentals run fetches the latest EX-99.1 exhibit from SEC EDGAR, extracts the forward guidance/outlook section, and passes it into the Fundamental analyst's prompt. LLM outputs a `guidance_direction` (raised / maintained / lowered / withdrawn / none); text and direction are stored in the `fundamentals` table
 - **Short interest (FINRA)** — settlement dates are computed deterministically (mid-month + end-of-month, with an 8-business-day publication lag). When new data is due, one paginated FINRA API call fetches the full file; rows are filtered to your ticker universe and stored in `short_interest`. Trend direction and days-to-cover are computed in Python and injected into the Research prompt
 - **Prediction history** — every recommendation is written to SQLite with the start price; outcome is evaluated when the horizon matures using actual closing prices
@@ -20,7 +20,7 @@ A personal investment research assistant that runs a structured multi-analyst pi
 - **No order execution.** The system never connects to a broker, never places trades, and has no access to your brokerage accounts. All output is read-only research.
 - **No real-time price feeds.** Prices are fetched from Yahoo Finance on a delayed basis (typically 15–20 minutes during market hours). Intraday precision is not available.
 - **No options, derivatives, or alternatives.** Coverage is stocks and funds (ETFs, ETNs, mutual funds, target-date funds). Cash, money-market funds and ticker-less funds are held but never forecast.
-- **No tax advice.** The system has no knowledge of your cost basis, holding periods, wash-sale rules, or tax situation.
+- **No tax advice.** The ledger tracks cost basis, tax lots and a SHORT / LONG holding-period flag (and exports realized gains by lot), but the system does not model wash-sale rules, the average-cost method, or your tax situation, and it calculates no tax.
 - **No guarantee of accuracy.** The validation layer exists precisely because forecasts are unreliable. Past accuracy in the validation database does not predict future accuracy.
 - **Not a registered investment adviser.** See the disclaimer at the bottom of this file.
 
@@ -50,11 +50,11 @@ Copy `.env.example` to `.env` and fill in the values you want to use. Keys marke
 | `FRED_API_KEY` | Recommended | Macroeconomic data (rates, inflation, labor, credit). Free at [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 | `FINNHUB_API_KEY` | Recommended | Sell-side consensus, price targets, news, SEC filings. Free tier available at [finnhub.io](https://finnhub.io) |
 | `FINRA_API_KEY` | Recommended | Short interest data (FINRA Datasets API). Bearer token; twice-monthly pulls |
-| `EDGAR_USER_AGENT` | Optional | SEC EDGAR filing pull (`Firstname Lastname email@domain.com` format) |
+| `EDGAR_USER_AGENT` | Recommended | SEC EDGAR filing pull (`Firstname Lastname email@domain.com` format). If unset, EDGAR requests are still sent with a placeholder contact string read once at import, so set it for SEC fair-access compliance. (N-PORT fund data has no fallback: without it that source reports `NPORT_NOT_CONFIGURED`.) |
 | `MISTRAL_API_KEY` | Optional | Mistral. Lower-reasoning models (`Mistral-Small`, `Ministral-8B`) sit in the news / fundamentals / research / clearance / technical chains; higher-reasoning models (`Mistral-Large`, `Magistral-Medium`) are APEX prediction models and last in the analyst / reasoning chains. A free-tier key may not include Large / Medium / Magistral ("not available in your subscription tier") or rate-limits them; those then fail over to the next model |
 | `DEEPSEEK_API_KEY` | Optional | DeepSeek (`DeepSeek-Chat`) — an APEX prediction model, usable in the random pool or as a fallback/challenger. Get a key and add credit at [platform.deepseek.com](https://platform.deepseek.com/). Without credit the API answers "Insufficient Balance" and APEX falls back to the next model |
 | `GROQ_API_KEY` | Optional | Additional model provider in the multi-model failover chain |
-| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Optional | Gemini models; first in the failover chain |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Optional | Not used: no current failover chain contains a Gemini model (see [Batch pipeline phases](#batch-pipeline-phases-fundamentals-research-news)) |
 | `OPENROUTER_API_KEY` | Optional | Multi-provider routing via LiteLLM |
 
 ### Configure your portfolio and watchlist
@@ -125,7 +125,7 @@ Notes only — no infra is set up by this repo.
 
 ## Holdings taxonomy: what each holding is, and what each account is
 
-**Instruments.** Every security carries an `instrument_type` (`STOCK`, `ETF`, `ETN`, `MUTUAL_FUND`, `MONEY_MARKET`, `TARGET_DATE_FUND`, `BOND`, `CIT`, `CASH`, `OTHER`, `UNKNOWN`), an `asset_class` (`US_EQUITY`, `INTL_EQUITY`, `FIXED_INCOME`, `REAL_ESTATE`, `COMMODITY`, `CASH`, `MULTI_ASSET`, `UNKNOWN`), an optional `sub_asset_class` (e.g. `LARGE_CAP_GROWTH`, `EMERGING_MARKETS`, `TREASURY`, `HIGH_YIELD`), a `leverage_factor` (1.0 normal, 2.0 / 3.0 leveraged, negative = inverse) and, for funds, `expense_ratio` (a fraction), `fund_family` and `category`. The vocabularies are defined once in `portfolio_agent/domain.py`.
+**Instruments.** Every security carries an `instrument_type` (`STOCK`, `ETF`, `ETN`, `MUTUAL_FUND`, `MONEY_MARKET`, `TARGET_DATE_FUND`, `BOND`, `CIT`, `STABLE_VALUE`, `CASH`, `OTHER`, `UNKNOWN`), an `asset_class` (`US_EQUITY`, `INTL_EQUITY`, `FIXED_INCOME`, `REAL_ESTATE`, `COMMODITY`, `CASH`, `MULTI_ASSET`, `UNKNOWN`), an optional `sub_asset_class` (e.g. `LARGE_CAP_GROWTH`, `EMERGING_MARKETS`, `TREASURY`, `HIGH_YIELD`), a `leverage_factor` (1.0 normal, 2.0 / 3.0 leveraged, negative = inverse) and, for funds, `expense_ratio` (a fraction), `fund_family` and `category`. The vocabularies are defined once in `portfolio_agent/domain.py`.
 
 - **Automatic classification** (`portfolio_agent/services/instrument_classifier.py`) uses Yahoo Finance's `quoteType` first, then name/category keywords (leveraged/inverse, target-date, money market, ETN). "Short-Term Treasury" and "Ultra-Short Bond" funds are *not* flagged inverse. It runs after an import or a manual add commits — never inside a database transaction — and a failed lookup leaves the instrument as it was (it never raises into an import or the pipeline). Automatic classifications older than 30 days are re-checked.
 - **Manual override** (Accounts → *What each holding is*): a classification you set is never overwritten by the automatic check. The instrument row is shared, so an override applies in every account that holds that security. Every change is recorded in the audit log.
@@ -133,7 +133,7 @@ Notes only — no infra is set up by this repo.
 - **Funds with no ticker** (a 401(k) collective investment trust): add them under Accounts → *Add a fund with no ticker*. They are keyed `CIT:<PLAN>-<FUND>`, priced by hand, and never sent to a price provider or the prediction pipeline. An optional **proxy ticker** (e.g. `VOO` for an S&P 500 CIT) is used for analytics only and is never shown as your holding.
 - **Portfolio page** shows type, asset class and leverage columns, filters by type / asset class, and groups the allocation chart by sector, asset class or instrument type.
 
-**Accounts.** `account_type` is one of `TAXABLE`, `TRADITIONAL_IRA`, `ROTH_IRA`, `ROLLOVER_IRA`, `SEP_IRA`, `401K`, `ROTH_401K`, `403B`, `457B`, `HSA`, `529`, `CASH`, `OTHER`; every importer maps its output to these (the old `IRA` became `TRADITIONAL_IRA`, and the previous value is kept in `account_type_legacy`). The **tax treatment** shown on each account (taxable / tax-deferred / tax-free) is derived from the type, not stored. Two columns are reserved for later work: `holdings_source` (`snapshot`, today's behaviour, or `ledger`) and `is_paper` — paper accounts are excluded from your holdings, totals, cash and the pipeline universe.
+**Accounts.** `account_type` is one of `TAXABLE`, `TRADITIONAL_IRA`, `ROTH_IRA`, `ROLLOVER_IRA`, `SEP_IRA`, `401K`, `ROTH_401K`, `403B`, `457B`, `HSA`, `529`, `CASH`, `OTHER`; every importer maps its output to these (the old `IRA` became `TRADITIONAL_IRA`, and the previous value is kept in `account_type_legacy`). The **tax treatment** shown on each account (taxable / tax-deferred / tax-free) is derived from the type, not stored. Two columns are in use: `holdings_source` (`snapshot`, the default, or `ledger` — see [Transaction ledger](#transaction-ledger-and-tax-lots)) and `is_paper` — paper accounts are excluded from your holdings, totals, cash and the pipeline universe (there is no paper-trading UI yet).
 
 ---
 
@@ -157,11 +157,14 @@ All data is stored locally in `data/portfolio.db` (SQLite). Nothing is sent to e
 
 Each morning run executes in sequence:
 
-1. **News** — pulls and triages headlines from RSS + Finnhub; runs a batched LLM news-scoring pass on material items; stores in `news_daily` table
+1. **News** — per ticker, pulls headlines from Finnhub (Yahoo Finance only as a fallback when Finnhub returns none); RSS feeds supply market-level news and trending tickers. Triage and the batched LLM scoring pass use the `triage` failover chain; stores in the `news_daily_update` table (plus `news_filter_log`)
 2. **Short Interest Check** — computes the current FINRA settlement date (deterministic, no network); if new data is due, pulls it in one paginated batch and writes to `short_interest` table; otherwise skips (cheap single DB query)
 3. **Research** — fetches Finnhub analyst consensus, price targets, and recent rating changes; injects pre-computed short interest trend summary per ticker; stores in `research` table
 4. **Fundamentals** — (funds, money market and cash are left out first — they file nothing with the SEC; see [Instrument routing](#instrument-routing-funds-vs-stocks)) extracts revenue, net margin, FCF, debt/equity from the latest EDGAR filing; fetches the latest 8-K EX-99.1 exhibit and extracts the guidance/outlook section; passes guidance text and financial data together to the LLM, which outputs `guidance_direction`; stores in `fundamentals` table
 5. **APEX** — runs the 4-analyst panel for each portfolio ticker on today's scheduled horizons; reads macro snapshot live at prediction time; stores recommendations in `predictions` table
+6. **After APEX** the morning batch also runs valuation, risk and technical flags, the universe screen, the scoring snapshot and a price backfill. **Risk and technical flags** run on an event-driven cadence (a price move, a severity-3 event, a new filing or a holdings change; otherwise weekly): risk flags are computed per owner, technical flags are shared and rule-based with no LLM.
+
+The **evening batch** additionally refreshes fund data, records provisional marks for open 63d / 250d calls, takes health snapshots and delivers due notifications.
 
 **Event detection** runs at the start of the APEX phase. `detect_material_news` reads the news filter log and fires event-driven predictions for high-severity items. `detect_earnings`, `detect_sec_8k`, `detect_rating_changes`, and `detect_macro_events` are implemented as stubs and return no events today.
 
@@ -177,8 +180,8 @@ Predictions are generated on a cadence keyed to the horizon length, not every da
 
 | Horizon | Label | Scheduled on |
 |---|---|---|
-| 5 days | ~1 week | Every Monday |
-| 21 days | ~1 month | Every Monday |
+| 5 days | ~1 week | Every Monday that is a trading day (a holiday Monday skips that week) |
+| 21 days | ~1 month | Every Monday that is a trading day |
 | 63 days | ~1 quarter | First trading day of each month |
 | 250 days | ~1 year | First trading day of each quarter |
 
@@ -189,9 +192,9 @@ for example, 250d can run monthly instead of quarterly, or any horizon's routine
 on every run (`config.get_event_driven_config()`), so a change applies on the next batch, and the Schedule page's Morning card
 shows what is stored. If the setting cannot be read, the seed cadence is used.
 
-**Event-driven overrides** — material news events above the severity threshold fire an immediate intraday APEX run regardless of the schedule. Watchlist tickers are promoted to portfolio treatment for that run.
+**Event-driven overrides** — material news events above the severity threshold fire an immediate intraday APEX run regardless of the schedule. Only portfolio tickers are forecast on an event; a watchlist ticker's event is detected and can notify, but is not promoted to a forecast. (The legacy `--force-all` path uses a different, older horizon schedule.)
 
-Batch times (CST): Morning 06:30 · Intraday checks 11:00, 13:00, 15:00 · Evening 17:30.
+Suggested batch times (CST): Morning 06:30 · Intraday checks 11:00, 13:00, 15:00 · Evening 17:00–17:30. These are set by your cron schedule, not enforced by the code: the times in `portfolio_agent/config.py` are defaults that nothing reads.
 
 ---
 
@@ -210,9 +213,9 @@ APEX uses one **champion** model for every prediction, so the validation record 
 | `apex_selection_mode` | `champion` | `champion` = one fixed model for everything; `random_pool` = each ticker draws one model from `apex_random_pool` |
 | `apex_random_pool` | `["GPT-5", "DeepSeek-Chat"]` | The models a ticker can draw in `random_pool` mode (at least 2 different ones) |
 
-Model labels: `Claude-Sonnet`, `GPT-4o`, `GPT-5`, `o3`, `DeepSeek-Chat` (DeepSeek's API, `DEEPSEEK_API_KEY`), `Mistral-Large` and `Magistral-Medium` (`MISTRAL_API_KEY`). The defaults live in `portfolio_agent/tools/apex_dual_run.py`.
+Model labels: `Claude-Sonnet`, `GPT-4o`, `GPT-5`, `o3`, `DeepSeek-Chat` (DeepSeek's API, `DEEPSEEK_API_KEY`), `Mistral-Large` and `Magistral-Medium` (`MISTRAL_API_KEY`), plus the OpenRouter labels `OR-Grok-4.3` and `OR-Qwen3.7-Max`. The defaults live in `portfolio_agent/tools/apex_dual_run.py`.
 
-**Random pool (OpenAI or DeepSeek).** With `apex_selection_mode = random_pool`, each ticker's prediction is made by **one** model drawn from the pool, not by all of them. The draw is a hash of (ticker, date): random across tickers (about half each for two models), but the same ticker gets the same model all day, so a re-run or a second horizon never flips it. The drawn model is that run's champion (`prediction_role = champion`, `model_name` records which); the other pool members and then `apex_fallback_models` follow in order if it fails. A model whose account is out of credit is skipped as a draw for the rest of that run instead of failing on every ticker that would have drawn it. The configured `apex_champion_model` is ignored while the pool is on. Predictions from different models share one validation record, so compare them on Validation QA → Models rather than reading the combined number as one model's skill.
+**Random pool (OpenAI or DeepSeek).** With `apex_selection_mode = random_pool`, each ticker's prediction is made by **one** model drawn from the pool, not by all of them. The draw is a hash of (ticker, date): random across tickers (about half each for two models), but the same ticker gets the same model all day, so a re-run or a second horizon never flips it. The drawn model is that run's champion (`prediction_role = champion`, `model_name` records which); the other pool members and then `apex_fallback_models` follow in order if it fails. A model whose account is out of credit (or that fails authentication or its subscription tier) is marked dead for 600 seconds and skipped as a draw instead of failing on every ticker that would have drawn it. The configured `apex_champion_model` is ignored while the pool is on. Predictions from different models share one validation record, so compare them on Validation QA → Models rather than reading the combined number as one model's skill.
 
 **Changing the plan.** `python -m scripts.apex_models` shows the plan and whether each provider key is set; `python -m scripts.apex_models --pool GPT-5 DeepSeek-Chat` turns the pool on, `--champion GPT-5` goes back to one fixed model, `--fallbacks o3 GPT-4o` sets the fallbacks, `--challenger DeepSeek-Chat --challenger-pct 20` shadow-runs a model. From code: `update_engine_settings(updated_by=..., apex_selection_mode=..., apex_random_pool=[...], apex_champion_model=..., apex_fallback_models=[...], apex_challenger_model=..., apex_challenger_sample_pct=...)` in `portfolio_agent.tools.engine_settings_db` (`apex_challenger_model=None` turns the challenger off).
 
@@ -225,15 +228,18 @@ Every stored prediction records its `prediction_role`:
 | `challenger` — shadow run on a deterministic sample of tickers | Never | Only on Validation QA → Roles (paired champion-vs-challenger comparison) |
 | `legacy_random` — made before champion selection, when each run picked a random model | Yes (history) | Only with **Include legacy predictions** switched on |
 
-Which model ran and why is logged with `event_type` `apex_model_plan` (once per phase), `apex_model_select` (role + reason per attempt), `apex_retry`, `apex_complete`, `apex_exhausted` and `apex_challenger`.
+Which model ran and why is logged with `event_type` `apex_model_plan` (once per phase), `apex_model_select` (role + reason per attempt), `apex_retry`, `apex_complete`, `apex_exhausted`, `apex_challenger`, `apex_skip_dead`, `apex_timeout` and `apex_skip`.
 
 ### Batch pipeline phases (fundamentals, research, news)
 
-These phases use a multi-model failover chain. Models are tried in order until one succeeds:
+These phases use a multi-model failover chain per tier (`portfolio_agent/_models.py`, `FAILOVER_CHAINS`). Models are tried in order until one succeeds:
 
-**Gemini → Groq → OpenRouter → GPT-4o-mini → Claude-Haiku → GPT-4o → Claude-Sonnet**
+- **triage** (news) and **flash** (fundamentals, research): Groq GPT-OSS-120B → Groq GPT-OSS-20B → Mistral-Small → Ministral-8B → Cloudflare low-tier models → OR-Nemotron-Nano → GPT-4o-mini → GPT-4o
+- **fast** (clearance): the same chain without OR-Nemotron-Nano
+- **analyst** (macro, risk): GPT-5 → o3 → OR-Claude-Opus-4.8 → OR-Qwen3.7-Max → OR-Grok-4.3 → Mistral-Large → Magistral-Medium
+- **reasoning** (interactive APEX and synthesis): Claude-Sonnet → GPT-5 → o3 → the OpenRouter and Mistral high-reasoning models
 
-Keys for unused providers can be omitted; those models are skipped. The macro snapshot, dynamic weight computation, short interest trend computation, and validation are fully deterministic — no LLM is involved.
+No batch tier contains a Gemini or Claude model. A model is not skipped for lack of a key: it fails and the next one is tried (an authentication error counts as a failure). The macro snapshot, dynamic weight computation, short interest trend computation, and validation are fully deterministic — no LLM is involved.
 
 ---
 
@@ -247,7 +253,7 @@ Everything here is **optional** and everyone starts with zero input: a **Moderat
 - **Emergency cash reserve** is one **dollar amount**: yours if you set it, otherwise the global default ($3,000). Only cash in taxable and cash accounts counts toward it — cash inside a 401(k) or IRA isn't available in an emergency without penalties or taxes. It is not a goal and not a number of months. USD only.
 - **Custom allocation** (optional) replaces your profile's targets with your own (targets must add up to 100, each band must contain its target). *Use profile default* switches back.
 - **Concentration limits** come from your profile (`limits_source = profile`, the default for new users) or from your own numbers on the profile page (`custom`). Everyone who existed before this feature was set to `custom`, so no existing limit changed.
-- **Goals** (retirement, house, education, other) are optional notes; nothing reads them yet.
+- **Goals** (retirement, house, education, other) are optional notes; they never enter the policy, the health checks or any forecast. (Their names are only read to build the private-term list that keeps personal terms out of shared output.)
 
 **Where it lives.** No config files: all of it is in the database. The global tables — `risk_quiz_settings` (questions, options, points, cap rule, thresholds), `risk_profile_settings` (one row per profile) and `portfolio_settings` (the default reserve) — are seeded from code constants, versioned (`version`, `updated_at`, `updated_by`), updated with `expected_version`, and can be reset to defaults. They are **admin-only**, enforced in the service (an enabled `auth_users` admin) and not just hidden in the UI; admins edit them under **Profile → Investor settings**. A person's own profile, reserve, custom allocation and goals are private, owner-scoped tables (`investor_profile` keeps history; `target_allocation_custom`; `investment_goals`), written only through `services/investor_service.py` with an audit event per change.
 
@@ -309,7 +315,7 @@ A checkup of **your own** portfolio against **your own** profile and limits — 
 
 **History.** One snapshot per day (taken the first time you open the page or the Today card that day, and by the evening batch), shown as *what changed since the last snapshot* and *since about 30 days ago*. Stored in `health_snapshots` (private, owner-scoped); each new day's snapshot writes an audit event. Turn snapshots off with the `health_snapshot_enabled` setting.
 
-**Notifications.** A check that **becomes ACTION** notifies once — only ACTION, never WATCH, at severity 4, through your own notification settings (channel, minimum severity, quiet hours). The de-duplication key is `health:<check>:<date the run of ACTION began>`, so an ongoing problem doesn't repeat daily; if it clears and comes back it notifies again. (Delivery is the existing structured-log hook.)
+**Notifications.** A check that **becomes ACTION** notifies once — only ACTION, never WATCH, at severity 4, through your own notification settings (channel, minimum severity, quiet hours). The de-duplication key is `health:<check>:<date the run of ACTION began>` (an account-level check that becomes ACTION uses `health:account:<account id>:<check>:<date>`), so an ongoing problem doesn't repeat daily; if it clears and comes back it notifies again. Delivery goes through the notification outbox (see Notifications below). Plan positions with unvested employer money are valued at the vested amount (`health_exclude_unvested`, default on) and the unvested part is reported separately.
 
 **Chat.** The `get_portfolio_health` tool is read-only and owner-scoped: it returns your statuses and summaries, never anyone else's, and takes no snapshot and sends nothing.
 
@@ -331,7 +337,7 @@ A checkup of **your own** portfolio against **your own** profile and limits — 
 
 **Upgrading.** The old single `channel` setting is kept (deprecated, still readable) and was migrated once: `email` → email routing on for exactly what it covered (market events, portfolio health); `none` or `slack` → everything off. Anyone added after this release gets the defaults above. Re-running the migration never changes a choice you made since.
 
-**Global settings** (admin only; versioned, reset-to-defaults; **Profile → Investor settings** gets its editor in a later step): which channels are on, the SMTP server and sender, the ntfy server, rate and retry limits, verification-code rules, the public app URL, and a dry-run switch. WhatsApp / SMS cannot be enabled, and email cannot be enabled without an SMTP host and a from-address.
+**Global settings** (admin only; versioned, reset-to-defaults; edited under **Profile → Notification settings**): which channels are on, the SMTP server and sender, the ntfy server, rate and retry limits, verification-code rules, the public app URL, and a dry-run switch. WhatsApp / SMS cannot be enabled, and email cannot be enabled without an SMTP host and a from-address.
 
 **Secrets live only in environment variables — never in the database, a file, a log or a screen.** The database stores just the variable *name*; the admin screen shows each as *present* or *missing*, never the value:
 
@@ -341,7 +347,7 @@ A checkup of **your own** portfolio against **your own** profile and limits — 
 | `APEX_NTFY_TOKEN` | optional ntfy access token (for a protected or self-hosted server) |
 | `APEX_NOTIFY_SIGNING_KEY` | signs the one-click unsubscribe links in emails |
 
-**How delivery works.** A producer calls `notification_service.notify(owner, category, dedup_key=…, title=…, brief=…)`. That applies the person's filters (minimum severity / conviction, quiet hours in *their* timezone), fans out to every deliverable channel and **only writes rows to the outbox** — no network call, and it never raises into the caller. A separate worker (`python -m scripts.send_notifications`) claims due rows, sends them with no database connection open, and records the result. Quiet hours either **defer** the message until they end or **suppress** it, as the person chose. Over `max_messages_per_user_per_hour` a message is **folded into the next digest, not dropped**. A transient failure is retried after `retry_backoff_seconds × 2^(attempt−1)` (capped at a day); after `retry_max_attempts` — or at once for a permanent error such as a bad login — the row is `FAILED` and an administrator can requeue it. The same thing is never enqueued twice for the same person and channel, and an opt-out made *after* a message was queued is honoured at send time. With the global `dry_run` setting on, the worker only logs what it would send.
+**How delivery works.** A producer calls `notification_service.notify(owner, category, dedup_key=…, title=…, brief=…)`. That applies the person's filters (minimum severity / conviction, quiet hours in *their* timezone), fans out to every deliverable channel and **only writes rows to the outbox** — no network call, and it never raises into the caller. A separate worker (`python -m scripts.send_notifications`) claims due rows, sends them with no database connection open, and records the result. Quiet hours either **defer** the message until they end or **suppress** it, as the person chose. Over `max_messages_per_user_per_hour` a message is **folded into the next digest, not dropped** — but a digest reaches a person only if their digest is switched on (it is off by default), so with the digest off the held-back messages are not delivered. A transient failure is retried after `retry_backoff_seconds × 2^(attempt−1)` (capped at a day); after `retry_max_attempts` — or at once for a permanent error such as a bad login — the row is `FAILED` and an administrator can requeue it. The same thing is never enqueued twice for the same person and channel, and an opt-out made *after* a message was queued is honoured at send time. With the global `dry_run` setting on, the worker only logs what it would send.
 
 ### Where you manage it
 **Profile → Notifications** (everyone): your contacts — the verified sign-in email, **one** alternate email (verified with a 6-digit code), and phone push (your private topic, a QR code, *Send test*, and *I got it* to verify it); the grid of which alert types go to which channel (Email and Phone push are live; WhatsApp and SMS are shown disabled, "Coming later"); brief or detailed messages; quiet hours and whether to hold or drop what arrives in them; your digest time; the severity and conviction thresholds; *Send test* buttons; and your own last 50 notifications. Each part saves with its own button (not "Save profile"). The old single "Channel" dropdown is gone — routing replaces it.
@@ -354,7 +360,7 @@ A checkup of **your own** portfolio against **your own** profile and limits — 
 
 | Category | Trigger | Who is told | Text |
 |---|---|---|---|
-| `MARKET_EVENT` | an event the detector finds (material news, …) | **every person who holds the ticker in a real (non-paper) account or watches it** — nobody else, each judged by their own routing, severity, quiet hours and content level | "APEX: NVDA - material news (severity 4). Open APEX for details." plus, if their clearance says so, "[BLOCKED: no new trade currently permitted]" — information only, it never stops the alert |
+| `MARKET_EVENT` | an event the detector finds (material news, …) | **every person who holds the ticker in a real (non-paper) account or watches it** — nobody else, each judged by their own routing, severity, quiet hours and content level | "APEX: NVDA - material news (severity 4). Open APEX for details." plus, for any clearance decision other than allowed, a note such as "[BLOCKED: no new trade currently permitted]" (the word follows the decision, so pending-approval and unknown also annotate) — information only, it never stops the alert |
 | `PORTFOLIO_HEALTH` | a Portfolio Health check *becomes* ACTION (once per run of ACTION; never WATCH) | that person | the check's name only — no amounts, no account names; the email's detailed text adds the full summary |
 | `COMPLIANCE` | a pre-clearance approval recorded or withdrawn · an approval expiring within 24 hours · your restricted list changed for a ticker you **hold** | that person | informational: "…was recorded", "…was withdrawn; no new trade is currently permitted", "…expires within 24 hours" |
 | `DAILY_DIGEST` | at each person's digest time, in their timezone | that person, **email only**, **off by default** | one email: the Health checks needing action or a watch, the day's events on tickers they hold or watch, and anything held back by the hourly limit. **Skipped when there is nothing to say**, and at most one per person per day |
@@ -427,7 +433,8 @@ FINRA publishes settlement-date short interest data twice per month: approximate
 3. If new data is due, one paginated FINRA API call downloads the full file (~8,000 rows); rows are filtered to your ticker universe in Python and written to `short_interest`
 4. Trend direction (rising / stable / falling) and squeeze pressure (high / elevated / low) are computed from the last 2–3 settlement records entirely in Python — no LLM arithmetic
 5. The compact summary is injected into each ticker's Research prompt block; the Research analyst scores short interest as a signal alongside consensus and price targets
-6. **Fallback**: if the DB has no history for a ticker (e.g. first run before a refresh cycle fires), `yfinance` `Ticker.info` provides `sharesShort`, `shortRatio`, and `shortPercentOfFloat` with no new dependencies
+6. **Fallback**: if the DB has no history for a ticker (e.g. first run before a refresh cycle fires), `yfinance` `Ticker.info` provides `sharesShort`, `shortRatio`, and `shortPercentOfFloat` with no new dependencies. Note that the Research prompt's short-interest line is built from stored FINRA rows only, so this fallback does not reach the prompt today
+7. "Business days" here are weekdays only; market holidays are not modelled. The FINRA file is one logical download fetched in several pages
 
 ---
 
@@ -435,11 +442,11 @@ FINRA publishes settlement-date short interest data twice per month: approximate
 
 Each fundamentals run calls `get_earnings_guidance(ticker)` in `tools/edgar.py`:
 
-1. Fetches the latest 8-K accession number from `data.sec.gov/submissions/{CIK}.json`
+1. Fetches the latest 8-K accession number (form exactly `8-K`; `8-K/A` is ignored) from `data.sec.gov/submissions/{CIK}.json`
 2. Parses the filing folder HTML at `www.sec.gov/Archives/edgar/data/` to find the EX-99.1 exhibit filename
 3. Downloads the exhibit, strips HTML tags, decodes entities, and extracts the forward guidance/outlook section using priority-ordered regex patterns (most specific phrases matched first)
-4. The guidance text (capped at 2,500 characters) is appended to the fundamentals data block and passed to the LLM
-5. The LLM outputs `guidance_direction`: `"raised"` / `"maintained"` / `"lowered"` / `"withdrawn"` / `"none"`. A raise can add 1–2 points to `fundamental_score`; a lowered/withdrawn guidance subtracts 1–2 points from what trailing numbers alone would justify
+4. The guidance text is extracted up to 3,000 characters (that is what is stored) and truncated to 2,500 characters when appended to the fundamentals data block passed to the LLM
+5. The LLM outputs `guidance_direction`: `"raised"` / `"maintained"` / `"lowered"` / `"withdrawn"` / `"none"`. The prompt tells it that a raise can add 1–2 points to `fundamental_score` and that lowered/withdrawn guidance subtracts 1–2 points; this is a prompt instruction only, not enforced or validated in code
 6. `guidance_text`, `guidance_date`, and `guidance_direction` are stored in the `fundamentals` table
 
 Note: some companies (e.g. Apple since 2020) do not provide quantitative quarterly guidance. In those cases the LLM sets `guidance_direction: "none"` and scores purely on trailing financials.
@@ -467,7 +474,7 @@ Positions can be typed in or imported as snapshots (`holdings_source = snapshot`
 
 **Tables** (`tools/ledger_db.py`, created by the holdings migration, idempotent): `transactions` is the ledger and is **append-only**. Database triggers refuse any `UPDATE` or `DELETE`, so a mistake is corrected with a `VOID` row that points at the transaction it cancels (the original stays, marked voided). Each row records who wrote it, when, and an optional `external_id` that makes a write idempotent. `tax_lots` and `lot_closures` are **derived**: rebuilt by replay (`tools/ledger_engine.py`, pure and deterministic) in the same transaction as every ledger change, never edited. A lot is keyed by `open_transaction_id`, the id of the transaction that opened it, so it keeps its identity however often lots are rebuilt. `accounts.lot_method` (NULL = use the default) and `portfolio_settings.default_lot_method` (seed `FIFO`; admin-editable under **Profile → Admin → Fund data**) choose the tax-lot method.
 
-**Transactions:** `BUY`, `SELL`, `DEPOSIT`, `WITHDRAWAL`, `DIVIDEND`, `INTEREST`, `EMPLOYER_MATCH` (cash, or shares that open a lot with no cash movement), `FEE`, `SPLIT`, `VOID`. A buy's basis is quantity × price + fees; a sale's proceeds are quantity × price − fees, split across the lots it closes in proportion to quantity. A split multiplies the open lots' shares and divides their unit cost (total basis unchanged) and is effective at the start of its day. A closure is `LONG` when held more than 365 days, else `SHORT`.
+**Transactions:** `BUY`, `SELL`, `DEPOSIT`, `WITHDRAWAL`, `DIVIDEND`, `INTEREST`, `EMPLOYER_MATCH` (cash, or shares that open a lot with no cash movement), `FEE`, `SPLIT`, `VOID`, and `OPENING_BALANCE` (written only by `switch_to_ledger`, below). The service layer also keeps a separate saved **activity history** (not transactions) imported from broker history files. A buy's basis is quantity × price + fees; a sale's proceeds are quantity × price − fees, split across the lots it closes in proportion to quantity. A split multiplies the open lots' shares and divides their unit cost (total basis unchanged) and is effective at the start of its day. A closure is `LONG` when held more than 365 days, else `SHORT`.
 
 **Lot methods:** `FIFO`, `LIFO`, `HIFO` (highest unit cost first), and `SPECIFIC` (the sale names its lots and quantities). The method is resolved when a sale is **recorded** (the sale's own choice, else the account's, else the default) and **stored on the sale**, so changing a setting later never rewrites a past sale. `SPECIFIC` is per sale and cannot be a standing default.
 
@@ -477,7 +484,7 @@ Positions can be typed in or imported as snapshots (`holdings_source = snapshot`
 
 **Compliance (pre-clearance).** When a BUY or SELL is recorded on a non-paper account and the owner's profile has `pre_clearance_required` on (the default), it is checked against `trade_approvals` through `clearance.evaluate_ledger_clearance` for an approval **covering ticker + side + trade date** (an approval for the side, "buy" / "sell", or a general "trade" one; read **as of the trade date**, so a later grant does not cover an earlier trade and a later revoke does not un-cover one). The trade is **never blocked** (it already happened): the result is stored on the row as `clearance_status` (`approved` with `clearance_approval_id`, `missing`, `not_required`, or `unknown` when the approvals could not be read) and audited. A paper account is not checked (`clearance_status` stays empty). `missing` enqueues **one** brief `COMPLIANCE` notification per transaction (`dedup_key = ledger_clearance:<txn id>`, ticker, side and date only, **no amounts**) after the trade has committed. **Portfolio Health:** the compliance check turns **ACTION** when any recorded, not-voided trade has `clearance_status = missing` (and **WATCH** for `unknown`), listing the tickers; with nothing flagged it is exactly the restricted-list check as before. Restricted-list and blackout rules are not part of this check.
 
-**CSV import and export.** `suggest_csv_mapping` → `preview_transactions_csv` → `import_transactions_csv` (`tools/ledger_csv_import.py` is the pure part). The file's columns are mapped to `date`, `type`, `ticker`, `quantity`, `price`, `amount`, `fees`, `external_ref` and `contribution_source` (a first guess is suggested from the headers); types go through an alias table (Bought → BUY, Contribution → DEPOSIT ...) and an unknown type makes that row **invalid**, never a guess. The **preview** writes nothing: each row is new / duplicate / invalid with its errors and warnings, and the new rows are dry-run through the ledger replay so a sale the holdings cannot support is reported before anything is applied. The import is **all or nothing** in one transaction and refuses if any row is invalid; every row goes through the normal verb (validation, lots, clearance check, audit) and is tagged with its `import_runs` row (`broker = csv_transactions`, rows added, duplicates `skipped`) and its `contribution_source`. **Deduplication:** by `external_ref` if the file has one, else by (account, trade_date, type, ticker, quantity, cash amount) matched **by count** against the account's non-voided transactions, so two genuinely identical trades in one file are both kept the first time and a re-import adds nothing. **Only ledger accounts** accept an import (a snapshot account is rejected: switch it first). Broker-specific parsers are not built (TODO: mapping presets once real files are available). `export_transactions_csv` writes every transaction of an account, voided rows and VOID rows included and marked, and `export_realized_gains_csv` the realized gains by lot (SHORT / LONG, method, optionally one year) for taxes; text cells that a spreadsheet would run as a formula are prefixed with an apostrophe.
+**CSV import and export.** `suggest_csv_mapping` → `preview_transactions_csv` → `import_transactions_csv` (`tools/ledger_csv_import.py` is the pure part). The file's columns are mapped to `date`, `type`, `ticker`, `quantity`, `price`, `amount`, `fees`, `external_ref` and `contribution_source` (a first guess is suggested from the headers); types go through an alias table (Bought → BUY, Contribution → DEPOSIT ...) and an unknown type makes that row **invalid**, never a guess. The **preview** writes nothing: each row is new / duplicate / invalid with its errors and warnings, and the new rows are dry-run through the ledger replay so a sale the holdings cannot support is reported before anything is applied. The import is **all or nothing** in one transaction and refuses if any row is invalid; every row goes through the normal verb (validation, lots, clearance check, audit) and is tagged with its `import_runs` row (`broker = csv_transactions`, rows added, duplicates `skipped`) and its `contribution_source`. **Deduplication:** by `external_ref` if the file has one, else by (account, trade_date, type, ticker, quantity, cash amount) matched **by count** against the account's non-voided transactions, so two genuinely identical trades in one file are both kept the first time and a re-import adds nothing. **Only ledger accounts** accept an import (a snapshot account is rejected: switch it first). Mapping presets exist for Fidelity ("History for Account") and Vanguard ("OfxDownload") transaction files; other brokers use the generic column mapping. `export_transactions_csv` writes every transaction of an account, voided rows and VOID rows included and marked, and `export_realized_gains_csv` the realized gains by lot (SHORT / LONG, method, optionally one year) for taxes; text cells that a spreadsheet would run as a formula are prefixed with an apostrophe.
 
 **On the Accounts page** (**Transactions & ledger** tile; the panel is `web/components/ledger_panel.py`, every number comes from `web/data/ledger.py`, which goes through the service layer with the caller's context so another owner's account is always refused). Pick an account, then: **Transactions** (filters by type, ticker, date and clearance; voided rows and the void entries that cancel them are shown struck through; void with a required reason), **Add** (one form per transaction type; a snapshot account says its entries are history only), **Lots & gains** (open lots; realized gains by lot with short / long totals and a year filter), **Reconcile** (paste what the broker statement shows and see MATCH / DIFFERENT / ONLY_IN_LEDGER / ONLY_IN_STATEMENT; nothing is changed), **Import / export** (the three-step CSV import with column mapping and preview; downloads of the transactions and realized-gains CSVs) and **Ledger settings** (the account's lot method; switching a snapshot account to the ledger shows the opening balances it would record, asks for a unit cost for any position without a cost basis, and needs an explicit confirmation; switching back). Clearance badges (Cleared / No approval / Not required / Unchecked) appear on every trade, with a count at the top of the panel. Not built (TODO hooks only): money-weighted performance (IRR), a paper-trading UI, wash-sale adjustment, choosing specific lots in the form (the service supports them), and broker sync.
 
@@ -537,16 +544,16 @@ Every prediction is evaluated when its horizon matures:
 - Fetches the actual closing price on the maturity date from Yahoo Finance
 - Computes actual return: `(end_price − start_price) / start_price`
 - Assigns a directional outcome: correct if the predicted direction matches the sign of the actual return
-- Maps actual return to one of five buckets: strong\_down (<−5%), moderate\_down (−5% to −1%), flat (−1% to +1%), moderate\_up (+1% to +5%), strong\_up (>+5%)
+- Maps actual return to one of five buckets using the versioned, horizon-scaled edges the prediction was made under (see [Horizon-scaled return buckets](#horizon-scaled-return-buckets)); for 5d at version 1: strong\_down (<−5%), moderate\_down (−5% to −1%), flat (−1% to +1%), moderate\_up (+1% to +5%), strong\_up (>+5%)
 - Computes Brier score and log-loss from the probability distribution the model provided at prediction time
 
 **Layer 2 — Rolling metrics** (nightly, incremental)
 - Aggregates L1 outcomes into directional accuracy, high/low conviction accuracy, Brier score, and log-loss
-- Broken down by horizon, ticker segment, model, prediction role (champion / fallback / challenger / legacy) and instrument type (stock vs ETF vs mutual fund …, with leveraged funds counted separately — Validation QA → *Instrument types*)
-- Baseline for Brier score is 0.25 (coin-flip); baseline for log-loss is ln(2) ≈ 0.693
+- Rolling metrics are stored as plain means; the breakdowns by prediction role (champion / fallback / challenger / legacy) and instrument type (stock vs ETF vs mutual fund …, with leveraged funds counted separately — Validation QA → *Instrument types*) are computed when read, along with horizon, ticker and model views
+- Reference baselines are 0.25 for Brier score (coin-flip) and ln(2) ≈ 0.693 for log-loss; scorecards also compare against baselines computed on their own sample
 
-**Layer 3 — Pattern analysis** (weekly, LLM-assisted)
-- Identifies systematic biases: which horizons are weakest, which conditions the model over- or under-weights
+**Layer 3 — Pattern analysis** (weekly)
+- Statistical segment mining finds systematic biases (which horizons are weakest, which conditions the model over- or under-weights); a language model only narrates the segments that were statistically confirmed
 
 Validation results are visible in the Validation tab of the dashboard. The Brier score and accuracy numbers are the only objective measure of how well the system is performing — check them before acting on any recommendation.
 
@@ -554,7 +561,7 @@ Validation results are visible in the Validation tab of the dashboard. The Brier
 
 ## How to interpret recommendations
 
-The system outputs one of five labels: **STRONG\_BUY**, **BUY**, **HOLD**, **SELL**, **STRONG\_SELL**. These map from the composite score:
+The system outputs one of five labels: **STRONG\_BUY**, **BUY**, **HOLD**, **SELL**, **STRONG\_SELL**. These map from the composite score as instructed in the analyst prompt (the mapping is a prompt instruction; no code recomputes or enforces it):
 
 | Composite (1–10) | Label |
 |---|---|
