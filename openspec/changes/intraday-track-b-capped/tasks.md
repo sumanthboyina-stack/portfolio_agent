@@ -1,0 +1,4 @@
+- [x] 1.1 Pure selector, examined-today check, config keys
+- [x] 1.2 Wire into run_batch_intraday; limit forced re-run to event-triggered tickers
+- [x] 2.1 Tests for selector and examined check
+- [x] 3.1 README

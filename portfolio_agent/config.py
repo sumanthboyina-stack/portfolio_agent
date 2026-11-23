@@ -18,6 +18,8 @@ _DEFAULT_EVENT_DRIVEN: dict = {
     "evening_batch_time": "17:30",
     "intraday_severity_threshold": 3,
     "watchlist_severity_threshold": 3,
+    "track_b_max_tickers": 5,          # non-portfolio tickers per intraday pass
+    "track_b_min_screen_score": 2,     # morning math-screen score needed to be promoted
     "detectors": {
         "earnings":       True,
         "sec_8k":         True,

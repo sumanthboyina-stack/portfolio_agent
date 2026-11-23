@@ -7,12 +7,14 @@ Track A — Portfolio tickers
   Check for severity-3 events in news_filter_log.  If any, generate 5d
   APEX prediction for those tickers (tagged event_material_news).
 
-Track B — Trending tickers (new opportunity discovery)
-  Scan market headlines for trending tickers.  For any that:
-    a) have not been analyzed at all today (new to the system), OR
-    b) scored severity-3 in today's news_filter_log
-  → run news + research pipeline so they appear in the DB for manual review.
-  These are NOT portfolio positions, so no APEX prediction is generated.
+Track B — Opportunity discovery (capped; trending headlines alone never trigger it)
+  A non-portfolio ticker enters the news/research/fundamentals/APEX pipeline only when
+    a) it has an unforecast severity-3 event today (every intraday run), OR
+    b) the morning math screen promoted it (score >= track_b_min_screen_score) and it
+       has not been examined today (first intraday run of the day only).
+  Trending symbols must exist in the loaded universe (when one is loaded).  At most
+  track_b_max_tickers run per pass, ranked by event severity then screen score.
+  These are NOT portfolio positions; they get a 5d forecast only.
 """
 
 from __future__ import annotations
@@ -61,6 +63,66 @@ def _analyzed_today(tickers: list[str], today: str) -> set[str]:
         return {r["ticker"] for r in rows}
     except Exception:
         return set()
+
+
+def _examined_today(tickers: list[str], today: str) -> set[str]:
+    """Tickers already looked at today: a news row OR a news-filter-log row (a ticker the filter dropped
+    leaves no news row, and must not look new again at the next run)."""
+    done = _analyzed_today(tickers, today)
+    rest = [t for t in tickers if t not in done]
+    if not rest:
+        return done
+    from portfolio_agent.tools.db import db_conn
+    try:
+        with db_conn() as c:
+            rows = c.execute(
+                f"SELECT DISTINCT ticker FROM news_filter_log WHERE as_of_date = ? "
+                f"AND ticker IN ({','.join('?' * len(rest))})", [today] + rest).fetchall()
+        done |= {r["ticker"] for r in rows}
+    except Exception:
+        pass
+    return done
+
+
+def _known_universe() -> set[str]:
+    """The loaded universe symbols (empty when none is loaded, which disables the symbol check)."""
+    try:
+        from portfolio_agent.tools.universe_db import get_tickers
+        return {t.upper() for t in get_tickers()}
+    except Exception:
+        return set()
+
+
+def select_track_b(
+    trending_new: list[str],
+    event_by_ticker: dict[str, dict],
+    screen_scores: dict[str, float],
+    examined: set[str],
+    forecast_done: set[str],
+    *,
+    discovery_allowed: bool,
+    cap: int,
+    min_screen_score: float,
+    known_universe: set[str],
+) -> dict:
+    """Choose the Track B tickers (pure: no I/O).  Returns {"tickers": ranked, capped list, "dropped_for_cap": [...]}.
+
+    Event-triggered trending tickers are eligible on every run unless THIS event already produced a forecast.
+    Screen-promoted tickers are eligible only on the day's first run and only if not examined today.
+    A trending symbol outside a loaded universe is ignored; a trending ticker with neither signal is never run."""
+    trending = [t for t in trending_new if not known_universe or t in known_universe]
+    ranked: dict[str, tuple] = {}
+    for t in trending:
+        ev = event_by_ticker.get(t)
+        if ev is not None and t not in forecast_done:
+            ranked[t] = (0, -int(ev.get("severity") or 0), -float(screen_scores.get(t, 0)))
+    if discovery_allowed:
+        for t, score in screen_scores.items():
+            if t not in ranked and score >= min_screen_score and t not in examined:
+                ranked[t] = (1, 0, -float(score))
+    order = sorted(ranked, key=lambda t: (ranked[t], t))
+    cap = max(0, int(cap))
+    return {"tickers": order[:cap], "dropped_for_cap": order[cap:]}
 
 
 async def run_batch_intraday(
@@ -168,37 +230,32 @@ async def run_batch_intraday(
             scheduled_horizons_override=[5],
         )
 
-    # ── Track B: Trending tickers + math-screen promoted → news + research ──────
-    # Include a ticker if:
-    #   (a) it has a severity-3 event today (trending), OR
-    #   (b) it has not been analyzed yet today (new trending discovery), OR
-    #   (c) it was promoted from the morning batch math screen (universe_db signals)
-    already_done = _analyzed_today(trending_new, today)
-    trending_with_events = [t for t in trending_new if t in event_by_ticker]
-    trending_unanalyzed  = [t for t in trending_new if t not in already_done]
+    # ── Track B: event-triggered trending + math-screen promoted → news + research ──
+    from portfolio_agent.tools.progress_tracker import has_completed_today
+    from portfolio_agent.tools.prediction_db import SHARED_SCOPES, event_already_processed
 
-    # Math-screen promoted candidates (from Phase 5 of morning batch)
-    _screen_promoted: list[str] = []
+    _screen_scores: dict[str, float] = {}
     try:
         from portfolio_agent.tools.universe_db import get_signals as _get_signals
-        _screen_today = [
-            s["ticker"] for s in _get_signals(today, min_score=2)
-            if s["ticker"] not in portfolio_set
-        ]
-        if _screen_today:
-            _screen_done = _analyzed_today(_screen_today, today)
-            _screen_promoted = [t for t in _screen_today if t not in _screen_done]
-            if _screen_promoted:
-                log.info(
-                    f"  [Track B] +{len(_screen_promoted)} from morning math screen",
-                    event_type="info",
-                )
+        _screen_scores = {s["ticker"]: float(s["score"] or 0) for s in _get_signals(today, min_score=0)
+                          if s["ticker"] not in portfolio_set}
     except Exception:
         pass
-
-    research_tickers = list(dict.fromkeys(
-        trending_with_events + trending_unanalyzed + _screen_promoted
-    ))
+    _candidates = list(dict.fromkeys(trending_new + list(_screen_scores)))
+    _forecast_done = {t for t in trending_new if t in event_by_ticker
+                      and event_already_processed(t, event_by_ticker[t]["id"], today, scopes=SHARED_SCOPES)}
+    _discovery_allowed = not has_completed_today("intraday")   # discovery once a day; events every run
+    picked = select_track_b(
+        trending_new, event_by_ticker, _screen_scores, _examined_today(_candidates, today), _forecast_done,
+        discovery_allowed=_discovery_allowed, cap=config.get("track_b_max_tickers", 5),
+        min_screen_score=config.get("track_b_min_screen_score", 2), known_universe=_known_universe(),
+    )
+    research_tickers = picked["tickers"]
+    trending_with_events = [t for t in research_tickers if t in event_by_ticker]
+    trending_unanalyzed = [t for t in research_tickers if t not in event_by_ticker]
+    if picked["dropped_for_cap"]:
+        log.info(f"  [Track B] cap {config.get('track_b_max_tickers', 5)} reached — deferred "
+                 f"{picked['dropped_for_cap']}", event_type="info")
 
     if not research_tickers:
         log.info(
@@ -209,7 +266,7 @@ async def run_batch_intraday(
         log.info(
             f"  [Track B] {len(research_tickers)} trending ticker(s) need research "
             f"({len(trending_with_events)} event-triggered, "
-            f"{len(trending_unanalyzed)} new today): {research_tickers}",
+            f"{len(trending_unanalyzed)} screen-promoted): {research_tickers}",
             event_type="summary",
         )
 
@@ -228,7 +285,7 @@ async def run_batch_intraday(
         # Research phase — always_run forces Track B tickers through even if fresh
         await _run_daily_research(
             all_tickers=research_tickers,
-            always_run=set(research_tickers),
+            always_run=set(trending_with_events),
             tracker=tracker,
         )
 
@@ -236,7 +293,7 @@ async def run_batch_intraday(
         from portfolio_agent.pipeline.daily.fundamentals import _run_daily_fundamentals
         await _run_daily_fundamentals(
             all_tickers=research_tickers,
-            always_run=set(research_tickers),
+            always_run=set(trending_with_events),
             tracker=tracker,
         )
 

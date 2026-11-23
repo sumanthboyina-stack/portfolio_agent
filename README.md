@@ -194,6 +194,8 @@ shows what is stored. If the setting cannot be read, the seed cadence is used.
 
 **Event-driven overrides** — material news events above the severity threshold fire an immediate intraday APEX run regardless of the schedule. Only portfolio tickers are forecast on an event; a watchlist ticker's event is detected and can notify, but is not promoted to a forecast. (The legacy `--force-all` path uses a different, older horizon schedule.)
 
+Intraday Track B (non-portfolio discovery) runs only for tickers with an unforecast severity-3 event (every run) or a morning math-screen score of 2+ (first intraday run of the day), capped at 5 tickers per pass; headline-trending symbols alone no longer trigger research or a forecast.
+
 Suggested batch times (CST): Morning 06:30 · Intraday checks 11:00, 13:00, 15:00 · Evening 17:00–17:30. These are set by your cron schedule, not enforced by the code: the times in `portfolio_agent/config.py` are defaults that nothing reads.
 
 ---
