@@ -1,0 +1,4 @@
+- [x] 1.1 degraded status, constants, has_completed_today, Schedule labels
+- [x] 1.2 degraded-run notification
+- [x] 2.1 rate-limit cool-down
+- [x] 3.1 tests

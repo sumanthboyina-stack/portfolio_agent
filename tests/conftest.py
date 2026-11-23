@@ -118,3 +118,12 @@ def _no_live_atr_history(monkeypatch):
     monkeypatch.setattr(trade_plan_db, "_default_fetch_history", lambda ticker, as_of: None)
     monkeypatch.setattr(plan_sim_db, "_default_fetch_bars", lambda ticker: None)       # no bars -> 'insufficient_history'
     plan_sim_db._bars_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_apex_model_marks():
+    """Out-of-credit / rate-limit marks are process-wide state; no test may inherit another's."""
+    from portfolio_agent.tools import apex_dual_run as _adr
+    _adr._OUT_OF_CREDIT.clear(); _adr._DEAD_UNTIL.clear()
+    yield
+    _adr._OUT_OF_CREDIT.clear(); _adr._DEAD_UNTIL.clear()

@@ -316,7 +316,7 @@ def _db_status_label(s: str, log_file: str = "", job_type: str = "daily") -> str
                 return "Completed"
         except Exception:
             pass
-    return {"completed": "Completed", "error": "Errored", "running": "Running"}.get(s, s.title())
+    return {"completed": "Completed", "degraded": "Finished with failures", "error": "Errored", "running": "Running"}.get(s, s.title())
 
 def _validation_done_in_log(txt: str) -> bool:
     return "validation complete." in txt.lower()
@@ -681,7 +681,7 @@ def _render_progress_parsed(prog: dict, job_type: str) -> None:
     # Only set when prog came from _db_to_parsed() — log-only progress (still-
     # running jobs with no DB rows yet) has no run_status, so "pending" there
     # genuinely means "hasn't started," not "was skipped."
-    run_finished = prog.get("run_status") in ("completed", "error")
+    run_finished = prog.get("run_status") in ("completed", "degraded", "error")
 
     # Determine which phases are relevant for this job type
     _DAILY_PHASES = [
@@ -874,7 +874,7 @@ if st.session_state.active_pid:
     db_done = False
     _active_run = _load_run_from_db(st.session_state.get("active_run_id") or "")
     if _active_run:
-        db_done = _active_run["run"].get("status") in ("completed", "error")
+        db_done = _active_run["run"].get("status") in ("completed", "degraded", "error")
     # Log check always runs — most reliable completion signal
     log_done = False
     if st.session_state.active_log and Path(st.session_state.active_log).exists():

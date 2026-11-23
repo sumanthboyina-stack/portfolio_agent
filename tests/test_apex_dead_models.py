@@ -59,6 +59,8 @@ class Provider:
         b = self.behaviour[label]
         if b == "credit":
             raise Exception(CREDIT_ERR)
+        if b == "ratelimit":
+            raise RuntimeError("429 rate limit")
         return _resp("not json" if b == "badjson" else _VALID)
 
     def take(self):
@@ -190,3 +192,22 @@ def test_the_challenger_is_not_called_while_it_is_marked_dead(monkeypatch):
     assert prov.take() == ["Claude-Sonnet"] and "Claude-Sonnet" in adr._OUT_OF_CREDIT
     assert asyncio.run(adr.run_challenger("T2", "prompt", plan)) is None
     assert prov.take() == []                                                                # no second paid failure
+
+
+def test_a_rate_limited_model_is_skipped_for_a_short_cooldown_then_retried(monkeypatch, _env):
+    prov = Provider(monkeypatch, {**DEAD, "Claude-Sonnet": "ratelimit", "DeepSeek-Chat": "ok"})
+    run("T1", champ_plan()); prov.take()
+    assert "Claude-Sonnet" in adr._OUT_OF_CREDIT and adr._DEAD_UNTIL["Claude-Sonnet"] == _env.t + adr.RATE_LIMIT_COOLDOWN_SECONDS
+    run("T2", champ_plan())
+    assert "Claude-Sonnet" not in prov.take()                                               # not paid for again inside the cool-down
+    prov.behaviour["Claude-Sonnet"] = "ok"
+    _env.t += adr.RATE_LIMIT_COOLDOWN_SECONDS + 1                                           # far shorter than the credit mark
+    assert adr.RATE_LIMIT_COOLDOWN_SECONDS < adr.DEAD_MODEL_TTL_SECONDS
+    r = run("T3", champ_plan())
+    assert prov.take()[0] == "Claude-Sonnet" and r.role == pdb.ROLE_CHAMPION
+
+
+def test_a_bad_json_answer_is_not_a_rate_limit(monkeypatch):
+    prov = Provider(monkeypatch, {**DEAD, "Claude-Sonnet": "badjson"})
+    run("T1", champ_plan()); prov.take()
+    assert "Claude-Sonnet" not in adr._OUT_OF_CREDIT

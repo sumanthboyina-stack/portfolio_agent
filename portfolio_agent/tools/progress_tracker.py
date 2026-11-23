@@ -138,11 +138,48 @@ class PipelineProgressTracker:
             )
 
     def finish_run(self, status: str = "completed") -> None:
+        degraded = None
+        if status == "completed":
+            degraded = degraded_phase(self.run_id)
+            if degraded:
+                status = "degraded"
         with _get_conn() as conn:
             conn.execute(
                 "UPDATE pipeline_runs SET status = ?, finished_at = ? WHERE run_id = ?",
                 (status, _now(), self.run_id),
             )
+        if degraded:
+            try:                       # an alert problem never turns a finished run into a crash
+                from portfolio_agent.services.pipeline_health_service import notify_degraded_run
+                with _get_conn() as conn:
+                    row = conn.execute("SELECT job_type FROM pipeline_runs WHERE run_id = ?", (self.run_id,)).fetchone()
+                notify_degraded_run(self.run_id, row["job_type"] if row else "pipeline", **degraded)
+            except Exception:
+                pass
+
+
+# A run whose forecast phase mostly failed is "degraded", not "completed": it finished, but its output is not what it should be
+# (typically every model out of credit). Status is still treated as "finished" everywhere a run is waited for.
+DEGRADED_MIN_ATTEMPTS = 5
+DEGRADED_FAIL_SHARE = 0.5
+
+
+def degraded_phase(run_id: str) -> dict | None:
+    """{"phase", "failed", "total"} when the run's APEX phase attempted at least DEGRADED_MIN_ATTEMPTS tickers and at least
+    DEGRADED_FAIL_SHARE of them failed; else None."""
+    try:
+        with _get_conn() as conn:
+            row = conn.execute("SELECT completed, failed FROM pipeline_phase_progress WHERE run_id = ? AND phase = 'apex'",
+                               (run_id,)).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    done, failed = int(row["completed"] or 0), int(row["failed"] or 0)
+    total = done + failed
+    if total >= DEGRADED_MIN_ATTEMPTS and failed / total >= DEGRADED_FAIL_SHARE:
+        return {"phase": "apex", "failed": failed, "total": total}
+    return None
 
 
 def has_completed_today(job_type: str) -> bool:
@@ -152,7 +189,7 @@ def has_completed_today(job_type: str) -> bool:
     with _get_conn() as conn:
         row = conn.execute(
             """SELECT 1 FROM pipeline_runs
-               WHERE job_type = ? AND status = 'completed'
+               WHERE job_type = ? AND status IN ('completed', 'degraded')
                  AND substr(started_at, 1, 10) = ?
                LIMIT 1""",
             (job_type, today),

@@ -248,16 +248,27 @@ def _dead_labels() -> set[str]:
     return set(_OUT_OF_CREDIT)
 
 
+# A rate-limited model is skipped for a short cool-down (not the long credit mark): the limit usually clears within a minute or two, and
+# without a mark every ticker in the run paid for a call that failed the same way.
+RATE_LIMIT_COOLDOWN_SECONDS = 90.0
+_RATE_LIMIT_RE = re.compile(r"\b429\b|rate[ _-]?limit")
+
+
 def _mark_if_out_of_credit(result: "SinglePrediction") -> None:
     err = (result.error or "").lower()
-    if result.succeeded or not any(m in err for m in _CREDIT_MARKERS):
+    if result.succeeded:
+        return
+    if any(m in err for m in _CREDIT_MARKERS):
+        ttl, why = DEAD_MODEL_TTL_SECONDS, "refused for lack of credit"
+    elif _RATE_LIMIT_RE.search(err):
+        ttl, why = RATE_LIMIT_COOLDOWN_SECONDS, "rate limited"
+    else:
         return
     new = result.display_name not in _OUT_OF_CREDIT
     _OUT_OF_CREDIT.add(result.display_name)
-    _DEAD_UNTIL[result.display_name] = _now() + DEAD_MODEL_TTL_SECONDS      # a failed probe extends the mark
+    _DEAD_UNTIL[result.display_name] = _now() + ttl                         # a failed probe extends the mark
     if new:
-        _log.warning(f"  [apex] {result.display_name} refused for lack of credit — not called again for "
-                     f"{DEAD_MODEL_TTL_SECONDS / 60:.0f} min (or until it works)",
+        _log.warning(f"  [apex] {result.display_name} {why} — not called again for {ttl / 60:g} min (or until it works)",
                      event_type="warning", model=result.display_name)
 
 
