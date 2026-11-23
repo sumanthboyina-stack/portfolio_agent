@@ -118,6 +118,25 @@ def get_trigger_type_for_scheduled(horizon_days: int, today: date, config: dict)
     return "scheduled_weekly"
 
 
+def select_event_tickers(
+    pending: list[dict],
+    watchlist_only: set[str],
+    threshold: int,
+    watchlist_threshold: int,
+) -> dict[str, dict]:
+    """The first (highest-severity) pending event per ticker that is strong enough to forecast.
+
+    A ticker held or otherwise outside the watchlist needs severity >= *threshold*; a watchlist-only ticker needs
+    severity >= *watchlist_threshold*.  *pending* is ordered most severe first (events.db.get_pending_events)."""
+    out: dict[str, dict] = {}
+    for e in pending:
+        t = e["ticker"]
+        need = watchlist_threshold if t in watchlist_only else threshold
+        if int(e.get("severity") or 0) >= need and t not in out:
+            out[t] = e
+    return out
+
+
 def should_generate_prediction(
     ticker: str,
     horizon_days: int,

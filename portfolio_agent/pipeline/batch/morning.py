@@ -189,8 +189,12 @@ async def run_batch_morning(
     # Risk/Technical phase never checked it, so tickers marked "removed from
     # daily run" (e.g. GRFXY, RIVN) kept getting full daily analysis anyway.
     from portfolio_agent.tools.pipeline_skip import is_all_phases_skipped
-    _apex_skip = [t for t in portfolio_tickers if is_all_phases_skipped(t)]
-    apex_tickers = [t for t in portfolio_tickers if t not in _apex_skip]
+    # Held tickers AND watchlist tickers are forecast (same cadence; a watchlist ticker's event uses watchlist_severity_threshold).
+    _held = set(portfolio_tickers)
+    watchlist_only = {t for t in watchlist if t not in _held}
+    forecast_pool = list(dict.fromkeys(portfolio_tickers + [t for t in watchlist if t not in _held]))
+    _apex_skip = [t for t in forecast_pool if is_all_phases_skipped(t)]
+    apex_tickers = [t for t in forecast_pool if t not in _apex_skip]
     if _apex_skip:
         log.info(
             f"  [restricted/apex] skipping {len(_apex_skip)}: {', '.join(sorted(_apex_skip))}",
@@ -204,7 +208,7 @@ async def run_batch_morning(
         await _run_daily_apex(all_apex, tracker=tracker)
     else:
         await _run_morning_apex_event_driven(
-            apex_tickers, all_tickers, trending, tracker, log,
+            apex_tickers, all_tickers, trending, tracker, log, watchlist_only=watchlist_only,
         )
 
     GEMINI_COUNTER.print_stats(prefix=" (end of morning batch)")
@@ -326,14 +330,17 @@ async def _run_morning_apex_event_driven(
     trending_tickers: list[str],
     tracker,
     log,
+    watchlist_only: set[str] | None = None,
 ) -> None:
-    """Determine which tickers/horizons to predict today and run APEX."""
+    """Determine which tickers/horizons to predict today and run APEX.  *portfolio_tickers* is every ticker that gets a
+    scheduled forecast (holdings and watchlist); *watchlist_only* marks the ones nobody holds."""
     from datetime import date as _date
 
     from portfolio_agent.config import get_event_driven_config
     from portfolio_agent.events.detector import run_all_detectors
     from portfolio_agent.events.db import get_pending_events
     from portfolio_agent.events.scheduler import (
+        select_event_tickers,
         get_scheduled_horizons_v2,
         should_generate_prediction,
         get_trigger_type_for_scheduled,
@@ -358,9 +365,11 @@ async def _run_morning_apex_event_driven(
 
     # Read back pending events for portfolio tickers
     threshold = config.get("intraday_severity_threshold", 3)
-    pending = get_pending_events(today, min_severity=threshold)
-    event_tickers: set[str] = {e["ticker"] for e in pending}
-    event_id_map: dict[str, int] = {e["ticker"]: e["id"] for e in pending}
+    wl_threshold = config.get("watchlist_severity_threshold", 3)
+    pending = get_pending_events(today, min_severity=min(threshold, wl_threshold))
+    _events = select_event_tickers(pending, watchlist_only or set(), threshold, wl_threshold)
+    event_tickers: set[str] = set(_events)
+    event_id_map: dict[str, int] = {t: e["id"] for t, e in _events.items()}
 
     if event_tickers:
         log.info(

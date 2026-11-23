@@ -141,7 +141,10 @@ for _col, (_label, _seg, _desc) in zip(_cols, _GROUPS):
     with _col:
         _g = _groups.get(_label)
         if _g is None:
-            st.metric(_label, "no results yet", help=f"Scored predictions on {_desc}: none in the last {lookback} days.")
+            _note = ("forecast weekly and on material news · results start about a week after the first forecast"
+                     if _seg == "Watchlist" and _watchlist_tickers else None)
+            st.metric(_label, "no results yet", delta=_note, delta_color="off",
+                      help=f"Scored predictions on {_desc}: none in the last {lookback} days.")
             continue
         _best = max(_g["cards"], key=lambda h: (_g["cards"][h].evidence.n_dates, -h))
         _ev = _g["cards"][_best].evidence

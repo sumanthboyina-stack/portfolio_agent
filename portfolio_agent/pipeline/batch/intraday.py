@@ -3,7 +3,7 @@ Intraday batch pipeline (--batch intraday).
 
 Runs 2-3x per day (11:00, 13:00, 15:00 CST).  Two parallel tracks:
 
-Track A — Portfolio tickers
+Track A — Portfolio and watchlist tickers
   Check for severity-3 events in news_filter_log.  If any, generate 5d
   APEX prediction for those tickers (tagged event_material_news).
 
@@ -147,6 +147,11 @@ async def run_batch_intraday(
     except Exception:
         current_watchlist = []
 
+    # Held and watchlist tickers are forecast on an event (Track A); everything else is Track B discovery.
+    watchlist_only = {t.upper() for t in current_watchlist if t.upper() not in portfolio_set}
+    forecast_pool = list(dict.fromkeys(portfolio_tickers + sorted(watchlist_only)))
+    forecast_set = set(forecast_pool)
+
     log.info(f"\n{'━' * 64}", event_type="separator")
     log.info(
         f"  Intraday Batch — {len(portfolio_tickers)} portfolio | scanning trending…",
@@ -155,8 +160,8 @@ async def run_batch_intraday(
 
     trending_tickers = _get_trending_tickers(30)
     # Exclude tickers already in portfolio (they're covered by Track A)
-    trending_new = [t for t in trending_tickers if t not in portfolio_set]
-    log.info(f"  {len(trending_tickers)} trending tickers found, {len(trending_new)} outside portfolio", event_type="info")
+    trending_new = [t for t in trending_tickers if t not in forecast_set]
+    log.info(f"  {len(trending_tickers)} trending tickers found, {len(trending_new)} outside portfolio and watchlist", event_type="info")
     log.info(f"{'━' * 64}", event_type="separator")
 
     run_id = os.environ.get("PIPELINE_RUN_ID", "")
@@ -194,28 +199,26 @@ async def run_batch_intraday(
         return
 
     # ── Event detection on all tickers ───────────────────────────────────────
-    all_tickers = list(dict.fromkeys(portfolio_tickers + trending_new))
+    all_tickers = list(dict.fromkeys(forecast_pool + trending_new))
     run_all_detectors(all_tickers, today, config)
 
+    from portfolio_agent.events.scheduler import select_event_tickers
     threshold = config.get("intraday_severity_threshold", 3)
-    pending = get_pending_events(today, min_severity=threshold)
-
-    event_by_ticker: dict[str, dict] = {}
-    for e in pending:
-        if e["ticker"] not in event_by_ticker:
-            event_by_ticker[e["ticker"]] = e
+    wl_threshold = config.get("watchlist_severity_threshold", 3)
+    pending = get_pending_events(today, min_severity=min(threshold, wl_threshold))
+    event_by_ticker: dict[str, dict] = select_event_tickers(pending, watchlist_only, threshold, wl_threshold)
 
     # ── Track A: Portfolio tickers with events → APEX 5d ─────────────────────
-    portfolio_triggered = [t for t in portfolio_tickers if t in event_by_ticker]
+    portfolio_triggered = [t for t in forecast_pool if t in event_by_ticker]
 
     if not portfolio_triggered:
         log.info(
-            f"  [Track A] No severity-{threshold} events for portfolio tickers.",
+            f"  [Track A] No severity-{threshold} events for portfolio or watchlist tickers.",
             event_type="info",
         )
     else:
         log.info(
-            f"  [Track A] {len(portfolio_triggered)} portfolio ticker(s) with events: "
+            f"  [Track A] {len(portfolio_triggered)} portfolio/watchlist ticker(s) with events: "
             f"{portfolio_triggered}",
             event_type="summary",
         )
@@ -238,7 +241,7 @@ async def run_batch_intraday(
     try:
         from portfolio_agent.tools.universe_db import get_signals as _get_signals
         _screen_scores = {s["ticker"]: float(s["score"] or 0) for s in _get_signals(today, min_score=0)
-                          if s["ticker"] not in portfolio_set}
+                          if s["ticker"] not in forecast_set}
     except Exception:
         pass
     _candidates = list(dict.fromkeys(trending_new + list(_screen_scores)))

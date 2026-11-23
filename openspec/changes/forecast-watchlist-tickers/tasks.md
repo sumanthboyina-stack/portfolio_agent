@@ -1,0 +1,4 @@
+- [x] 1.1 select_event_tickers
+- [x] 1.2 morning and intraday use held + watchlist
+- [x] 2.1 Validation note
+- [x] 3.1 Tests
