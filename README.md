@@ -13,7 +13,7 @@ A personal investment research assistant that runs a structured multi-analyst pi
 - **Short interest (FINRA)** — settlement dates are computed deterministically (mid-month + end-of-month, with an 8-business-day publication lag). When new data is due, one paginated FINRA API call fetches the full file; rows are filtered to your ticker universe and stored in `short_interest`. Trend direction and days-to-cover are computed in Python and injected into the Research prompt
 - **Prediction history** — every recommendation is written to SQLite with the start price; outcome is evaluated when the horizon matures using actual closing prices
 - **Validation layer** — nightly job computes directional accuracy, high/low conviction accuracy, Brier score, and log-loss; results are broken down by horizon, ticker, and model
-- **Streamlit dashboard** — authenticated browser UI for investment research, portfolio holdings and allocation, investment accounts, transaction ledgers, financial goals, predictions, validation, and recent activity. **My Wealth** gives an owner-scoped overview of tracked brokerage assets; it is not a complete net-worth statement and does not link goal targets to account balances.
+- **Streamlit dashboard** — authenticated browser UI for investment research, portfolio holdings and allocation, investment accounts, transaction ledgers, financial goals, predictions, validation, and recent activity. **Validation** compares Portfolio, Watchlist and Opportunities (tickers APEX found on its own) side by side. **My Wealth** gives an owner-scoped overview of tracked brokerage assets; it is not a complete net-worth statement and does not link goal targets to account balances.
 
 ## What it does NOT do
 

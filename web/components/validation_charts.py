@@ -24,6 +24,8 @@ Contains:
   - build_horizon_reliability_chart  : simplified accuracy-by-horizon-only view
   - build_excess_by_recommendation_chart : mean return vs SPY per rating (scorecard page)
   - build_rank_trend_chart           : rolling day-by-day link between APEX's score and results (scorecard page)
+  - build_excess_by_group_chart      : mean return vs SPY per rating, one bar series per group (portfolio / watchlist / opportunities)
+  - build_rank_trend_compare_chart   : the rolling score-vs-result line, one line per group
 """
 
 from __future__ import annotations
@@ -1041,6 +1043,61 @@ def build_rank_trend_chart(trend: list[tuple[str, float]], window: int = 5) -> g
                   annotation_text="no relationship", annotation_font_size=10)
     fig.update_layout(
         height=300, yaxis=dict(title="Score vs result (−1 to +1)", range=[-1, 1], gridcolor="#F1F5F9"),
+        xaxis=dict(title="Prediction date"), margin=dict(t=30, b=50, l=60, r=20),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=-0.3),
+    )
+    return fig
+
+
+GROUP_COLORS = {"Portfolio": "#2563EB", "Watchlist": "#7C3AED", "Opportunities": "#F59E0B"}
+_REC_ORDER = ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"]
+
+
+def build_excess_by_group_chart(groups: dict[str, list[dict]]) -> go.Figure:
+    """Mean return vs SPY per rating for ONE horizon, one bar series per group (each from Scorecard.by_recommendation).
+    Bar text carries n; thin groups (< 30 calls) are flagged."""
+    fig = go.Figure()
+    present = {r["recommendation"] for rows in groups.values() for r in rows if r["n"]}
+    cats = [c for c in _REC_ORDER if c in present] + sorted(present - set(_REC_ORDER))
+    for name, rows in groups.items():
+        by = {r["recommendation"]: r for r in rows if r["n"]}
+        fig.add_trace(go.Bar(
+            name=name, x=[c.replace("_", " ").title() for c in cats],
+            y=[by[c]["mean_excess"] * 100 if c in by else None for c in cats],
+            text=[(f"{by[c]['mean_excess'] * 100:+.2f}% (n={by[c]['n']})" + (" ⚠" if by[c]["n"] < 30 else "")) if c in by else ""
+                  for c in cats],
+            textposition="outside", marker_color=GROUP_COLORS.get(name, "#94A3B8"),
+            hovertemplate=name + "<br>%{x}: %{y:.2f}% vs SPY<extra></extra>",
+        ))
+    fig.add_hline(y=0, line_color="#64748B", line_width=1)
+    fig.update_layout(
+        barmode="group", height=320, yaxis=dict(title="Avg return vs SPY (%)", gridcolor="#F1F5F9"),
+        margin=dict(t=30, b=50, l=50, r=20), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=-0.2),
+    )
+    return fig
+
+
+def build_rank_trend_compare_chart(trends: dict[str, list[tuple[str, float]]], window: int = 5) -> go.Figure:
+    """The rolling day-by-day link between APEX's score and results, one line per group (+1 = ordered perfectly, 0 = no
+    relationship, -1 = backwards). Faint dots are the single days."""
+    fig = go.Figure()
+    for name, trend in trends.items():
+        if not trend:
+            continue
+        color = GROUP_COLORS.get(name, "#94A3B8")
+        s = pd.Series({pd.Timestamp(d): v for d, v in trend}).sort_index()
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="markers", name=f"{name} (each day)", showlegend=False,
+                                 marker=dict(size=6, color=color, opacity=0.35),
+                                 hovertemplate=name + "<br>%{x|%Y-%m-%d}<br>%{y:+.2f}<extra></extra>"))
+        if len(s) >= 2:
+            fig.add_trace(go.Scatter(x=s.index, y=s.rolling(window, min_periods=1).mean().values, mode="lines", name=name,
+                                     line=dict(color=color, width=2.5),
+                                     hovertemplate=name + "<br>%{x|%Y-%m-%d}<br>Average %{y:+.2f}<extra></extra>"))
+    fig.add_hline(y=0, line_dash="dot", line_color="#64748B", opacity=0.6,
+                  annotation_text="no relationship", annotation_font_size=10)
+    fig.update_layout(
+        height=320, yaxis=dict(title="Score vs result (−1 to +1)", range=[-1, 1], gridcolor="#F1F5F9"),
         xaxis=dict(title="Prediction date"), margin=dict(t=30, b=50, l=60, r=20),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=-0.3),
     )

@@ -1,0 +1,3 @@
+- [x] 1.1 Group comparison page and chart builders
+- [x] 1.2 History Group column and trigger_type fix
+- [x] 2.1 Tests

@@ -1096,7 +1096,7 @@ def get_recent_evaluated_predictions(limit: int = 100, lookback_days: int | None
                       risk_segment, system_version, evaluated_at, evaluation_status,
                       in_predicted_range, error_magnitude,
                       p_strong_down, p_moderate_down, p_flat, p_moderate_up, p_strong_up,
-                      brier_score, log_loss, model_name, prediction_role,
+                      brier_score, log_loss, model_name, prediction_role, trigger_type,
                       start_price, pt_current_price
                FROM predictions
                {where}
