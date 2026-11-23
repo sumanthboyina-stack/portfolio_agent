@@ -15,6 +15,7 @@ from portfolio_agent.pipeline.failover import (
     _GROQ_MAX_SLEEP_SECS,
 )
 from portfolio_agent.pipeline.json_parsing import _extract_json_array
+from portfolio_agent.pipeline.prompt_date import with_today
 from portfolio_agent.pipeline.prompt_templates import _BATCH_SIZE, _BATCH_FUND_PROMPT
 
 
@@ -180,7 +181,7 @@ async def _run_fundamentals_llm_batches(
         )
 
         data_blocks = "\n\n".join(_format_data_block(prefetch[t]) for t in batch_tickers)
-        prompt      = _BATCH_FUND_PROMPT.format(n=len(batch_tickers), data_blocks=data_blocks)
+        prompt      = with_today(_BATCH_FUND_PROMPT.format(n=len(batch_tickers), data_blocks=data_blocks))
 
         analyses: list[dict] = []
         _batch_hard_failed = False

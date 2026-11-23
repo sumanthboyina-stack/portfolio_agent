@@ -1,0 +1,4 @@
+- [x] 1.1 Date helper
+- [x] 1.2 Chat system prompt and both chat prediction prompts
+- [x] 1.3 Daily APEX, batch and news-scorer prompts
+- [x] 2.1 Tests: helper, chat call, APEX prompt, scorer, and the call-site guard

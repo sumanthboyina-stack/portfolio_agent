@@ -10,6 +10,7 @@ from datetime import date
 
 from portfolio_agent.log import get_logger as _get_logger
 from portfolio_agent.pipeline.prompt_templates import _APEX_PROMPT_TEMPLATE, _build_macro_section
+from portfolio_agent.pipeline.prompt_date import with_today
 
 
 def _build_horizons_instruction(horizons: list[int], edges: dict | None = None) -> str:
@@ -472,12 +473,12 @@ async def _run_daily_apex(
             pass
         _macro_snap = _ctx_parsed.get("macro_snapshot") or {}
 
-        prompt = _APEX_PROMPT_TEMPLATE.format(
+        prompt = with_today(_APEX_PROMPT_TEMPLATE.format(
             ticker=ticker,
             ctx_json=ctx_map[ticker],
             macro_section=_build_macro_section(_macro_snap),
             horizons_instruction=_build_horizons_instruction(ticker_horizons.get(ticker, scheduled_horizons), edges_table),
-        )
+        ))
 
         # Under a random pool the ticker draws its model here (a hash of ticker + date: random across tickers, stable for the same one),
         # so the challenger below is compared against the model that really made the call.

@@ -17,6 +17,7 @@ from portfolio_agent.pipeline.failover import (
     _GROQ_MAX_SLEEP_SECS,
 )
 from portfolio_agent.pipeline.json_parsing import _extract_json_array
+from portfolio_agent.pipeline.prompt_date import with_today
 from portfolio_agent.pipeline.prompt_templates import _BATCH_SIZE, _BATCH_RESEARCH_PROMPT
 
 
@@ -268,7 +269,7 @@ async def _run_research_llm_batches(
         )
 
         data_blocks = "\n\n".join(_format_research_block(raw_data_map[t]) for t in chunk)
-        prompt      = _BATCH_RESEARCH_PROMPT.format(n=len(chunk), data_blocks=data_blocks)
+        prompt      = with_today(_BATCH_RESEARCH_PROMPT.format(n=len(chunk), data_blocks=data_blocks))
 
         analyses: list[dict] = []
         _res_batch_hard_failed = False

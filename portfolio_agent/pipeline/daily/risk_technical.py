@@ -209,6 +209,7 @@ async def _run_daily_risk_technical(portfolio_tickers: list[str], tracker=None) 
     from portfolio_agent.tools.risk_flags_db import needs_technical_refresh, risk_refresh_reason
     from portfolio_agent.tools.portfolio_risk import compute_portfolio_risk_context
     from portfolio_agent.pipeline.prompt_templates import _BATCH_SIZE, _BATCH_RISK_PROMPT
+    from portfolio_agent.pipeline.prompt_date import with_today
     from portfolio_agent.tools import holdings_db as repo
 
     if not portfolio_tickers:
@@ -301,10 +302,10 @@ async def _run_daily_risk_technical(portfolio_tickers: list[str], tracker=None) 
             chunk = due[k: k + _BATCH_SIZE]
             risk_call_i += 1
             numbers = {t: _precomputed_risk_numbers(holdings, t, stats, risk_ctx.get(t.upper())) for t, _ in chunk}
-            prompt = _BATCH_RISK_PROMPT.format(
+            prompt = with_today(_BATCH_RISK_PROMPT.format(
                 n=len(chunk),
                 data_blocks="\n\n".join(_format_risk_block(numbers[t], r) for t, r in chunk),
-            )
+            ))
             analyses: list[dict] = []
             try:
                 analyses, model_idx = await _call_risk_batch(prompt, chain, model_idx)

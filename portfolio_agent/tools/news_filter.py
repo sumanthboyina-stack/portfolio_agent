@@ -353,7 +353,8 @@ def _call_scorer(headlines_block: str) -> tuple[list[dict], str]:
 
     # Use only the non-ADK-tool models from the triage chain (direct completion call)
     chain = FAILOVER_CHAINS.get("triage", [])
-    messages = [{"role": "user", "content": _SCORER_PROMPT + headlines_block}]
+    from portfolio_agent.pipeline.prompt_date import with_today
+    messages = [{"role": "user", "content": with_today(_SCORER_PROMPT + headlines_block)}]
 
     for model_id, _, label in chain:
         try:

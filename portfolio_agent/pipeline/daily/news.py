@@ -17,6 +17,7 @@ from portfolio_agent.pipeline.failover import (
     _GROQ_MAX_SLEEP_SECS,
 )
 from portfolio_agent.pipeline.json_parsing import _extract_json_array
+from portfolio_agent.pipeline.prompt_date import with_today
 from portfolio_agent.pipeline.prompt_templates import (
     _BATCH_NEWS_SIZE,
     _BATCH_NEWS_PROMPT,
@@ -427,11 +428,11 @@ async def _run_news_llm_batches(
         )
 
         ticker_blocks = "\n\n".join(_format_news_block(t, articles_map[t]) for t in chunk)
-        prompt = _BATCH_NEWS_PROMPT.format(
+        prompt = with_today(_BATCH_NEWS_PROMPT.format(
             n=len(chunk),
             market_context=market_context,
             ticker_blocks=ticker_blocks,
-        )
+        ))
 
         analyses: list[dict] = []
         for _attempt in range(2):
@@ -515,10 +516,10 @@ async def _run_news_llm_batches(
                             error_type=type(exc).__name__, error=str(exc)[:200],
                         )
                         for st in chunk:
-                            sp = _BATCH_NEWS_PROMPT.format(
+                            sp = with_today(_BATCH_NEWS_PROMPT.format(
                                 n=1, market_context=market_context,
                                 ticker_blocks=_format_news_block(st, articles_map[st]),
-                            )
+                            ))
                             try:
                                 sr = await _litellm.acompletion(
                                     model=model_id,
