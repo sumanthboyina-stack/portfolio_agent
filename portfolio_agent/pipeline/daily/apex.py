@@ -523,12 +523,25 @@ async def _run_daily_apex(
             except Exception:
                 _trailing_10d = None
 
+            # The label APEX held for this ticker BEFORE this run writes anything, so an event-driven run can report
+            # what it changed to (read here because the new rows become "latest" the moment they are saved).
+            _prior_label = None
+            if _trig_ev_id is not None:
+                from portfolio_agent.events.detector import latest_shared_label
+                _prior_label = latest_shared_label(ticker)
+
             saved_horizons, save_errors = _save_horizon_rows(
                 ticker, result, horizons_needed,
                 has_news=_has_news, trailing_10d=_trailing_10d,
                 trig_type=_trig_type, trig_ev_id=_trig_ev_id,
             )
             saved_count = len(saved_horizons)
+
+            if _trig_ev_id is not None and saved_horizons:
+                # Second message of a material event: what the event-driven forecast now says. Best-effort; never
+                # raises, so it can't affect the run. Challenger rows never reach here (they are saved separately below).
+                from portfolio_agent.events.detector import notify_event_forecast
+                notify_event_forecast(_trig_ev_id, ticker, _prior_label, result.merged.get("recommendation"), saved_horizons)
 
             rec  = result.merged.get("recommendation", "?")
             conf = result.merged.get("confidence", "?")

@@ -139,7 +139,9 @@ def _triage_news_tickers(
         interesting_tickers & always_run
         | {e["ticker"] for e in always_run_with_news}
     )
-    scorer_input = [item for item in triage_interesting if item["ticker"] not in always_run]
+    # Held and extra tickers are scored too, so a severe item on a held ticker can raise a material-news event.
+    # The score never gates them: always_run_to_agent still sends them to the analyst whatever they score.
+    scorer_input = list(triage_interesting)
 
     s2_skipped = triage["skipped_count"]
     s2_no_news = sum(
@@ -157,7 +159,7 @@ def _triage_news_tickers(
     scores: dict[str, dict] = {}
     if scorer_input:
         log.info(
-            f"  Stage 3: scoring {len(scorer_input)} non-portfolio tickers in one Haiku call…",
+            f"  Stage 3: scoring {len(scorer_input)} tickers in one batched call…",
             event_type="fetch_start",
         )
         scores   = batch_score_materiality(scorer_input)
@@ -224,7 +226,11 @@ def _triage_news_tickers(
             _s2_reason = _item.get("reason", "")
             _s2_mk     = _item.get("matched_keywords") if _is_int else None
             if _t in always_run_to_agent:
-                _s3_dec, _s3_score, _s3_sum = "bypassed_portfolio", None, None
+                # advances regardless of score; the score (when it was scored) is recorded so the detector can use it
+                _sd = scores.get(_t) if _is_int else None
+                _s3_dec = "bypassed_portfolio"
+                _s3_score = _sd.get("score") if _sd else None
+                _s3_sum = _sd.get("summary") if _sd else None
             elif _is_int:
                 _sd       = scores.get(_t, {})
                 _s3_score = _sd.get("score")

@@ -460,8 +460,20 @@ def build_portfolio_assessment(ctx: RequestContext, ticker: str, *,
     if exposures is None:
         exposures = (compute_portfolio_exposures(ctx, holdings=holdings, policy=policy) if holdings is not None
                     else get_portfolio_exposures(ctx, cache=cache or _get_default_cache()))
+    return build_assessment_for_owner(ctx.actor, ticker, exposures=exposures, policy=policy, position_pct=position_pct)
 
-    owner_scope = f"user:{ctx.actor}"
+
+def build_assessment_for_owner(owner: str, ticker: str, *, exposures: PortfolioExposures, policy: EffectivePolicy,
+                               position_pct: float = DEFAULT_POSITION_PCT) -> PortfolioAssessment:
+    """
+    The same assessment from a trusted owner string plus that owner's own, already-computed *exposures* and *policy*, for
+    server-side callers that hold no RequestContext (a batch phase looping over owners, as the health snapshots do).
+    Authorization is the caller's: build_portfolio_assessment(ctx, ...) is the checked entry point.
+    """
+    ticker = ticker.upper().strip()
+    if not ticker:
+        raise ValueError("build_assessment_for_owner: ticker is required")
+    owner_scope = f"user:{owner}"
     is_held = ticker in exposures.per_holding_value
     reason_codes = list(exposures.reason_codes)
     profile_row = _candidate_profile(ticker)

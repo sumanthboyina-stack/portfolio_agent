@@ -184,6 +184,13 @@ ENGINE_TOOL_SCHEMAS: list[dict] = [
           "The user's open tax lots and realized gains (short/long term) from their ledger-managed accounts, optionally for one ticker. "
           "Snapshot-imported accounts have no lots and say so. Read-only.",
           {"ticker": {"type": "string", "description": "Optional ticker filter."}}),
+    _tool("get_position_view",
+          "The user's own position in one HELD ticker beside APEX's shared forecast for it: the forecast labels by horizon and their age, "
+          "the user's shares, value, weight, cost basis and unrealized gain, the short/long holding period of ledger lots, their own "
+          "concentration limits (over / within / unknown), their action permission, a neutral relation between the forecast direction and "
+          "the limits, and what the stored view said last time. Information only: the forecast never sees the user's holdings. Use for "
+          "'how does the forecast look for my NVDA position', 'am I over my limit on X and what is the forecast'.",
+          {"ticker": {"type": "string"}}, ["ticker"]),
     _tool("get_investor_profile",
           "The user's own investor profile as the app applies it: risk profile, where it came from, the quiz cap, emergency reserve and "
           "whether they are above their cap. Read-only.", {}),
@@ -207,7 +214,7 @@ SYNTHESIS_TRIGGER_TOOLS = frozenset(ENGINE_TOOL_NAMES | {
 
 # Tools that read the owner's own data: a turn that used one gets the stronger synthesis model (Phase 4).
 OWNER_SCOPED_ENGINE_TOOLS = frozenset({"get_personal_opportunities", "recommend_cash_allocation", "simulate_hypothetical_trades",
-                                       "get_fund_lookthrough", "get_tax_lots_and_gains", "get_investor_profile"})
+                                       "get_fund_lookthrough", "get_tax_lots_and_gains", "get_investor_profile", "get_position_view"})
 
 
 # ── 1. Opportunities for me ───────────────────────────────────────────────────
@@ -654,6 +661,38 @@ def _get_investor_profile(owner, ctx, **_):
                 note="Read-only. Change it on the Investor profile page; the chat cannot.")
 
 
+# ── 8b. Position view ─────────────────────────────────────────────────────────
+
+def _get_position_view(owner, ctx, ticker="", **_):
+    if not owner or ctx is None or getattr(ctx, "actor", None) != owner:
+        return _no_account()
+    t = str(ticker or "").upper().strip()
+    if not t:
+        return {"source": "none", "as_of": None, "note": "A ticker is required."}
+    from portfolio_agent.services.account_service import NotAuthorized
+    from portfolio_agent.tools import position_views_db
+    from portfolio_agent.tools.position_view import build_position_view
+    try:
+        view = build_position_view(ctx, t)
+    except NotAuthorized:
+        return _no_account()
+    if view is None:
+        return _env("local DB: your holdings", date.today().isoformat(), ticker=t, held=False,
+                    note=f"You do not hold {t} in a real (non-paper) account, so there is no position view.")
+    previous = None
+    try:
+        row = position_views_db.latest_before(owner, t, view["as_of"])
+        if row:
+            previous = {"view_date": row["view_date"], "relation": row["relation"],
+                        "forecast_labels": [f["label"] for f in row["view"].get("forecast", {}).get("horizons", [])]}
+    except Exception:
+        previous = None
+    return _env("local DB: your holdings + shared APEX forecasts (read-only, nothing is fetched or sent)", view["as_of"],
+                ticker=t, held=True, view=view, previous_stored_view=previous,
+                note="Information only, not advice. The forecast is market-only; your holdings, cost and limits are shown beside it, "
+                     "never fed into it.")
+
+
 # ── 9. Macro calendar ─────────────────────────────────────────────────────────
 
 def _get_macro_calendar(owner, ctx, days_ahead=14, **_):
@@ -718,6 +757,7 @@ _RUNNERS = {
     "get_trade_plan_odds": _get_trade_plan_odds,
     "get_tax_lots_and_gains": _get_tax_lots_and_gains,
     "get_investor_profile": _get_investor_profile,
+    "get_position_view": _get_position_view,
     "get_macro_calendar": _get_macro_calendar,
     "get_sec_filings": _get_sec_filings,
 }

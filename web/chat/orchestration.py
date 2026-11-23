@@ -112,6 +112,7 @@ These query the local portfolio database and return real pipeline results:
 | "what are the odds this plan works", stop/target for a bullish call | `get_trade_plan_odds` |
 | "my cost basis", "my gains", "which lots would I sell" | `get_tax_lots_and_gains` |
 | "what is my risk profile / emergency reserve" | `get_investor_profile` |
+| "how does the forecast look for my NVDA", "am I over my limit on X and what does APEX say", my position vs the forecast | `get_position_view` |
 | "what is coming up this week/month" (Fed, jobs, CPI) | `get_macro_calendar` |
 | "latest 10-K / 10-Q / 8-K", earnings guidance | `get_sec_filings` |
 
@@ -698,4 +699,15 @@ def _extract_json(text: str) -> dict:
                 return json.loads(m.group(1))
             except json.JSONDecodeError:
                 continue
+    # A model that answers with the prediction as bare JSON (no code fence) and nested objects (weights_used,
+    # panel_summary, ...) matches none of the patterns above, and the page would then print the raw JSON as the answer.
+    # Walk the text and decode the first object that carries a "recommendation".
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, _ = decoder.raw_decode(text, m.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "recommendation" in obj:
+            return obj
     return {}

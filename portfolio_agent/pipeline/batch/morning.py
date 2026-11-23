@@ -281,6 +281,21 @@ async def run_batch_morning(
     except Exception as _snap_exc:
         log.warning(f"  [scoring_snapshot] Phase skipped — {_snap_exc}", event_type="warning")
 
+    log.info("\n── Phase 5.6: Position Views (held tickers) ────────────────────", event_type="phase_start")
+    if tracker:
+        tracker.start_phase("position_views", total=1)
+    try:
+        from portfolio_agent.services.position_view_service import snapshot_all_owners as _position_views
+        _pv = _position_views()
+        _pv_note = "  ".join(f"{k} {v}" for k, v in _pv.items() if v) or "no portfolios"
+        log.info(f"  [position_view] {_pv_note}", event_type="summary")
+        if tracker:
+            tracker.finish_phase("position_views", 1, _pv.get("failed", 0), note=_pv_note)
+    except Exception as _pv_exc:
+        log.warning(f"  [position_view] Phase skipped — {_pv_exc}", event_type="warning")
+        if tracker:
+            tracker.finish_phase("position_views", 0, 1, note=str(_pv_exc)[:120])
+
     log.info("\n── Price History Backfill ──────────────────────────────────────", event_type="phase_start")
     if tracker:
         tracker.start_phase("price_backfill", total=1)

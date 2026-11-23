@@ -359,6 +359,39 @@ def render_trade_plan_and_sizing(ticker: str) -> None:
         return
 
 
+def render_position_view(ticker: str) -> None:
+    """
+    For a ticker the signed-in owner HOLDS, their position beside APEX's SHARED forecast: forecast labels and age, shares, weight,
+    cost basis and unrealized gain, their own limits, and their action permission. Deterministic and read-only (tools.position_view):
+    the forecast never sees this data and the text is information, not an instruction. A ticker they do not hold, or an owner with no
+    portfolio, shows nothing; a failure shows nothing rather than breaking the card.
+    """
+    from portfolio_agent.tools.position_view import build_position_view
+    from web.auth import current_context
+
+    try:
+        view = build_position_view(current_context("web:chat"), ticker.upper())
+    except Exception:
+        return
+    if not view:
+        return
+    pos, fc = view["position"], view["forecast"]
+    st.markdown("**Your position vs the shared forecast**")
+    st.write(view["summary"])
+    cols = st.columns(4)
+    cols[0].metric("Shares", f"{pos['shares']:,.4g}")
+    cols[1].metric("Weight", f"{pos['weight_pct']:.1f}%" if isinstance(pos.get("weight_pct"), (int, float)) else "n/a")
+    cols[2].metric("Cost basis", f"${pos['cost_basis_total']:,.0f}" if pos.get("cost_basis_total") else "unknown")
+    cols[3].metric("Unrealized", f"{pos['unrealized_gain_pct']:+.1f}%" if pos.get("unrealized_gain_pct") is not None else "unknown")
+    over = [l for l in view["limits"] if l["status"] == "over"]
+    if over:
+        st.warning("Over your own limit: " + ", ".join(
+            f"{l['name'].replace('_', ' ')} ({l['actual_pct']:.1f}% vs {l['limit_pct']:.1f}%)" for l in over
+            if isinstance(l.get("actual_pct"), (int, float)) and isinstance(l.get("limit_pct"), (int, float))) or "a concentration limit")
+    st.caption("Information only, not investment advice. The forecast is market-only and never sees your holdings; "
+               f"your position, cost and limits are shown beside it. Forecast direction: {fc['direction']}.")
+
+
 def _render_prediction_card(data: dict, elapsed: float = 0.0,
                              show_history: bool = True) -> None:
     rec   = data.get("recommendation", "HOLD")

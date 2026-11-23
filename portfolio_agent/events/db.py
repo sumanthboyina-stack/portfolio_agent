@@ -111,6 +111,13 @@ def insert_event(
         return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+def get_event(event_id: int) -> Optional[dict]:
+    """One trigger_events row by id, or None."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM trigger_events WHERE id = ?", [event_id]).fetchone()
+    return dict(row) if row else None
+
+
 def get_pending_events(today: str, min_severity: int = 1) -> list[dict]:
     """Return all unprocessed events detected today with severity >= min_severity."""
     with _db() as c:

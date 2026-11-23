@@ -108,7 +108,7 @@ def test_all_ten_new_tools_are_registered_and_dispatch():
     names = {t["function"]["name"] for t in _CHAT_TOOLS}
     assert ENGINE_TOOL_NAMES == {"get_personal_opportunities", "recommend_cash_allocation", "simulate_hypothetical_trades",
                                  "get_fund_lookthrough", "get_valuation", "get_trade_plan_odds", "get_tax_lots_and_gains",
-                                 "get_investor_profile", "get_macro_calendar", "get_sec_filings"} <= names
+                                 "get_investor_profile", "get_position_view", "get_macro_calendar", "get_sec_filings"} <= names
     assert run("not_a_tool").get("error", "").startswith("Unknown tool")
 
 

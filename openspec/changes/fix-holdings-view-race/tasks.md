@@ -1,0 +1,3 @@
+- [x] 1.1 Skip rebuilding an up-to-date `holdings` view; make drop and create race-tolerant
+- [x] 1.2 Regression tests (threaded connections, up-to-date vs stale view), confirmed failing on the old code
+- [x] 1.3 Full suite compared with the known pre-existing failures

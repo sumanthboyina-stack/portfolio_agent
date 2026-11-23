@@ -287,9 +287,24 @@ def _object_type(conn: sqlite3.Connection, name: str) -> str | None:
     return row[0] if row else None
 
 
+def _norm_sql(sql: str | None) -> str:
+    return " ".join((sql or "").split())
+
+
+def _view_is_current(conn: sqlite3.Connection) -> bool:
+    """True when the stored `holdings` view is exactly the current definition."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'holdings'").fetchone()
+    return bool(row) and _norm_sql(row[0]) == _norm_sql(_HOLDINGS_VIEW)
+
+
 def _create_schema(conn: sqlite3.Connection) -> None:
-    if _object_type(conn, "holdings") == "view":
-        conn.execute("DROP VIEW holdings")          # recreated below from the current definition
+    # Every new connection runs this, from several threads and processes at once (web sessions, batches). The view is only
+    # dropped and rebuilt when its stored definition is out of date: rebuilding an up-to-date view on every connection left a
+    # window in which another connection's query failed with "no such view: holdings". The drop and create are also
+    # tolerant of another connection getting there first.
+    view_current = _view_is_current(conn)
+    if _object_type(conn, "holdings") == "view" and not view_current:
+        conn.execute("DROP VIEW IF EXISTS holdings")          # recreated below from the current definition
     for ddl in _SCHEMA:
         conn.execute(ddl)
     conn.execute("INSERT OR IGNORE INTO portfolios (owner) VALUES (?)", [LOCAL_OWNER])
@@ -300,7 +315,12 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _migrate_ledger(conn)
     # Indexes on rebuilt tables come after the migrations, once the final shape is in place.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_instrument ON positions (instrument_id)")
-    conn.execute(_HOLDINGS_VIEW)
+    if not (view_current and _view_is_current(conn)):
+        try:
+            conn.execute(_HOLDINGS_VIEW)
+        except sqlite3.OperationalError as exc:
+            if "already exists" not in str(exc) or not _view_is_current(conn):
+                raise                                   # a stale view that someone else left behind is a real problem
 
 
 def _migrate_legacy_holdings(conn: sqlite3.Connection) -> None:

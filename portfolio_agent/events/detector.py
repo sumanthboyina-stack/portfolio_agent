@@ -91,6 +91,67 @@ def _emit(owner: str, event: dict, note: str = "", relation: set[str] | None = N
                   detailed=detailed, severity=severity, link="/Predictions")
 
 
+def latest_shared_label(ticker: str) -> str | None:
+    """APEX's latest SHARED, non-challenger recommendation label for the ticker (shared scope passed explicitly, so a
+    private or challenger row can never be returned), or None. Never raises."""
+    try:
+        from portfolio_agent.tools.prediction_db import SHARED_SCOPES, get_latest_prediction
+        pred = get_latest_prediction(ticker, scopes=SHARED_SCOPES)
+        return (pred.recommendation or None) if pred else None
+    except Exception:
+        return None
+
+
+def _forecast_label_text(prior: str | None, new: str | None) -> str:
+    if not new:
+        return ""
+    if not prior:
+        return f"Forecast label: {new}."
+    if prior == new:
+        return f"Forecast label unchanged: {new}."
+    return f"Forecast label: {prior} -> {new}."
+
+
+def notify_event_forecast(event_id: int | None, ticker: str, prior_label: str | None, new_label: str | None,
+                          horizons: list[int]) -> bool:
+    """
+    The second message of a material event. Once the event-driven forecast for *ticker* has been saved, tell everyone who
+    holds or watches it what APEX's label became: "HOLD -> SELL", "unchanged: HOLD", or the first label when there was none.
+    Same audience, routing, severity filter, quiet hours and content level as the first alert (each person judged by
+    their own settings); de-duplicated per event (event_forecast:<event id>) so a re-run never repeats it. The brief carries
+    only the ticker and the label — no amounts or position sizes — and is information, never a trade instruction.
+    Returns True when at least one notification was enqueued. Never raises: a failure here must not touch the forecast run.
+    """
+    if event_id is None or not new_label:
+        return False
+    try:
+        from portfolio_agent.events.db import get_event
+        from portfolio_agent.services.notification_service import notify
+        ev = get_event(event_id) or {}
+        severity = int(ev.get("severity") or 3)
+        ticker = ticker.upper()
+        text = _forecast_label_text(prior_label, new_label)
+        horizon_text = ", ".join(f"{h}d" for h in sorted(horizons))
+        enqueued = False
+        for owner, relation in _affected_owners(ticker).items():
+            try:
+                note = _action_permission_note(ticker, owner)
+                brief = f"APEX: {ticker} - forecast updated after material news. {text}{note} Open APEX for details."
+                why = " and ".join(sorted({"hold": "you hold it", "watch": "you watch it"}[k] for k in relation if k in ("hold", "watch")))
+                detailed = (f"{brief}\n\nHorizons re-forecast: {horizon_text}." if horizon_text else brief) + \
+                           (f"\n\nYou are getting this because {why}." if why else "")
+                result = notify(owner, "MARKET_EVENT", dedup_key=f"event_forecast:{event_id}", title=f"APEX: {ticker} - forecast updated",
+                                brief=brief, detailed=detailed, severity=severity, link="/Predictions")
+                enqueued = enqueued or bool(result.get("enqueued"))
+            except Exception as exc:
+                _log.warning(f"  [notify] event {event_id} forecast follow-up not offered to one owner ({type(exc).__name__})",
+                             event_type="warning")
+        return enqueued
+    except Exception as exc:
+        _log.warning(f"  [notify] event {event_id} forecast follow-up not offered ({type(exc).__name__})", event_type="warning")
+        return False
+
+
 def _maybe_notify(event: dict) -> bool:
     """
     Offer one detected event to every owner who holds or watches its ticker. Each owner's own preferences, routing,

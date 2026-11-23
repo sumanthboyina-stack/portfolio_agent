@@ -350,6 +350,8 @@ def test_no_notification_text_is_ever_a_trade_instruction():
     assert len(texts) >= 6
     for t in texts:
         # the approval's own action label ("(BUY)": what the approval covers) is information, not an instruction
-        assert not re.search(r"\b(buy|sell|short[- ]sell|trim|add to|should)\b", t.replace("pre-clearance", "").replace("(BUY)", ""), re.IGNORECASE), t
+        # likewise the follow-up's "Forecast label: HOLD -> SELL" / "unchanged: BUY": APEX's own label, framed as a label
+        cleaned = re.sub(r"Forecast label(?: unchanged)?: [A-Z_]+(?: -> [A-Z_]+)?", "", t.replace("pre-clearance", "").replace("(BUY)", ""))
+        assert not re.search(r"\b(buy|sell|short[- ]sell|trim|add to|should)\b", cleaned, re.IGNORECASE), t
     briefs = [r["body_brief"] for r in _rows()]
     assert all("$" not in b and "52,000" not in b for b in briefs)
